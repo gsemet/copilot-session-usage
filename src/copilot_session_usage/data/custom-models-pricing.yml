@@ -1,0 +1,22 @@
+# Custom model pricing for models not included in the GitHub Copilot plan.
+# Prices are per 1 million tokens.
+#
+# Use this file to define pricing for models that appear in debug logs
+# but are not part of the standard Copilot model catalog.
+#
+# Column keys:
+# - model: The model name as it appears in the debug log.
+# - provider: The model provider (optional, defaults to "custom").
+# - input: Input token price per 1M tokens.
+# - cached_input: Cached input token price per 1M tokens.
+# - output: Output token price per 1M tokens.
+# - notes: Optional notes about the model.
+
+- model: 'Kimi-K2.6-azure'
+  provider: custom
+  input: $0.00
+  cached_input: $0.00
+  output: $0.00
+  notes: >
+    Azure-hosted Kimi K2.6 model. Pricing not tracked in Copilot plan;
+    set to $0 as a placeholder. Update if actual per-token pricing becomes available.
