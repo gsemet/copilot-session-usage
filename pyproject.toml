@@ -1,0 +1,71 @@
+[project]
+name = "copilot-session-usage"
+dynamic = ["version"]
+description = "Usage and cost analytics for GitHub Copilot and Copilot-CLI session logs"
+authors = [{ name = "Gaetan Semet", email = "gaetan@xeberon.net" }]
+requires-python = ">=3.10"
+readme = "README.md"
+license = "MIT"
+dependencies = ["click>=8.0", "ruamel.yaml>=0.18.0"]
+
+[project.scripts]
+copilot-session-usage = "copilot_session_usage.cli:cli"
+
+[project.urls]
+Homepage = "https://github.com/gsemet/copilot-session-usage"
+Documentation = "https://copilot-session-usage.readthedocs.io"
+Repository = "https://github.com/gsemet/copilot-session-usage"
+Issues = "https://github.com/gsemet/copilot-session-usage/issues"
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/copilot_session_usage"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "--cov=copilot_session_usage",
+    "--cov-fail-under=85",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "pytest-mock",
+    "pytest-xdist",
+    "ruff",
+    "ty",
+    "mypy",
+    "sphinx",
+    "sphinx-autodoc-typehints",
+    "sphinx-click",
+    "furo",
+    "myst-parser",
+    "okf-schema",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "D", "UP", "B", "C4", "SIM"]
+ignore = ["D100", "D104", "D103", "D203", "D213"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true

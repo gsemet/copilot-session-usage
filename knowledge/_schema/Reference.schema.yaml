@@ -1,0 +1,27 @@
+$schema: "http://json-schema.org/draft-07/schema#"
+title: Reference
+description: A reference document with structured data, schemas, or lookup tables.
+type: object
+required: [type, title, description]
+properties:
+  type:
+    description: Document type — must be "Reference" for reference documents.
+    type: string
+    const: Reference
+  title:
+    description: Human-readable title of the reference.
+    type: string
+    minLength: 1
+  description:
+    description: Short summary of what data or schema the reference defines.
+    type: string
+    minLength: 1
+  tags:
+    description: Keywords for categorization and search.
+    type: array
+    items: { type: string }
+  timestamp:
+    description: ISO 8601 creation or last-updated timestamp.
+    type: string
+    format: date-time
+additionalProperties: false

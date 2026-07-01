@@ -1,0 +1,27 @@
+$schema: "http://json-schema.org/draft-07/schema#"
+title: Playbook
+description: A step-by-step guide, script collection, or actionable workflow.
+type: object
+required: [type, title, description]
+properties:
+  type:
+    description: Document type — must be "Playbook" for playbook documents.
+    type: string
+    const: Playbook
+  title:
+    description: Human-readable title of the playbook.
+    type: string
+    minLength: 1
+  description:
+    description: Short summary of what the playbook helps the reader accomplish.
+    type: string
+    minLength: 1
+  tags:
+    description: Keywords for categorization and search.
+    type: array
+    items: { type: string }
+  timestamp:
+    description: ISO 8601 creation or last-updated timestamp.
+    type: string
+    format: date-time
+additionalProperties: false
