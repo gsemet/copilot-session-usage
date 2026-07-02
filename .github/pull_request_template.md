@@ -10,5 +10,5 @@ Brief description of the change.
 
 - [ ] `just preflight` passes locally
 - [ ] Tests added or updated for new behavior
-- [ ] Documentation updated (README, docs/, or knowledge/)
+- [ ] Documentation updated (README, docs/)
 - [ ] Knowledge base validated (`just knowledge-validate`)
