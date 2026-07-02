@@ -1,5 +1,11 @@
 ## Unreleased
 
+### Feat
+
+- accurate AIC cost computation using nanoAiu and cache_write
+
+## v0.2.1 (2026-07-02)
+
 ## v0.2.0 (2026-07-02)
 
 ### Fix

@@ -56,9 +56,10 @@ This is the only event type that contains cost information. All other events (`s
 | Field | Type | Meaning |
 |-------|------|---------|
 | `attrs.model` | string | Model identifier (e.g., `Kimi-K2.6-azure`, `gpt-4o`) |
-| `attrs.inputTokens` | integer | Tokens consumed from context window |
+| `attrs.inputTokens` | integer | **Total** prompt tokens sent — cached and non-cached combined |
 | `attrs.outputTokens` | integer | Tokens generated |
-| `attrs.cachedTokens` | integer | Tokens served from prompt cache |
+| `attrs.cachedTokens` | integer | Subset of `inputTokens` served from the provider's prompt cache (billed at the lower `cached_input` rate) |
+| `attrs.copilotUsageNanoAiu` | integer | VS Code's own AIC cost for this call in nano-units (÷ 1e9 = AIC, ÷ 1e11 = USD). Present for all Copilot-plan models (Claude, GPT, etc.). Absent for Azure-hosted models not billed via Copilot AIC (e.g. `Kimi-K2.6-azure`). |
 | `attrs.ttft` | integer | Time to first token (ms) |
 
 > **Mixed-model sessions:** A single `.jsonl` file can contain `llm_request` events from

@@ -116,6 +116,7 @@ preflight:
     just typecheck
     just tests-coverage
     just knowledge-lint
+    just knowledge-validate
     just docs
 
 # ─── Cleanup ──────────────────────────────────────────────────────────────────

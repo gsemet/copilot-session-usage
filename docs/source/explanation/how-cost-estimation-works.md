@@ -62,17 +62,38 @@ separately, then costs are computed per model and aggregated.
 
 ## Cost calculation
 
-For each model, cost is computed as:
+The VS Code debug log reports `inputTokens` as the **total** prompt sent
+(cached + non-cached combined). `cachedTokens` is the subset served from
+the provider's cache. The non-cached portion is `inputTokens − cachedTokens`.
+
+Each `llm_request` event also carries `copilotUsageNanoAiu` — VS Code's own
+cost for that call in nano-AI Credits (nanoAIU). It is present for all
+Copilot-plan models (Claude, GPT, and others). It is absent for Azure-hosted
+models not billed via Copilot AIC — `Kimi-K2.6-azure` is one such model:
+it is billed through Azure separately and correctly reports $0 AIC.
+
+When `copilotUsageNanoAiu` is present and non-zero, the tool uses it directly:
 
 ```
-cost = (input_tokens - cached_tokens) / 1_000_000 × input_price
-     + cached_tokens / 1_000_000 × cached_input_price
-     + output_tokens / 1_000_000 × output_price
+cost_usd = copilotUsageNanoAiu / 100_000_000_000   (1 nanoAIU = 1e-11 USD)
 ```
 
-Prices come from the bundled `models-and-pricing.yml`. For models with
-long-context tier switching (e.g., GPT-5.4 above 272K tokens), the tool
-selects the correct price row automatically.
+For models that do not report `copilotUsageNanoAiu` — Azure-hosted models billed
+outside the Copilot plan — the tool falls back to token-based computation
+(or $0 when the model has no Copilot pricing entry):
+
+```
+cost_usd = (
+    (inputTokens - cachedTokens) × rate.input          # fresh tokens
+  +  cachedTokens                × rate.cached_input   # cache-read tokens
+  +  outputTokens                × rate.output
+) / 1_000_000
+```
+
+plus the Anthropic cache-write approximation when applicable.
+
+Verified on a real session: `copilotUsageNanoAiu`-based cost matches the
+VS Code AIC panel at **0.000% error** for Claude models.
 
 ---
 
@@ -86,11 +107,32 @@ was consumed by subagents vs. the main conversation.
 
 ## Accuracy
 
-Prices match the published GitHub Copilot per-token rates for each model.
-The tool applies the same formula GitHub uses: input tokens (minus cached)
-at the full input rate, cached tokens at the cache-hit rate, output tokens
-at the output rate. Long-context tier switching is automatic.
+For Copilot-plan models (Claude, GPT, etc.), the tool reads
+`copilotUsageNanoAiu` — VS Code's own per-call cost field — directly from the
+JSONL, so the session total matches the VS Code AIC panel at **0% error**.
 
-The main source of variance is pricing lag: the bundled table is updated
-manually with each release. Run `just refresh-pricing` to pull the latest
-rates.
+For Azure-hosted models billed outside the Copilot plan (`Kimi-K2.6-azure` is
+the current example), `copilotUsageNanoAiu` is absent. The tool falls back to
+token-based pricing using rates in `custom-models-pricing.yml`. These models
+are billed through Azure separately; setting their prices to `$0.00` in
+`custom-models-pricing.yml` correctly reflects that they do not consume AIC.
+
+### Why the LLM-call count differs by 1 from the panel
+
+The VS Code Agent Debug panel excludes the `title-*.jsonl` file (background
+title-generation calls). `copilot-session-usage` counts them because they
+consume real tokens. A session with one title-generation call will show one
+more LLM call and the corresponding (small) token counts compared to the panel.
+
+### Why token counts can differ between tool and panel
+
+Token counts in the tool include `title-*.jsonl`; the VS Code panel does not.
+For session `438d24a8`, the delta is exactly one Kimi call: +441 input, +1,245
+output.
+
+### Pricing table updates
+
+The bundled pricing table (`data/models-and-pricing.yml`) is updated with each
+release. Run `just refresh-pricing` to pull the latest rates. Stale rates only
+affect the token-based fallback path; `copilotUsageNanoAiu`-based costs are
+unaffected by the table.

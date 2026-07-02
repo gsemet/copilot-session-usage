@@ -5,7 +5,8 @@ description: How subagent costs are logged, aggregated, and correlated with
   parent sessions.
 tags: [subagents, cost-aggregation, parallel-agents, runSubagent]
 timestamp: 2026-06-30T22:00:00Z
-links: [guides/automation-scripts.md, reference/debug-log-format.md]
+links: [findings/title-jsonl-not-counted-as-model-turn.md,
+    guides/automation-scripts.md, reference/debug-log-format.md]
 backlinks: [concepts/overview.md, guides/automation-scripts.md,
     guides/cost-optimization.md, reference/debug-log-format.md]
 ---
@@ -56,15 +57,22 @@ contains only:
 
 ```
 debug-logs/<session-id>/
-├── main.jsonl              ← all token data lives here
-├── title-<uuid>.jsonl      ← title generation (negligible tokens)
+├── main.jsonl              ← primary token data lives here
+├── title-<uuid>.jsonl      ← title generation (small but real token cost)
 ├── models.json
 ├── system_prompt_*.json
 └── tools_*.json
 ```
 
-In this case **100% of token costs are in `main.jsonl`**. The debug panel
-totals match exactly what `main.jsonl` contains. This is common for:
+In this case **the vast majority of token costs are in `main.jsonl`**. The
+VS Code debug panel totals also match `main.jsonl` because the panel excludes
+`title-*.jsonl`. However, `copilot-session-usage` counts `title-*.jsonl` as
+well — these calls consume real tokens (typically a few hundred input +
+~1,000 output from a cheap model) and are intentionally included in the
+tool's total. See Finding
+[`title-jsonl-not-counted-as-model-turn`](../findings/title-jsonl-not-counted-as-model-turn.md).
+
+This is common for:
 
 - Interactive exploration and Q&A
 - Single-step tasks that don't parallelize

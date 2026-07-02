@@ -149,6 +149,48 @@ def test_find_session_dir_by_id_not_found(tmp_path):
     assert vscode.find_session_dir_by_id("missing", [ws_root]) is None
 
 
+# ─── find_session_metadata_by_id ──────────────────────────────────────────────
+
+
+def test_find_session_metadata_by_id_found(tmp_path):
+    ws_root = tmp_path / "workspaceStorage"
+    ws_root.mkdir()
+    ws_dir = ws_root / "hash123"
+    ws_dir.mkdir()
+    _make_vscdb(
+        ws_dir,
+        {
+            "s1": {
+                "sessionId": "sess-abc",
+                "title": "My Session Title",
+                "timing": {"created": 1_000_000},
+            }
+        },
+    )
+    meta = vscode.find_session_metadata_by_id("sess-abc", [ws_root])
+    assert meta is not None
+    assert meta["session_id"] == "sess-abc"
+    assert meta["title"] == "My Session Title"
+
+
+def test_find_session_metadata_by_id_not_found(tmp_path):
+    ws_root = tmp_path / "workspaceStorage"
+    ws_root.mkdir()
+    ws_dir = ws_root / "hash123"
+    ws_dir.mkdir()
+    _make_vscdb(
+        ws_dir,
+        {
+            "s1": {
+                "sessionId": "sess-abc",
+                "title": "Other",
+                "timing": {"created": 1_000_000},
+            }
+        },
+    )
+    assert vscode.find_session_metadata_by_id("missing", [ws_root]) is None
+
+
 # ─── find_sessions_by_title ───────────────────────────────────────────────────
 
 

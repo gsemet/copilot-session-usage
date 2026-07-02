@@ -18,7 +18,8 @@ steps: [Pick a session directory that contains at least one runSubagent-*.jsonl
 expected_signals: ['Tool total equals independent sum (no double-count, no omission).',
   Each subagent subtotal is attributed to its own runSubagent id.]
 max_runs: 2
-status: proposed
+status: superseded
+superseded_by: [structures/subagent-cost-tracking.md]
 links: []
 backlinks: []
 ---

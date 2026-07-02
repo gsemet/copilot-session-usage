@@ -4,38 +4,23 @@ description: >-
   A description of how an object, system, or artifact is composed and how its
   parts relate — the "how it works" view. Distinct from a Concept (an idea) and
   from a Playbook (a procedure to perform).
-type: object
-properties:
-  type:
-    description: Document type — must be "Structure".
-    type: string
-    const: Structure
-  title:
-    description: Human-readable title of the structure.
-    type: string
-    minLength: 1
-  description:
-    description: Short summary of what is described.
-    type: string
-    minLength: 1
-  tags:
-    description: Keywords for categorization and search.
-    type: array
-    items: { type: string }
-  timestamp:
-    description: When the structure was documented or last updated (ISO 8601).
-    type: string
-    format: date-time
-  subject:
-    description: The object or system whose structure is described.
-    type: string
-  parts:
-    description: The components, fields, or sub-parts that make up the subject.
-    type: array
-    items: { type: string }
-  related_concepts:
-    description: IDs of Concept documents that explain the ideas behind this structure.
-    type: array
-    items: { type: string }
-required: [type, title, description]
-additionalProperties: false
+allOf:
+  - $ref: "Base.schema.yaml"
+  - type: object
+    properties:
+      type:
+        description: Document type — must be "Structure".
+        type: string
+        const: Structure
+      subject:
+        description: The object or system whose structure is described.
+        type: string
+      parts:
+        description: The components, fields, or sub-parts that make up the subject.
+        type: array
+        items: { type: string }
+      related_concepts:
+        description: IDs of Concept documents that explain the ideas behind this structure.
+        type: array
+        items: { type: string }
+    required: [type]

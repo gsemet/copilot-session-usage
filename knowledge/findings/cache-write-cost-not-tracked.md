@@ -1,0 +1,83 @@
+---
+type: Finding
+title: "cache_write approximated via fresh_input — matches AIC panel exactly"
+description: >
+  VS Code JSONL logs and agent-traces.db both lack cache_creation token counts.
+  Approximating cache_creation as fresh_input = inputTokens - cachedTokens and
+  billing only the incremental delta (cache_write - input) / 1M produces an exact
+  match to the VS Code AIC panel. Implemented in estimate_cost since v0.3.
+tags: [cache-write, anthropic, aic, approximation, verified, implemented]
+confidence: confirmed
+context: >-
+  Verified by comparing copilot-session-usage output against the VS Code AIC
+  panel for multiple sessions. The approximation holds exactly when cache_write
+  is computed as fresh_input = inputTokens - cachedTokens.
+timestamp: 2026-07-02T23:00:00Z
+links: []
+backlinks: [structures/cache-cost-approximation.md]
+---
+
+# Finding: cache_write approximated via fresh_input — now implemented
+
+## Background
+
+VS Code JSONL debug logs do not expose `cacheCreationTokens`. The OTel SQLite
+store (`agent-traces.db`) has the schema column
+`gen_ai.usage.cache_creation.input_tokens` but VS Code does not populate it for
+Claude models (verified: 0 rows on VS Code 1.103+).
+
+## The correct approximation
+
+The key insight is that the current code already bills fresh input at `input_per_m`.
+The incremental cost of cache creation is only the **difference**:
+
+```
+delta = fresh_input × (cache_write_per_m − input_per_m) / 1_000_000
+```
+
+where `fresh_input = inputTokens − cachedTokens`.
+
+## Verification on session 438d24a8 (Claude Sonnet 4.6, 92 calls)
+
+| Metric | Value |
+|--------|-------|
+| Fresh input | 720,122 tokens |
+| Delta formula: 720K × ($3.75 − $3.00)/M | **$0.5401** |
+| Old tool cost (without delta) | $5.3636 |
+| New tool cost (with delta) | $5.9037 |
+| VS Code panel (590.37 AIC ÷ 100) | **$5.9037** |
+
+Exact match.
+
+Note: an earlier version of this finding incorrectly computed
+`720K × $3.75/M = $2.70` (the full rate, not the incremental delta),
+concluding a "5× overestimate". That calculation was wrong; the delta
+formula gives the correct $0.54 increment.
+
+## OTel DB fallback
+
+`vscode.agent_traces_db_paths()` discovers all existing `agent-traces.db` paths
+across Code / Code - Insiders on every platform. When VS Code eventually populates
+`gen_ai.usage.cache_creation.input_tokens`, reading the exact value from the DB
+will replace the proxy. The DB is not required for current operation.
+
+## Implication
+
+For Anthropic-heavy sessions, `copilot-session-usage` now closely matches the
+VS Code AIC panel. The approximation is accurate when the full context prefix is
+cached (typical for long Copilot sessions). Sessions that do not cache (very short
+contexts, no system prompt) may over-count by at most `fresh_input × delta_rate`.
+
+## Follow-up fix: model_breakdown now uses nano_aiu (2026-07-03)
+
+The `model_breakdown` (per-model cost table) previously used `estimate_cost`
+(token-based) on `global_per_model`, which did not accumulate `nano_aiu`.
+This created a minor inconsistency: the session total used nano_aiu while the
+per-model breakdown used token-based pricing (difference ~$0.0002 for session
+438d24a8 = 0.001% error, well within tolerance).
+
+Fix: `global_per_model` now accumulates `nano_aiu` from each file's per-model
+bucket, and `model_breakdown` calls `estimate_cost_for_file({model: v}, pricing)`
+instead of `estimate_cost(...)`. Both session total and per-model breakdown now
+use the same nano_aiu-first logic. Verified: model_breakdown sum = $14.709213
+matches session total $14.7092 (rounding only).

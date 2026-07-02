@@ -5,60 +5,45 @@ description: >-
   observed and believed at a point in time. The body is immutable once written;
   only lifecycle frontmatter (status, contradicted_by, superseded_by) may be
   appended later.
-type: object
-properties:
-  type:
-    description: Document type — must be "Finding".
-    type: string
-    const: Finding
-  title:
-    description: Human-readable title stating the claim.
-    type: string
-    minLength: 1
-  description:
-    description: One-sentence summary of the finding.
-    type: string
-    minLength: 1
-  tags:
-    description: Keywords for categorization and search.
-    type: array
-    items: { type: string }
-  timestamp:
-    description: When the finding was observed (ISO 8601).
-    type: string
-    format: date-time
-  confidence:
-    description: How confident the reporter was at the time of recording.
-    type: string
-    enum: [low, medium, high]
-  context:
-    description: >-
-      What the reporter believed and the situation at the time — the honest
-      basis for the finding, including assumptions that may later prove wrong.
-    type: string
-    minLength: 1
-  status:
-    description: Lifecycle state. Appended non-destructively; the body never changes.
-    type: string
-    enum: [active, contradicted, superseded]
-  derived_from:
-    description: ID of the Experiment whose run produced this finding, if any.
-    type: string
-  contradicts:
-    description: IDs of earlier Findings this finding contradicts.
-    type: array
-    items: { type: string }
-  supersedes:
-    description: IDs of earlier Findings this finding replaces.
-    type: array
-    items: { type: string }
-  contradicted_by:
-    description: IDs of later Findings that contradict this one (appended by review).
-    type: array
-    items: { type: string }
-  superseded_by:
-    description: IDs of later Findings that replace this one (appended by review).
-    type: array
-    items: { type: string }
-required: [type, title, description, timestamp, confidence, context]
-additionalProperties: false
+allOf:
+  - $ref: "Base.schema.yaml"
+  - type: object
+    properties:
+      type:
+        description: Document type — must be "Finding".
+        type: string
+        const: Finding
+      confidence:
+        description: How confident the reporter was at the time of recording.
+        type: string
+        enum: [low, medium, high, confirmed]
+      context:
+        description: >-
+          What the reporter believed and the situation at the time — the honest
+          basis for the finding, including assumptions that may later prove wrong.
+        type: string
+        minLength: 1
+      status:
+        description: Lifecycle state. Appended non-destructively; the body never changes.
+        type: string
+        enum: [active, contradicted, superseded]
+      derived_from:
+        description: ID of the Experiment whose run produced this finding, if any.
+        type: string
+      contradicts:
+        description: IDs of earlier Findings this finding contradicts.
+        type: array
+        items: { type: string }
+      supersedes:
+        description: IDs of earlier Findings this finding replaces.
+        type: array
+        items: { type: string }
+      contradicted_by:
+        description: IDs of later Findings that contradict this one (appended by review).
+        type: array
+        items: { type: string }
+      superseded_by:
+        description: IDs of later Findings that replace this one (appended by review).
+        type: array
+        items: { type: string }
+    required: [type, timestamp, confidence, context]

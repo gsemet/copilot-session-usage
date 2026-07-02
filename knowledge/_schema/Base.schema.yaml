@@ -23,4 +23,13 @@ properties:
     description: ISO 8601 creation or last-updated timestamp.
     type: string
     format: date-time
-additionalProperties: false
+  links:
+    type: array
+    items:
+      type: string
+    description: "Bundle-relative paths this concept links to"
+  backlinks:
+    type: array
+    items:
+      type: string
+    description: "Bundle-relative paths of concepts that link to this one"
