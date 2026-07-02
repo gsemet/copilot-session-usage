@@ -1,4 +1,6 @@
-# guides
+# Playbook
+
+A step-by-step guide, script collection, or actionable workflow.
 
 - [Automation Scripts for Cost Extraction](automation-scripts.md) — Reference Python patterns for extracting and aggregating session costs from Copilot debug logs.  [Playbook]
 - [Cost Optimization Patterns](cost-optimization.md) — Common patterns that inflate session costs and strategies to reduce them.  [Playbook]

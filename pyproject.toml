@@ -16,7 +16,7 @@ copilot-session-usage = "copilot_session_usage.cli:cli"
 
 [project.urls]
 Homepage = "https://github.com/gsemet/copilot-session-usage"
-Documentation = "https://copilot-session-usage.readthedocs.io"
+Documentation = "https://copilot-session-usage.readthedocs.io/en/stable/"
 Repository = "https://github.com/gsemet/copilot-session-usage"
 Issues = "https://github.com/gsemet/copilot-session-usage/issues"
 
@@ -52,9 +52,11 @@ dev = [
     "sphinx-autobuild",
     "sphinx-autodoc-typehints",
     "sphinx-click",
+    "sphinx-design>=0.6.1",
+    "sphinx-copybutton>=0.5.2",
     "furo",
     "myst-parser",
-    "okf-schema>=0.4",
+    "okf-schema>=0.5",
     "commitizen",
 ]
 

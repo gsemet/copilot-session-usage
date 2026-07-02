@@ -13,6 +13,8 @@ context: >-
   subagent named runSubagent-<...>.jsonl. Assumed to hold across platforms and
   future extension versions, which may not remain true.
 status: active
+links: []
+backlinks: []
 ---
 
 # Subagent Logs Use runSubagent Prefix

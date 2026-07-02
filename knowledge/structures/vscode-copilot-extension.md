@@ -1,10 +1,13 @@
 ---
 type: Structure
 title: VS Code Copilot Extension Debug Logs
-description: How the VS Code Copilot extension stores session logs and what 
+description: How the VS Code Copilot extension stores session logs and what
   agents need to know about path resolution.
 tags: [vscode, copilot-extension, paths, workspace-storage, cross-platform]
 timestamp: 2026-07-01T00:00:00Z
+links: [concepts/copilot-cli.md, reference/debug-log-format.md]
+backlinks: [concepts/copilot-cli.md, reference/debug-log-format.md,
+    structures/session-discovery-algorithm.md]
 ---
 
 # VS Code Copilot Extension Debug Logs

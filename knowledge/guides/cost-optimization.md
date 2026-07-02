@@ -5,6 +5,8 @@ description: Common patterns that inflate session costs and strategies to reduce
   them.
 tags: [optimization, cost-reduction, context-window, caching]
 timestamp: 2026-06-30T22:00:00Z
+links: [guides/automation-scripts.md, structures/subagent-cost-tracking.md]
+backlinks: []
 ---
 
 # Cost Optimization Patterns

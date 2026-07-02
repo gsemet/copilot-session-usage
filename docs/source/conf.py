@@ -17,6 +17,8 @@ extensions = [
     "sphinx.ext.napoleon",
     "sphinx_click",
     "sphinx_autodoc_typehints",
+    "sphinx_design",
+    "sphinx_copybutton",
 ]
 
 myst_enable_extensions = ["colon_fence", "deflist"]
@@ -24,6 +26,8 @@ myst_enable_extensions = ["colon_fence", "deflist"]
 html_theme = "furo"
 html_title = f"copilot-session-usage {version}"
 html_static_path = ["_static"]
+html_css_files = ["custom.css"]
+html_js_files = ["changelog.js"]
 
 autodoc_member_order = "bysource"
 autodoc_typehints = "description"

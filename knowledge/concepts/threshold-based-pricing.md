@@ -1,10 +1,12 @@
 ---
 type: Concept
 title: Threshold-Based Pricing
-description: How multi-tier model pricing (e.g. GPT-5.4 ≤272K vs >272K) is 
+description: How multi-tier model pricing (e.g. GPT-5.4 ≤272K vs >272K) is
   parsed from YAML and applied during cost estimation.
 tags: [pricing, thresholds, tiers, yaml, github-copilot]
 timestamp: 2026-07-02T10:00:00Z
+links: []
+backlinks: []
 ---
 
 # Threshold-Based Pricing
