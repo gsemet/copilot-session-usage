@@ -51,5 +51,5 @@ Each subagent spawns a new context. Parallel subagents multiply costs:
 
 ## Related
 
-- [Subagent Cost Tracking](./subagent-cost-tracking.md) — Understanding subagent cost distribution
-- [Automation Scripts](../guides/automation-scripts.md) — Scripts to measure before/after
+- [Subagent Cost Tracking](../structures/subagent-cost-tracking.md) — Understanding subagent cost distribution
+- [Automation Scripts](./automation-scripts.md) — Scripts to measure before/after

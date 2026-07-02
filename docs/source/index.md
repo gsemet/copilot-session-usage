@@ -31,6 +31,7 @@ copilot-session-usage batch 10
 
 cli
 api
+changelog
 ```
 
 ## Indices and tables

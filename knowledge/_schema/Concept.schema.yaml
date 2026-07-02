@@ -1,27 +1,20 @@
 $schema: "http://json-schema.org/draft-07/schema#"
 title: Concept
 description: A core concept or explanatory document in the knowledge base.
-type: object
-required: [type, title, description]
-properties:
-  type:
-    description: Document type — must be "Concept" for concept documents.
-    type: string
-    const: Concept
-  title:
-    description: Human-readable title of the concept.
-    type: string
-    minLength: 1
-  description:
-    description: Short summary of what the concept explains.
-    type: string
-    minLength: 1
-  tags:
-    description: Keywords for categorization and search.
-    type: array
-    items: { type: string }
-  timestamp:
-    description: ISO 8601 creation or last-updated timestamp.
-    type: string
-    format: date-time
-additionalProperties: false
+allOf:
+  - $ref: "Base.schema.yaml"
+  - type: object
+    properties:
+      type:
+        description: Document type — must be "Concept" for concept documents.
+        type: string
+        const: Concept
+      related_concepts:
+        description: IDs of other Concept documents that deepen or contrast this idea.
+        type: array
+        items: { type: string }
+      prerequisites:
+        description: Concepts a reader should understand before engaging with this one.
+        type: array
+        items: { type: string }
+    required: [type]

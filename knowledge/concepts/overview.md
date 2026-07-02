@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Session Cost Tracking Overview
-description: How VS Code Copilot tracks and exposes per-session token costs for 
+description: How VS Code Copilot tracks and exposes per-session token costs for
   coding agents.
 tags: [cost-tracking, tokens, vscode, copilot]
 timestamp: 2026-06-30T22:00:00Z
@@ -44,4 +44,4 @@ Each session directory contains:
 ## Related
 
 - [Debug Log Format](../reference/debug-log-format.md) — Event structure details
-- [Subagent Cost Tracking](./subagent-cost-tracking.md) — How subagent costs are aggregated
+- [Subagent Cost Tracking](../structures/subagent-cost-tracking.md) — How subagent costs are aggregated
