@@ -206,6 +206,7 @@ def _load_custom_pricing(ref_dir: Path | None = None) -> dict[str, list[dict]] |
                 "input_per_m": _parse_price(entry.get("input", "0")),
                 "output_per_m": _parse_price(entry.get("output", "0")),
                 "cache_per_m": _parse_price(entry.get("cached_input", "0")),
+                "cache_write_per_m": _parse_price(entry.get("cache_write", "0")),
                 "tier": entry.get("tier", "Default"),
                 "threshold_tokens": None,
             }
@@ -272,6 +273,7 @@ def _build_pricing_from_yaml(entries: list[dict], source: str) -> dict:
             "input_per_m": _parse_price(entry.get("input", "0")),
             "output_per_m": _parse_price(entry.get("output", "0")),
             "cache_per_m": _parse_price(entry.get("cached_input", "0")),
+            "cache_write_per_m": _parse_price(entry.get("cache_write", "0")),
             "tier": entry.get("tier", "Default"),
             "threshold_tokens": _parse_threshold(entry.get("threshold", "")),
         }
@@ -437,26 +439,57 @@ def model_uses_fallback_pricing(model: str, pricing: dict[str, Any]) -> bool:
 def estimate_cost(
     input_tok: int, output_tok: int, cached_tok: int, model: str, pricing: dict[str, Any]
 ) -> float:
-    """Compute estimated USD cost. Cached tokens are billed at cache_per_m rate.
+    """Compute estimated USD cost.
 
-    Threshold-aware: the correct tier is selected automatically based on
-    ``input_tok`` so long-context requests use the higher rate.
+    Threshold-aware: the correct pricing tier is selected automatically based
+    on ``input_tok`` so long-context requests use the higher rate.
+
+    For models with a ``cache_write_per_m`` rate (Anthropic only), the
+    incremental cache-creation cost is approximated as::
+
+        fresh_input * (cache_write_per_m - input_per_m) / 1_000_000
+
+    VS Code debug logs do not expose ``cacheCreationTokens`` directly; fresh
+    input (``inputTokens - cachedTokens``) is used as a proxy.  For typical
+    Anthropic sessions the full context prefix is cached, so this closely
+    matches the billed amount.  Models without ``cache_write`` (OpenAI,
+    Google) have ``cache_write_per_m == 0``, so the delta is zero for them.
     """
     rates = _get_model_rates(model, input_tok, pricing)
     billable_input = max(0, input_tok - cached_tok)
-    return (  # type: ignore[no-any-return]
+    cost = (
         billable_input * rates.get("input_per_m", 0.0) / 1_000_000
         + cached_tok * rates.get("cache_per_m", 0.0) / 1_000_000
         + output_tok * rates.get("output_per_m", 0.0) / 1_000_000
     )
+    # Approximate incremental cache-creation cost for Anthropic models.
+    # OTel DB (agent-traces.db) has the exact field but is not always present
+    # and VS Code does not yet populate it; this proxy is accurate when the
+    # full context prefix is cached, which is the common case.
+    cache_write_per_m = rates.get("cache_write_per_m", 0.0)
+    input_per_m = rates.get("input_per_m", 0.0)
+    if cache_write_per_m > input_per_m:
+        cost += billable_input * (cache_write_per_m - input_per_m) / 1_000_000
+    return cost  # type: ignore[no-any-return]
 
 
 def estimate_cost_for_file(per_model: dict[str, dict[str, int]], pricing: dict[str, Any]) -> float:
-    """Sum costs per-model bucket — avoids mis-attribution when a file uses >1 model."""
-    return sum(
-        estimate_cost(v["input"], v["output"], v["cached"], model, pricing)
-        for model, v in per_model.items()
-    )
+    """Sum costs per-model bucket.
+
+    Prefers ``copilotUsageNanoAiu`` (VS Code's own billing figure, converted
+    from nano-AIC to USD) when the field is populated.  Falls back to
+    ``estimate_cost`` (token-based) for models that do not report it (e.g.
+    Kimi, older VS Code versions).
+    """
+    total = 0.0
+    for model, v in per_model.items():
+        nano = v.get("nano_aiu", 0)
+        if nano:
+            # 1 nanoAiu = 1e-9 AIC = 1e-11 USD
+            total += nano / 1e11
+        else:
+            total += estimate_cost(v["input"], v["output"], v["cached"], model, pricing)
+    return total
 
 
 def _dominant_model(per_model: dict[str, dict]) -> str:
@@ -517,12 +550,13 @@ def parse_jsonl_file(path: Path) -> dict:
                     model: str = attrs.get("model", "") or "unknown"
                     stats["models"].add(model)
                     bucket = stats["per_model"].setdefault(
-                        model, {"input": 0, "output": 0, "cached": 0, "calls": 0}
+                        model, {"input": 0, "output": 0, "cached": 0, "calls": 0, "nano_aiu": 0}
                     )
                     bucket["input"] += inp
                     bucket["output"] += out
                     bucket["cached"] += cch
                     bucket["calls"] += 1
+                    bucket["nano_aiu"] += attrs.get("copilotUsageNanoAiu") or 0
                     if ts is not None:
                         if stats["first_llm_ts"] is None or ts < stats["first_llm_ts"]:
                             stats["first_llm_ts"] = ts
@@ -641,11 +675,18 @@ def analyze_session(session_dir: Path, pricing: dict) -> dict:
     for stats in file_results:
         for model, tokens in stats.get("per_model", {}).items():
             if model not in global_per_model:
-                global_per_model[model] = {"input": 0, "output": 0, "cached": 0, "calls": 0}
+                global_per_model[model] = {
+                    "input": 0,
+                    "output": 0,
+                    "cached": 0,
+                    "calls": 0,
+                    "nano_aiu": 0,
+                }
             global_per_model[model]["input"] += tokens["input"]
             global_per_model[model]["output"] += tokens["output"]
             global_per_model[model]["cached"] += tokens["cached"]
             global_per_model[model]["calls"] += tokens["calls"]
+            global_per_model[model]["nano_aiu"] += tokens.get("nano_aiu", 0)
 
     subagents: list[dict] = []
     total_usd = 0.0
@@ -700,9 +741,7 @@ def analyze_session(session_dir: Path, pricing: dict) -> dict:
                 "output_tokens": v["output"],
                 "cached_tokens": v["cached"],
                 "llm_calls": v["calls"],
-                "estimated_usd": round(
-                    estimate_cost(v["input"], v["output"], v["cached"], model, pricing), 6
-                ),
+                "estimated_usd": round(estimate_cost_for_file({model: v}, pricing), 6),
             }
             for model, v in global_per_model.items()
         ],

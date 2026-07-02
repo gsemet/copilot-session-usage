@@ -11,6 +11,8 @@
 
 Extract VS Code Copilot session cost KPIs (tokens, estimated USD, model, duration) from local debug logs.
 
+**Full documentation:** [copilot-session-usage.readthedocs.io](https://copilot-session-usage.readthedocs.io/)
+
 ## Installation
 
 ```bash
@@ -166,8 +168,6 @@ just docs
 # Serve docs with auto-reload
 just docs-serve
 ```
-
-**Full documentation:** [copilot-session-usage.readthedocs.io](https://copilot-session-usage.readthedocs.io/)
 
 ## License
 

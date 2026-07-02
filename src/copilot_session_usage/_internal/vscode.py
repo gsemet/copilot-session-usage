@@ -56,6 +56,43 @@ def default_workspace_storage_roots() -> list[Path]:
     return [p for p in candidates if p.is_dir()]
 
 
+def agent_traces_db_paths() -> list[Path]:
+    r"""Return existing ``agent-traces.db`` paths for the current platform.
+
+    VS Code stores this OTel SQLite database in ``globalStorage``::
+
+        <Code>/User/globalStorage/github.copilot-chat/agent-traces.db
+
+    The database is only created when
+    ``github.copilot.chat.otel.dbSpanExporter.enabled`` is ``true``
+    (VS Code 1.103+ required).  It is absent on WSL2 remote installs,
+    CI environments, and older VS Code versions.
+
+    Only paths that actually exist are returned.  Callers must handle an
+    empty list gracefully — the OTel DB is never required for operation.
+    """
+    home = Path.home()
+    candidates: list[Path] = []
+    rel = Path("User", "globalStorage", "github.copilot-chat", "agent-traces.db")
+
+    if sys.platform == "darwin":
+        base = home / "Library" / "Application Support"
+        for variant in ("Code", "Code - Insiders"):
+            candidates.append(base / variant / rel)
+
+    elif sys.platform == "win32":
+        appdata = Path(os.environ.get("APPDATA") or (home / "AppData" / "Roaming"))
+        for variant in ("Code", "Code - Insiders"):
+            candidates.append(appdata / variant / rel)
+
+    else:
+        xdg = Path(os.environ.get("XDG_CONFIG_HOME") or (home / ".config"))
+        for variant in ("Code", "Code - Insiders"):
+            candidates.append(xdg / variant / rel)
+
+    return [p for p in candidates if p.is_file()]
+
+
 def _get_workspace_folder(ws_dir: Path) -> str:
     """Return the actual folder path for a workspace storage directory."""
     ws_json = ws_dir / "workspace.json"
@@ -133,6 +170,23 @@ def find_session_dir_by_id(session_id: str, ws_roots: list[Path]) -> Path | None
             log_dir = candidate / "GitHub.copilot-chat" / "debug-logs" / session_id
             if log_dir.exists():
                 return log_dir
+    return None
+
+
+def find_session_metadata_by_id(session_id: str, ws_roots: list[Path]) -> dict | None:
+    """Search ws_roots for session metadata (including title) by session_id.
+
+    Returns the session dict from the workspace DB, or None if not found.
+    """
+    for ws_dir in ws_roots:
+        if not ws_dir.is_dir():
+            continue
+        for candidate in ws_dir.iterdir():
+            if not candidate.is_dir():
+                continue
+            for session in get_sessions_from_workspace(candidate, use_cache=True):
+                if session.get("session_id") == session_id:
+                    return session
     return None
 
 

@@ -113,6 +113,9 @@ def latest(
         raise click.ClickException(msg)
     pricing = core.load_pricing()
     result = core.analyze_session(session_dir, pricing)
+    session_id = session_dir.name
+    meta = vscode.find_session_metadata_by_id(session_id, ws_roots)
+    result["title"] = meta.get("title") if meta else result.get("title")
     detail = core.resolve_detail(detail, format_)
     out_path = Path(output_path) if output_path else None
     core.emit(
@@ -194,6 +197,8 @@ def analyze_by_id(
         raise click.ClickException(msg)
     pricing = core.load_pricing()
     result = core.analyze_session(session_dir, pricing)
+    meta = vscode.find_session_metadata_by_id(session_id, ws_roots)
+    result["title"] = meta.get("title") if meta else result.get("title")
     detail = core.resolve_detail(detail, format_)
     out_path = Path(output_path) if output_path else None
     core.emit(core.shape_session(result, detail), core.normalize_format(format_), out_path)

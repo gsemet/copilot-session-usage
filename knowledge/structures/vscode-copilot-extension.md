@@ -5,7 +5,9 @@ description: How the VS Code Copilot extension stores session logs and what
   agents need to know about path resolution.
 tags: [vscode, copilot-extension, paths, workspace-storage, cross-platform]
 timestamp: 2026-07-01T00:00:00Z
-links: [concepts/copilot-cli.md, reference/debug-log-format.md]
+links: [concepts/copilot-cli.md,
+    findings/title-jsonl-not-counted-as-model-turn.md,
+    reference/debug-log-format.md]
 backlinks: [concepts/copilot-cli.md, reference/debug-log-format.md,
     structures/session-discovery-algorithm.md]
 ---
@@ -76,6 +78,12 @@ When the session ID is unknown, match by:
 | Total Cached Input Tokens | Sum of `cachedTokens` across ALL `.jsonl` files |
 | Tool Calls | Count of `tool_call` events in `main.jsonl` |
 | Model Turns | Count of `model_turn` events |
+
+> **Panel vs tool divergence for `title-*.jsonl`:** The debug panel excludes
+> the `title-<uuid>.jsonl` file from all metrics (calls, tokens, model turns).
+> `copilot-session-usage` counts it — typically +1 call and a few hundred
+> input + ~1,000 output tokens per session, billed at the title model's rate.
+> See Finding [`title-jsonl-not-counted-as-model-turn`](../findings/title-jsonl-not-counted-as-model-turn.md).
 
 ## Related
 

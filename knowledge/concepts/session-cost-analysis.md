@@ -6,7 +6,7 @@ description: Process of extracting token usage metrics from Copilot debug logs
 tags: [cost-analysis, tokens, pricing, debug-logs]
 timestamp: 2026-06-30T22:00:00Z
 links: []
-backlinks: []
+backlinks: [structures/cache-cost-approximation.md]
 ---
 
 # Session Cost Analysis

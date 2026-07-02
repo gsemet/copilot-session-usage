@@ -18,5 +18,6 @@
   cached_input: $0.00
   output: $0.00
   notes: >
-    Azure-hosted Kimi K2.6 model. Pricing not tracked in Copilot plan;
-    set to $0 as a placeholder. Update if actual per-token pricing becomes available.
+    Azure-hosted Kimi K2.6 deployment. Not part of GitHub Copilot AIC billing —
+    billed through Azure separately. Correctly reported as $0 AIC.
+    The Copilot-plan Kimi model is 'Kimi K2.7 Code' in models-and-pricing.yml.

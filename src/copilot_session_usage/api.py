@@ -114,7 +114,10 @@ def find_session_by_id(
     if session_dir is None:
         return None
     pricing = core.load_pricing()
-    return core.analyze_session(session_dir, pricing)
+    result = core.analyze_session(session_dir, pricing)
+    meta = vscode.find_session_metadata_by_id(session_id, workspace_roots)
+    result["title"] = meta.get("title") if meta else result.get("title")
+    return result
 
 
 def analyze_latest(
@@ -148,6 +151,9 @@ def analyze_latest(
         raise ValueError("No session debug logs found in workspace storage.")
     pricing = core.load_pricing()
     result = core.analyze_session(session_dir, pricing)
+    session_id = session_dir.name
+    meta = vscode.find_session_metadata_by_id(session_id, workspace_roots)
+    result["title"] = meta.get("title") if meta else result.get("title")
     return core.shape_session(result, detail)
 
 
