@@ -76,7 +76,7 @@ build:
 
 # Refresh bundled pricing data from upstream
 refresh-pricing:
-    uv run -- python -c "from copilot_session_usage._internal.core import refresh_pricing; refresh_pricing()"
+    uv run -- python scripts/refresh_pricing.py
 
 # ─── Knowledge (OKF) ──────────────────────────────────────────────────────────
 

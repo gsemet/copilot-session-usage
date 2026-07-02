@@ -1,7 +1,7 @@
 ---
 type: Structure
 title: Session Discovery Algorithm
-description: How a coding agent finds the correct session directory when the
+description: How a coding agent finds the correct session directory when the 
   user only knows the title, date, or workspace from the Agent Debug Panel.
 tags: [discovery, algorithm, vscode, state, sqlite]
 timestamp: 2026-07-01T00:00:00Z

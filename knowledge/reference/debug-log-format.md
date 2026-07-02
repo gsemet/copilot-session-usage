@@ -1,7 +1,7 @@
 ---
 type: Reference
 title: Debug Log JSONL Format
-description: Structure of Copilot debug log events, with focus on fields
+description: Structure of Copilot debug log events, with focus on fields 
   relevant to cost extraction.
 tags: [jsonl, debug-logs, events, schema]
 timestamp: 2026-06-30T22:00:00Z
