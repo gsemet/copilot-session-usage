@@ -41,16 +41,26 @@ def _resolve_agent(agent: str) -> str:
     help="Provider to use for session discovery. 'cli' is not yet implemented.",
 )
 @click.pass_context
-def cli(ctx: click.Context, workspace_storage: str | None, agent: str) -> None:
-    r"""Extract VS Code Copilot session cost KPIs from local debug logs.
+def cli(
+    ctx: click.Context,
+    workspace_storage: str | None,
+    agent: str,
+) -> None:
+    """Extract VS Code Copilot session cost KPIs from local debug logs.
 
-    \b
-      analyze PATH   Analyze one session by its debug-log directory.
-      latest         Analyze the most recently modified session.
-      find TITLE     Find and analyze a session by title (fuzzy match).
-      id SESSION_ID  Analyze a session by exact UUID.
-      list           List recent sessions (metadata only, no cost).
-      batch N        Analyze the N most recent sessions in one pass.
+    Reads JSONL debug logs written by the VS Code Copilot Chat extension to
+    compute per-session token counts, estimated USD spend, model breakdowns,
+    duration, and subagent attribution.
+
+    Sessions are auto-discovered from the VS Code workspaceStorage directory
+    (override with --workspace-storage). Use the subcommands below to analyze
+    individual sessions, the latest session, or batches.
+
+    Output is controlled by --detail (minimal / compact / full) and
+    --format (table / json / detailed). Key capabilities include per-model
+    pricing with cache-hit discounts, threshold-aware tier switching for
+    long-context models, multi-model session handling, subagent cost
+    attribution, and cross-platform support (macOS, Linux, Windows, WSL2).
     """
     ctx.ensure_object(dict)
     ctx.obj["workspace_storage"] = workspace_storage
@@ -60,7 +70,12 @@ def cli(ctx: click.Context, workspace_storage: str | None, agent: str) -> None:
 @cli.command()
 @core.analysis_options
 @click.argument("log_dir", metavar="PATH")
-def analyze(log_dir: str, detail: str, format_: str, output_path: str | None) -> None:
+def analyze(
+    log_dir: str,
+    detail: str,
+    format_: str,
+    output_path: str | None,
+) -> None:
     """Analyze a single session by its debug-log directory PATH.
 
     PATH is typically the VS Code Copilot session debug log directory —
@@ -84,7 +99,11 @@ def analyze(log_dir: str, detail: str, format_: str, output_path: str | None) ->
 )
 @click.pass_context
 def latest(
-    ctx: click.Context, workspace: str | None, detail: str, format_: str, output_path: str | None
+    ctx: click.Context,
+    workspace: str | None,
+    detail: str,
+    format_: str,
+    output_path: str | None,
 ) -> None:
     """Analyze the most recently modified session across all workspaces."""
     ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
@@ -96,13 +115,19 @@ def latest(
     result = core.analyze_session(session_dir, pricing)
     detail = core.resolve_detail(detail, format_)
     out_path = Path(output_path) if output_path else None
-    core.emit(core.shape_session(result, detail), core.normalize_format(format_), out_path)
+    core.emit(
+        core.shape_session(result, detail),
+        core.normalize_format(format_),
+        out_path,
+    )
 
 
 @cli.command(name="find")
 @core.analysis_options
 @click.option(
-    "--workspace", metavar="PATH", help="Only consider sessions from this workspace folder."
+    "--workspace",
+    metavar="PATH",
+    help="Only consider sessions from this workspace folder.",
 )
 @click.argument("title")
 @click.pass_context
@@ -131,7 +156,7 @@ def find_by_title(
         for m in matches[:10]:
             ts = core.ts_to_iso(m.get("created_ms")) or "unknown"
             click.echo(f"  {ts}  {m['title']!r}  (id: {m['session_id']})", err=True)
-        click.echo("Re-run with: id <SESSION_ID>", err=True)
+        click.echo("Re-run with: copilot-session-usage id <SESSION_ID>", err=True)
         sys.exit(1)
     match = matches[0]
     session_dir = Path(match["debug_log_dir"])
@@ -143,7 +168,11 @@ def find_by_title(
     result["title"] = match.get("title") or result.get("title")
     detail = core.resolve_detail(detail, format_)
     out_path = Path(output_path) if output_path else None
-    core.emit(core.shape_session(result, detail), core.normalize_format(format_), out_path)
+    core.emit(
+        core.shape_session(result, detail),
+        core.normalize_format(format_),
+        out_path,
+    )
 
 
 @cli.command(name="id")
@@ -151,7 +180,11 @@ def find_by_title(
 @click.argument("session_id")
 @click.pass_context
 def analyze_by_id(
-    ctx: click.Context, session_id: str, detail: str, format_: str, output_path: str | None
+    ctx: click.Context,
+    session_id: str,
+    detail: str,
+    format_: str,
+    output_path: str | None,
 ) -> None:
     """Analyze a session by its exact SESSION_ID (UUID)."""
     ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
@@ -169,7 +202,13 @@ def analyze_by_id(
 @cli.command(name="list")
 @core.format_option
 @core.output_option
-@click.option("--limit", type=int, default=20, show_default=True, help="Max sessions to return.")
+@click.option(
+    "--limit",
+    type=int,
+    default=20,
+    show_default=True,
+    help="Max sessions to return.",
+)
 @click.option(
     "--since", metavar="DATE", help="Only sessions created after DATE (YYYY-MM-DD or ISO 8601)."
 )
@@ -223,7 +262,11 @@ def batch(
     ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
     since_ms = core.parse_since_to_ms(since) if since else None
     sessions = vscode.list_recent_sessions(
-        ws_roots, limit=count, since_ms=since_ms, workspace_filter=workspace, require_logs=True
+        ws_roots,
+        limit=count,
+        since_ms=since_ms,
+        workspace_filter=workspace,
+        require_logs=True,
     )
     pricing = core.load_pricing()
     results: list[dict] = []

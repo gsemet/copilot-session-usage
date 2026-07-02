@@ -46,6 +46,7 @@ dev = [
     "ty",
     "mypy",
     "sphinx",
+    "sphinx-autobuild",
     "sphinx-autodoc-typehints",
     "sphinx-click",
     "furo",
