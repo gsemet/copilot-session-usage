@@ -4,6 +4,7 @@
 [![Coverage](https://img.shields.io/codecov/c/github/gsemet/copilot-session-usage)](https://codecov.io/gh/gsemet/copilot-session-usage)
 [![PyPI](https://img.shields.io/pypi/v/copilot-session-usage)](https://pypi.org/project/copilot-session-usage/)
 [![Python Versions](https://img.shields.io/pypi/pyversions/copilot-session-usage)](https://pypi.org/project/copilot-session-usage/)
+[![Docs](https://readthedocs.org/projects/copilot-session-usage/badge/?version=stable)](https://copilot-session-usage.readthedocs.io/en/stable/)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![Type checked](https://img.shields.io/badge/type%20checked-mypy%2Fty-blue.svg)](./)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -165,6 +166,8 @@ just docs
 # Serve docs with auto-reload
 just docs-serve
 ```
+
+**Full documentation:** [copilot-session-usage.readthedocs.io](https://copilot-session-usage.readthedocs.io/)
 
 ## License
 

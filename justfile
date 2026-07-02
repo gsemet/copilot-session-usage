@@ -57,12 +57,26 @@ tests-coverage:
 # ─── Documentation ────────────────────────────────────────────────────────────
 
 # Build Sphinx docs (regenerates CHANGELOG first)
+[group("docs")]
 docs: changelog
     uv run -- sphinx-build docs/source docs/_build
 
 # Serve docs locally (auto-reload)
+[group("docs")]
 docs-serve:
     uv run -- sphinx-autobuild docs/source docs/_build --watch src
+
+# Open built docs in browser (macOS)
+[group("docs")]
+[macos]
+docs-open:
+    open docs/_build/index.html
+
+# Open built docs in browser (Linux)
+[group("docs")]
+[linux]
+docs-open:
+    xdg-open docs/_build/index.html
 
 # ─── Build & release ──────────────────────────────────────────────────────────
 

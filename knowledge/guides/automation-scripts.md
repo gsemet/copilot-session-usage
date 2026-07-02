@@ -5,6 +5,8 @@ description: Where the real, maintained token-extraction logic lives, and how to
   reuse it instead of re-deriving it from scratch.
 tags: [automation, python, scripts, extraction]
 timestamp: 2026-07-01T00:00:00Z
+links: [reference/debug-log-format.md, structures/subagent-cost-tracking.md]
+backlinks: [guides/cost-optimization.md, structures/subagent-cost-tracking.md]
 ---
 
 # Automation Scripts for Cost Extraction

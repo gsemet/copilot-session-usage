@@ -1,10 +1,12 @@
 ---
 type: Playbook
 title: WSL2 Setup Guide
-description: Configure copilot-session-usage when running VS Code on Windows 
+description: Configure copilot-session-usage when running VS Code on Windows
   with WSL2, including path resolution and troubleshooting.
 tags: [wsl2, windows, setup, paths, troubleshooting]
 timestamp: 2026-06-30T22:00:00Z
+links: []
+backlinks: []
 ---
 
 # WSL2 Setup Guide

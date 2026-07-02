@@ -5,6 +5,9 @@ description: How session cost tracking differs when using copilot-cli instead of
   the VS Code extension.
 tags: [copilot-cli, cli, differences, limitations]
 timestamp: 2026-06-30T22:00:00Z
+links: [concepts/overview.md, reference/debug-log-format.md,
+    structures/vscode-copilot-extension.md]
+backlinks: [structures/vscode-copilot-extension.md]
 ---
 
 # Copilot CLI Differences

@@ -2,10 +2,12 @@
 type: Concept
 title: Multi-Session Efficiency Analytics — Idea Specification
 description: Cross-session analytics that group related VS Code Copilot sessions
-  into coding tasks, score subagent efficiency, and surface trends in cost, 
+  into coding tasks, score subagent efficiency, and surface trends in cost,
   latency, and behavior over time.
 tags: [idea, vscode, copilot, multi-session, efficiency, trends, analytics, kpi]
 timestamp: 2026-07-01T00:00:00Z
+links: []
+backlinks: []
 ---
 
 # Multi-Session Efficiency Analytics — Idea Specification

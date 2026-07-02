@@ -10,15 +10,17 @@ hypothesis: >-
   Tokens consumed inside a runSubagent-*.jsonl stream are counted once, and the
   parent session total equals the sum of the main stream plus each subagent
   stream.
-steps: [Pick a session directory that contains at least one runSubagent-*.jsonl 
-    file., Run `copilot-session-usage analyze <session-dir> --detail full 
-    --format json`., Record the parent total tokens and the per-subagent token 
-    subtotals., Independently sum tokens from main.jsonl and each 
+steps: [Pick a session directory that contains at least one runSubagent-*.jsonl
+    file., Run `copilot-session-usage analyze <session-dir> --detail full
+    --format json`., Record the parent total tokens and the per-subagent token
+    subtotals., Independently sum tokens from main.jsonl and each
     runSubagent-*.jsonl., Compare the tool's total against the independent sum.]
 expected_signals: ['Tool total equals independent sum (no double-count, no omission).',
   Each subagent subtotal is attributed to its own runSubagent id.]
 max_runs: 2
 status: proposed
+links: []
+backlinks: []
 ---
 
 # Verify Subagent Cost Attribution

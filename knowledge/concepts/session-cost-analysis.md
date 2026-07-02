@@ -1,10 +1,12 @@
 ---
 type: Concept
 title: Session Cost Analysis
-description: Process of extracting token usage metrics from Copilot debug logs 
+description: Process of extracting token usage metrics from Copilot debug logs
   and estimating monetary cost based on per-model pricing.
 tags: [cost-analysis, tokens, pricing, debug-logs]
 timestamp: 2026-06-30T22:00:00Z
+links: []
+backlinks: []
 ---
 
 # Session Cost Analysis

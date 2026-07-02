@@ -1,10 +1,13 @@
 ---
 type: Structure
 title: Subagent Cost Tracking
-description: How subagent costs are logged, aggregated, and correlated with 
+description: How subagent costs are logged, aggregated, and correlated with
   parent sessions.
 tags: [subagents, cost-aggregation, parallel-agents, runSubagent]
 timestamp: 2026-06-30T22:00:00Z
+links: [guides/automation-scripts.md, reference/debug-log-format.md]
+backlinks: [concepts/overview.md, guides/automation-scripts.md,
+    guides/cost-optimization.md, reference/debug-log-format.md]
 ---
 
 # Subagent Cost Tracking
