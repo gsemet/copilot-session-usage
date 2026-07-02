@@ -43,6 +43,6 @@ When asked to extract costs from a Copilot CLI session:
 
 ## Related
 
-- [VS Code Copilot Extension](./vscode-copilot-extension.md) — The reference implementation
+- [VS Code Copilot Extension](../structures/vscode-copilot-extension.md) — The reference implementation
 - [Overview](./overview.md) — General principles that likely apply to both
 - [Debug Log Format](../reference/debug-log-format.md) — Event structure reference

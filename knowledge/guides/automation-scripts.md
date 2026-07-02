@@ -43,7 +43,7 @@ Because uppercase model names (`Kimi-K2.6-azure`) sort before lowercase ones
 (`claude-sonnet-4.6`) in plain string comparison, this silently under-priced
 mixed-model sessions by up to 2x. `core.analyze_session()` fixes this by
 bucketing tokens per model and pricing each bucket independently — see
-`knowledge/concepts/subagent-cost-tracking.md` for the full story and
+`knowledge/structures/subagent-cost-tracking.md` for the full story and
 `tests/test_cost_core.py::test_analyze_session_multi_model_correct_cost` for
 the regression test.
 
@@ -51,4 +51,4 @@ the regression test.
 
 - `scripts/_cost_core.py` — the actual, maintained implementation
 - [Debug Log Format](../reference/debug-log-format.md) — event schema reference
-- [Subagent Cost Tracking](../concepts/subagent-cost-tracking.md) — subagent aggregation details
+- [Subagent Cost Tracking](../structures/subagent-cost-tracking.md) — subagent aggregation details

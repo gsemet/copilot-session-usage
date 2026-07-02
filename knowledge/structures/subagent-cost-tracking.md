@@ -1,7 +1,7 @@
 ---
-type: Concept
+type: Structure
 title: Subagent Cost Tracking
-description: How subagent costs are logged, aggregated, and correlated with 
+description: How subagent costs are logged, aggregated, and correlated with
   parent sessions.
 tags: [subagents, cost-aggregation, parallel-agents, runSubagent]
 timestamp: 2026-06-30T22:00:00Z

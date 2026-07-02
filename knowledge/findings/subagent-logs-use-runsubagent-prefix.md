@@ -1,0 +1,36 @@
+---
+type: Finding
+title: Subagent Logs Use runSubagent Prefix
+description: >-
+  Subagent activity is recorded in separate JSONL files prefixed with
+  "runSubagent-" inside the session debug-logs directory.
+tags: [subagent, debug-logs, jsonl, filenames]
+timestamp: 2026-07-02T00:00:00Z
+confidence: high
+context: >-
+  Observed while inspecting VS Code Copilot session debug-log directories on
+  macOS in mid-2026. Each session folder held a main.jsonl plus one JSONL per
+  subagent named runSubagent-<...>.jsonl. Assumed to hold across platforms and
+  future extension versions, which may not remain true.
+status: active
+---
+
+# Subagent Logs Use runSubagent Prefix
+
+## What was observed
+
+Inside a session's `debug-logs/<session-id>/` directory, the main conversation
+is in `main.jsonl`, and each subagent invocation writes its own file named
+`runSubagent-<id>.jsonl`.
+
+## Why it matters
+
+Cost attribution relies on this naming: subagent streams are discovered by the
+`runSubagent-` prefix. If a future extension version changes the naming, this
+finding would be **contradicted** by a newer dated finding — this one stays as a
+record of what was true in mid-2026.
+
+## Caveats
+
+- Only verified on macOS with the extension version available at the time.
+- Not confirmed against Windows/Linux or older/newer extension builds.

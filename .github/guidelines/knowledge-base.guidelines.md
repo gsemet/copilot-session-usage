@@ -1,105 +1,86 @@
 ---
 applyTo: "knowledge/**/*.md"
-description: "How coding agents maintain the OKF knowledge bundle in knowledge/."
+description: "The minimal rules a coding agent must follow to maintain the OKF knowledge bundle in knowledge/."
 ---
 
 # Knowledge Base Maintenance Guidelines
 
-The `knowledge/` directory is an [OKF](https://github.com/gsemet/okf-schema) (Open Knowledge Format) bundle. It is **not** bundled in the wheel — it lives at repo root for agent and maintainer reference only.
+`knowledge/` is an [OKF](https://github.com/gsemet/okf-schema) bundle. Each `.md`
+file has a `type` in its frontmatter that maps to a schema in `_schema/`. This
+document is the strict minimal rule set for maintaining it correctly.
 
-## What Is OKF?
+## 1. Choose the right type
 
-OKF is a lightweight convention for organizing markdown knowledge bases with validated YAML frontmatter. Each document has a `type` field that maps to a JSON Schema in `knowledge/_schema/`.
+| You want to record… | type | Folder | Nature |
+|---------------------|------|--------|--------|
+| A stable idea / "what is this?" | `Concept` | `concepts/` | Explanatory |
+| How an object is composed / works | `Structure` | `structures/` | Descriptive |
+| A standard or convention (agreed with humans) | `Principle` | `principles/` | Normative |
+| A step-by-step procedure to perform | `Playbook` | `guides/` | Procedural |
+| Exact values, fields, or lookup tables | `Reference` | `reference/` | Lookup |
+| What you observed/believed at time T | `Finding` | `findings/` | Empirical, dated |
+| A reusable procedure to test a claim | `Experiment` | `experiments/` | Template, run 1–2× |
 
-## Schema Files
+Rules of thumb:
 
-| Schema | For Documents | Purpose |
-|--------|--------------|---------|
-| `_schema/Concept.schema.yml` | `concepts/*.md` | Core concepts and explanatory documents |
-| `_schema/Playbook.schema.yml` | `guides/*.md` | Step-by-step guides and actionable workflows |
-| `_schema/Reference.schema.yml` | `reference/*.md` | Structured data, schemas, or lookup tables |
+- Document only what is **non-trivial** for coding agents. Do not paraphrase code
+  or existing docs — link instead.
+- Keep each file focused and concise, important information first.
+- Findings and Experiments are the empirical layer; the other five are the stable
+  layer. Agents dump Findings freely; stable docs are promoted deliberately by the
+  `consolidate-knowledge-base` skill — never dumped ad hoc.
 
-## When to Add a New Document
+## 2. Required frontmatter
 
-| You want to... | Use type | Put in |
-|----------------|----------|--------|
-| Explain how something works | `Concept` | `knowledge/concepts/` |
-| Provide a step-by-step procedure | `Playbook` | `knowledge/guides/` |
-| Document a format, schema, or lookup table | `Reference` | `knowledge/reference/` |
-| Brainstorm a future feature | `Concept` | `knowledge/ideas/` |
-
-**Important rules**:
-
-- document only what is not trivial for Coding Agents.
-- do not paraphrase existing documentation or code, you can point if needed.
-- focus on explaining how the external world works, like truthful facts, not opinions or speculation.
-- each knowledge file should be focussed, concise, with important information at the top. Avoid long, rambling documents.
-- prefere short, focussed documents with links and relationships.
-
-## Required Frontmatter
-
-Every `.md` file under `knowledge/` (except `index.md` and `log.md`) must have:
+All documents (except `index.md` and `log.md`) require:
 
 ```yaml
----
-type: Concept          # or Playbook, Reference
-title: Human-Readable Title
-description: Short summary of what this document covers.
-tags: [keyword, another-tag]
-timestamp: 2026-07-01T00:00:00Z
----
+type: <one of the types above>   # must match the const in _schema/<Type>.schema.yaml
+title: Human-Readable Title       # non-empty
+description: Short summary.        # non-empty
+tags: [keyword]                    # optional but encouraged
+timestamp: 2026-07-02T00:00:00Z   # ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)
 ```
 
-Rules:
+Type-specific required fields:
 
-- `type` must match the `const` in the corresponding schema file.
-- `title` and `description` must be non-empty strings.
-- `tags` is optional but strongly encouraged for searchability.
-- `timestamp` must be ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`).
+- **Finding**: also `timestamp`, `confidence` (`low|medium|high`), and `context`
+  (what you believed and the scope you actually tested).
+- **Experiment**: also `hypothesis` and `steps`.
 
-## After Adding or Editing a File
+## 3. Finding immutability & contradictions
 
-1. **Run validation:**
-   ```bash
-   just knowledge-validate
-   ```
-2. **Run lint (auto-fixes frontmatter formatting):**
-   ```bash
-   just knowledge-lint
-   ```
-3. **Verify with the check-only variant:**
-   ```bash
-   just knowledge-lint-check
-   ```
+- A Finding's **body and claim are frozen** once written. Never reword or delete.
+- To correct a Finding, write a NEW Finding with `contradicts: [<old-id>]` or
+  `supersedes: [<old-id>]`.
+- The only permitted edits to an existing Finding are the lifecycle fields
+  `status` (`contradicted|superseded`), `contradicted_by`, `superseded_by`,
+  appended by the `consolidate-knowledge-base` review.
+- Promotion of converged Findings into Concept/Structure/Principle is done by
+  `consolidate-knowledge-base` with human confirmation — Principles are always
+  agreed with humans.
 
-All three commands must pass before committing.
+## 4. Skills
 
-## When to Update Existing Documents
+- **`record-finding`** (fast, non-interactive): dump one Finding after an
+  investigation or debugging session.
+- **`consolidate-knowledge-base`** (interactive, human-confirmed): detect
+  contradictions, mark findings, propose Experiments, propose promotions.
 
-| Trigger | Update |
-|---------|--------|
-| New VS Code Copilot version or new event types | `concepts/vscode-copilot-extension.md` |
-| New JSONL fields in debug logs | `reference/debug-log-format.md` |
-| New pricing tiers or model names | `reference/pricing-formats.md` + `models-and-pricing.yml` |
-| Pricing data drift | Run `just refresh-pricing` |
-| New cost-optimization pattern discovered | `concepts/cost-optimization.md` |
+## 5. Validate before commit
 
-## Log Updates
-
-Add a dated entry to `knowledge/log.md` for significant changes (refactors, bug fixes, discoveries). Use plain ISO-8601 date headings:
-
-```markdown
-## 2026-07-01
-
-### brief-topic
-- Bullet describing the change.
+```bash
+just knowledge-lint          # auto-format frontmatter + rebuild index
+just knowledge-validate      # 0 errors, 0 warnings required
+just knowledge-lint-check    # verify no pending format changes
 ```
 
-Avoid parenthetical annotations in headings — they trigger OKF validation warnings.
+Pre-commit checklist:
 
-## Pre-Commit Checklist
+- [ ] Correct `type` and folder for the information recorded.
+- [ ] Required frontmatter present and valid.
+- [ ] No Finding body was reworded or deleted.
+- [ ] All three commands above pass (also covered by `just preflight`).
 
-- [ ] New or edited files have valid YAML frontmatter
-- [ ] `just knowledge-validate` passes (0 errors, 0 warnings)
-- [ ] `just knowledge-lint-check` passes
-- [ ] `just preflight` passes (includes knowledge checks)
+Add a dated entry to `knowledge/log.md` for significant changes. Use plain
+ISO-8601 date headings; avoid parenthetical annotations (they trigger warnings).

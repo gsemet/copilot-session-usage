@@ -56,8 +56,8 @@ tests-coverage:
 
 # ─── Documentation ────────────────────────────────────────────────────────────
 
-# Build Sphinx docs
-docs:
+# Build Sphinx docs (regenerates CHANGELOG first)
+docs: changelog
     uv run -- sphinx-build docs/source docs/_build
 
 # Serve docs locally (auto-reload)
@@ -65,6 +65,10 @@ docs-serve:
     uv run -- sphinx-autobuild docs/source docs/_build --watch src
 
 # ─── Build & release ──────────────────────────────────────────────────────────
+
+# Regenerate CHANGELOG.md from conventional commits
+changelog:
+    uv run -- cz changelog
 
 # Build wheel + sdist
 build:
