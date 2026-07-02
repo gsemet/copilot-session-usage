@@ -60,6 +60,29 @@ def test_get_model_rates_fallback():
     assert rates["input_per_m"] == 0.30  # default
 
 
+# ─── Model name normalization ─────────────────────────────────────────────────
+
+
+def test_normalize_model_name_basic():
+    assert core._normalize_model_name("GPT-5.4") == "gpt-5.4"
+
+
+def test_normalize_model_name_footnote_stripped():
+    assert core._normalize_model_name("Claude Sonnet 5[^sonnet-5-promo]") == "claude-sonnet-5"
+
+
+def test_normalize_model_name_preview_stripped():
+    assert core._normalize_model_name("Claude Opus 4.8 (preview)") == "claude-opus-4.8"
+
+
+def test_normalize_model_name_fast_mode_preserved():
+    """Fast mode is a functional variant and must stay distinct."""
+    assert (
+        core._normalize_model_name("Claude Opus 4.8 (fast mode) (preview)")
+        == "claude-opus-4.8-(fast-mode)"
+    )
+
+
 # ─── Threshold-aware pricing ──────────────────────────────────────────────────
 
 

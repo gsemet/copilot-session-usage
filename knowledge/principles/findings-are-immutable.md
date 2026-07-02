@@ -1,7 +1,7 @@
 ---
 type: Principle
 title: Findings Are Immutable
-description: A recorded Finding's body is never reworded or deleted — only
+description: A recorded Finding's body is never reworded or deleted — only 
   linked.
 tags: [meta, findings, immutability, integrity]
 timestamp: 2026-07-02T00:00:00Z

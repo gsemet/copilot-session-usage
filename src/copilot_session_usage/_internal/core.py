@@ -16,8 +16,11 @@ This module is a library, not an entry point. It has zero knowledge of
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import re
+import urllib.error
+import urllib.request
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,7 +47,7 @@ def _read_data_file(name: str) -> str | None:
 
 
 # ─── Embedded default pricing (USD per million tokens) ───────────────────────
-# Approximate estimates; update with: just refresh-pricing
+# Approximate estimates; update data/models-and-pricing.yml manually.
 
 DEFAULT_PRICING: dict = {
     "_note": "Approximate per-token costs (USD/M). Estimates only — not GitHub's billing.",
@@ -119,14 +122,20 @@ DEFAULT_PRICING: dict = {
 def _normalize_model_name(name: str) -> str:
     """Normalize a raw model name from the YAML to our internal key format.
 
+    Strips footnote markers and release-status parentheticals such as
+    ``(preview)``, but preserves functional variants like ``(fast mode)``
+    so they remain distinct pricing entries.
+
     Examples:
         "GPT-5.4" → "gpt-5.4"
         "Claude Sonnet 4.6" → "claude-sonnet-4.6"
         "Claude Sonnet 5[^sonnet-5-promo]" → "claude-sonnet-5"
-        "Claude Opus 4.8 (fast mode) (preview)" → "claude-opus-4.8"
+        "Claude Opus 4.8 (fast mode) (preview)" → "claude-opus-4.8-fast-mode"
     """
     cleaned = re.sub(r"\[\^[^\]]+\]", "", name)
-    cleaned = re.sub(r"\s*\([^)]*\)", "", cleaned)
+    # Strip release-status markers like (preview), (GA), etc., but keep
+    # functional descriptors such as (fast mode).
+    cleaned = re.sub(r"\s*\(\s*preview\s*\)", "", cleaned, flags=re.IGNORECASE)
     cleaned = cleaned.strip()
     return re.sub(r"\s+", "-", cleaned.lower())
 
@@ -282,6 +291,111 @@ def _build_pricing_from_yaml(entries: list[dict], source: str) -> dict:
         ),
         "_source": source,
         "models": models,
+    }
+
+
+# ─── Pricing refresh ──────────────────────────────────────────────────────────
+
+# URL for GitHub's canonical models-and-pricing YAML.
+_PRICING_URL = (
+    "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/models-and-pricing.yml"
+)
+
+
+def _write_data_file(name: str, content: str) -> Path:
+    """Write a bundled data file in the package source tree.
+
+    Returns the path written. Raises RuntimeError if the data directory
+    cannot be found (e.g. the package is installed as a wheel).
+    """
+    try:
+        from importlib.resources import files
+
+        ref = files("copilot_session_usage.data") / name
+        # In editable installs ref is a real Path; in wheels it may not be.
+        path = Path(str(ref))
+        if not path.parent.exists():
+            msg = f"Data directory not found: {path.parent}"
+            raise RuntimeError(msg)
+        path.write_text(content, encoding="utf-8")
+        return path
+    except Exception as exc:
+        msg = f"Cannot write bundled data file {name}: {exc}"
+        raise RuntimeError(msg) from exc
+
+
+def refresh_pricing() -> dict[str, Any]:
+    """Fetch the latest pricing YAML from GitHub and update the bundled copy.
+
+    Writes ``models-and-pricing.yml`` and ``models-and-pricing.lock``
+    under ``src/copilot_session_usage/data/``.  Returns a dict with
+    ``updated`` (bool), ``path`` (Path), ``model_count`` (int), and
+    ``previous_count`` (int).
+
+    Raises RuntimeError on network or write failures so callers can
+    surface a clear message.
+    """
+    # Fetch upstream YAML
+    try:
+        with urllib.request.urlopen(_PRICING_URL, timeout=30) as response:  # noqa: S310
+            yaml_text: str = response.read().decode("utf-8")
+    except urllib.error.URLError as exc:
+        msg = f"Failed to fetch pricing from {_PRICING_URL}: {exc}"
+        raise RuntimeError(msg) from exc
+
+    if not yaml_text.strip():
+        msg = "No YAML input received from upstream. Check connectivity and re-run."
+        raise RuntimeError(msg)
+
+    # Parse to validate and count models
+    try:
+        from ruamel.yaml import YAML
+
+        yaml = YAML(typ="safe")
+        entries = yaml.load(yaml_text)
+    except Exception as exc:
+        msg = f"Failed to parse upstream YAML: {exc}"
+        raise RuntimeError(msg) from exc
+
+    if not isinstance(entries, list):
+        msg = f"Unexpected YAML structure: expected list, got {type(entries).__name__}"
+        raise RuntimeError(msg)
+
+    model_count = sum(1 for e in entries if isinstance(e, dict) and e.get("model"))
+
+    # Read current bundled file for comparison
+    current_text = _read_data_file("models-and-pricing.yml")
+    previous_count = 0
+    if current_text:
+        try:
+            current_entries = yaml.load(current_text)
+            if isinstance(current_entries, list):
+                previous_count = sum(
+                    1 for e in current_entries if isinstance(e, dict) and e.get("model")
+                )
+        except Exception:
+            pass
+
+    # Write the new YAML
+    yaml_path = _write_data_file("models-and-pricing.yml", yaml_text)
+
+    # Write lock file
+    checksum = hashlib.sha256(yaml_text.encode("utf-8")).hexdigest()[:16]
+    lock = {
+        "_captured": datetime.now(timezone.utc).isoformat(),
+        "_source": _PRICING_URL,
+        "_yaml_path": str(yaml_path),
+        "model_count": model_count,
+        "checksum": checksum,
+    }
+    lock_path = _write_data_file("models-and-pricing.lock", json.dumps(lock, indent=2) + "\n")
+
+    return {
+        "updated": True,
+        "path": yaml_path,
+        "lock_path": lock_path,
+        "model_count": model_count,
+        "previous_count": previous_count,
     }
 
 

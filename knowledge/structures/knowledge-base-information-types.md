@@ -1,7 +1,7 @@
 ---
 type: Structure
 title: Knowledge Base Information Types
-description: The seven OKF information types used in this bundle and how they
+description: The seven OKF information types used in this bundle and how they 
   relate.
 tags: [meta, okf, information-mapping, taxonomy]
 timestamp: 2026-07-02T00:00:00Z
