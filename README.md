@@ -42,6 +42,7 @@ copilot-session-usage batch 10
 - **Threshold-aware pricing** — long-context tier switching (e.g. GPT-5.4 > 272k tokens)
 - **Subagent cost attribution** — tracks `runSubagent` calls and their token usage
 - **Cross-platform** — macOS, Linux, Windows, WSL2
+- **Three output formats** — `json` (default), `table`, `detailed`
 - **Three detail levels** — `minimal`, `compact`, `full`
 - **JSON and table output** — machine-readable or human-friendly
 
