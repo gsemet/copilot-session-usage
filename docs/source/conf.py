@@ -24,6 +24,11 @@ extensions = [
 myst_enable_extensions = ["colon_fence", "deflist"]
 
 html_theme = "furo"
+html_theme_options = {
+    "source_repository": "https://github.com/gsemet/copilot-session-usage",
+    "source_branch": "main",
+    "source_directory": "docs/source/",
+}
 html_title = f"copilot-session-usage {version}"
 html_static_path = ["_static"]
 html_css_files = ["custom.css"]
