@@ -11,7 +11,7 @@ output. It assumes you have installed `copilot-session-usage` — see
 Run this after any VS Code Copilot chat session:
 
 ```bash
-copilot-session-usage latest
+copilot-session-usage latest --format table
 ```
 
 Sample output:
@@ -41,19 +41,16 @@ Each field:
 
 ---
 
-## Switch detail levels
+## Details Tables
 
-`--detail` controls how much data is shown:
+`--format` controls the output type. Default is `json`:
 
 ```bash
 # Just cost and model names
-copilot-session-usage latest --detail minimal
+copilot-session-usage latest --format table
 
-# Default: summary + per-model breakdown
-copilot-session-usage latest --detail compact
-
-# Everything: per-model + subagent attribution
-copilot-session-usage latest --detail full
+# Default: summary + per-subagent breakdown
+copilot-session-usage latest --format detailed
 ```
 
 ---
@@ -76,10 +73,16 @@ copilot-session-usage latest --format json --output session.json
 
 ## List recent sessions
 
-See which sessions exist without computing costs:
+See which sessions exist without computing costs (limit set to 20 by default):
 
 ```bash
 copilot-session-usage list
+
+# Limit to 5 sessions
+copilot-session-usage list --limit 5
+
+# Since a date
+copilot-session-usage list --since 2026-07-01
 ```
 
 Output:
@@ -106,7 +109,14 @@ it lists them so you can pick the right UUID.
 ## Analyze a specific session by UUID
 
 ```bash
+# Default json output
 copilot-session-usage id f5cbde8a-ec40-466f-86e6-f95c343b6c58
+
+# Human readable summary
+copilot-session-usage id f5cbde8a-ec40-466f-86e6-f95c343b6c58 --format table
+
+# Human readable details with per-subagent breakdown
+copilot-session-usage id f5cbde8a-ec40-466f-86e6-f95c343b6c58 --format detailed
 ```
 
 ---
@@ -114,8 +124,11 @@ copilot-session-usage id f5cbde8a-ec40-466f-86e6-f95c343b6c58
 ## Analyze multiple sessions at once
 
 ```bash
-# Last 10 sessions
+# Last 10 sessions (json output)
 copilot-session-usage batch 10
+
+# Summary table for last 10 sessions
+copilot-session-usage batch 10 --format table
 ```
 
 Output includes a summary row with aggregate totals and a per-session table.
