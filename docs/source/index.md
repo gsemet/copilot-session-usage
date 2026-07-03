@@ -13,6 +13,8 @@ prints a cost report in seconds.
 The most common use: after a heavy agentic session, run
 `copilot-session-usage latest` to see what it cost.
 
+Links to source code: [gsemet/copilot-session-usage](https://github.com/gsemet/copilot-session-usage)
+
 ::::{grid} 1 1 2 2
 :gutter: 3
 
