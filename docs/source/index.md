@@ -1,5 +1,7 @@
 # copilot-session-usage
 
+[![GitHub](https://img.shields.io/badge/GitHub-copilot--session--usage-181717?logo=github)](https://github.com/gsemet/copilot-session-usage)
+
 **copilot-session-usage** reads VS Code Copilot debug logs and tells you
 how much each AI coding session cost in USD.
 
