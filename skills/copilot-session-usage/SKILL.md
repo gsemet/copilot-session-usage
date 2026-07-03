@@ -39,21 +39,6 @@ copilot-session-usage batch 10
 copilot-session-usage latest --detail full --format json
 ```
 
-## Python API
-
-```python
-from copilot_session_usage.api import analyze_session, analyze_latest, batch_analyze
-
-# Analyze a session by path
-result = analyze_session(Path("/path/to/debug-logs"), detail="full")
-
-# Analyze the most recent session
-result = analyze_latest(detail="compact")
-
-# Batch analyze
-batch = batch_analyze(10, detail="minimal")
-```
-
 ## Key Features
 
 - **Per-model pricing** with cache-hit discounts
@@ -62,21 +47,15 @@ batch = batch_analyze(10, detail="minimal")
 - **Subagent cost attribution**
 - **Cross-platform** (macOS, Linux, Windows, WSL2)
 - **Three detail levels**: minimal, compact, full
-- **JSON and table output**
+- **JSON, table and detailed output**
 
 ## Pricing Data
 
-Pricing data is bundled with the package in `src/copilot_session_usage/data/`:
+Pricing data is bundled withing the copilot-session-usage package in `src/copilot_session_usage/data/`:
 
 - `models-and-pricing.yml` — Standard model pricing
 - `models-and-pricing.lock` — Lock file for reproducibility
 - `custom-models-pricing.yml` — Custom / organization-specific pricing
-
-To refresh pricing from upstream:
-
-```bash
-just refresh-pricing
-```
 
 ## Provider Support
 
