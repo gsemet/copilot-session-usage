@@ -7,8 +7,9 @@ tags: [cache-write, anthropic, approximation, cost-estimation, aic]
 timestamp: 2026-07-03T00:00:00Z
 related_concepts: [concepts/session-cost-analysis.md]
 links: [concepts/session-cost-analysis.md,
-    findings/cache-write-cost-not-tracked.md]
+    findings/2026.07.02-23.00-cache-write-approximation.md]
 backlinks: []
+okf_version: "0.1"
 ---
 
 # Cache Cost Approximation
@@ -63,7 +64,7 @@ Verified on session `438d24a8` (Claude Sonnet 4.6, 92 calls):
 | VS Code AIC panel (590.37 AIC ÷ 100) | **$5.9037** |
 
 Exact match. Supporting Finding:
-[`cache-write-cost-not-tracked`](../findings/cache-write-cost-not-tracked.md).
+[`2026.07.02-23.00-cache-write-approximation`](../findings/2026.07.02-23.00-cache-write-approximation.md).
 
 ## Accuracy Characteristics
 
@@ -82,5 +83,5 @@ retired.
 
 ## Related
 
-- [`findings/cache-write-cost-not-tracked.md`](../findings/cache-write-cost-not-tracked.md) — Supporting empirical evidence
+- [`findings/2026.07.02-23.00-cache-write-approximation.md`](../findings/2026.07.02-23.00-cache-write-approximation.md) — Supporting empirical evidence
 - [`concepts/session-cost-analysis.md`](../concepts/session-cost-analysis.md) — Cost analysis overview
