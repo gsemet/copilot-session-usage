@@ -100,8 +100,7 @@ knowledge-validate:
 
 # Lint (format) OKF knowledge frontmatter in-place
 knowledge-lint:
-    uv run -- okf-schema lint --path knowledge
-    uv run -- okf-schema index --path knowledge
+    uv run -- okfkb update knowledge
 
 # Check OKF knowledge frontmatter without modifying files
 knowledge-lint-check:

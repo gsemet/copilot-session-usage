@@ -5,10 +5,12 @@ description: How subagent costs are logged, aggregated, and correlated with
   parent sessions.
 tags: [subagents, cost-aggregation, parallel-agents, runSubagent]
 timestamp: 2026-06-30T22:00:00Z
-links: [findings/title-jsonl-not-counted-as-model-turn.md,
+links: [findings/2026.07.02-00.00-subagent-logs-runsubagent-prefix.md,
+    findings/2026.07.02-22.00-title-generation-not-counted-as-model-turn.md,
     guides/automation-scripts.md, reference/debug-log-format.md]
 backlinks: [concepts/overview.md, guides/automation-scripts.md,
     guides/cost-optimization.md, reference/debug-log-format.md]
+okf_version: "0.1"
 ---
 
 # Subagent Cost Tracking
@@ -35,6 +37,7 @@ runSubagent-<agent-name>-functions.runSubagent:<id>.jsonl
 Example: `runSubagent-default-functions.runSubagent:19.jsonl`
 
 The `<id>` is a sequential number assigned per `runSubagent` call in the parent session.
+For details, see Finding [`2026.07.02-00.00-subagent-logs-runsubagent-prefix`](../findings/2026.07.02-00.00-subagent-logs-runsubagent-prefix.md).
 
 ## Cost Distribution Pattern
 
@@ -70,7 +73,7 @@ VS Code debug panel totals also match `main.jsonl` because the panel excludes
 well — these calls consume real tokens (typically a few hundred input +
 ~1,000 output from a cheap model) and are intentionally included in the
 tool's total. See Finding
-[`title-jsonl-not-counted-as-model-turn`](../findings/title-jsonl-not-counted-as-model-turn.md).
+[`2026.07.02-22.00-title-generation-not-counted-as-model-turn`](../findings/2026.07.02-22.00-title-generation-not-counted-as-model-turn.md).
 
 This is common for:
 
@@ -80,7 +83,7 @@ This is common for:
 
 Example: a session titled *"Get subagent token costs"* that explores how
 cost tracking works without actually spawning subagents will show 7 files
-but only 2 `.jsonl` files, with `main.jsonl` containing all ~8.7M input
+but only 2 `.jsonl` files (main.jsonl and title-*.jsonl), with `main.jsonl` containing all ~8.7M input
 tokens.
 
 ## Mixed-Model Files and Cost Attribution
@@ -115,7 +118,7 @@ total_cost = sum(estimate_cost(**b, model=m, pricing=pricing) for m, b in per_mo
 
 ## Correlating Subagents to Tasks
 
-The `child_session_ref` event in `main.jsonl` links the numeric ID to the agent name:
+The `child_session_ref` event in `main.jsonl` links the numeric ID to the agent name and session ID:
 
 ```json
 {
