@@ -54,6 +54,41 @@ copilot-session-usage find "CI pipeline"
 Matching is case-insensitive substring search. If multiple sessions match,
 the tool lists them and exits without analyzing — then use `id` to pick one.
 
+You can also filter `list` and `analyze` by title substring with `--title`:
+
+```bash
+# List only sessions whose title contains "get-session-costs"
+copilot-session-usage list --title "get-session-costs"
+
+# Analyze the most recent matching session
+copilot-session-usage analyze --title "grill-me" --latest --format table
+```
+
+## Skill-aware analysis
+
+When a session invokes a skill (for example `/compendium-generic get-session-costs`),
+you can attribute costs and tool calls to that skill.
+
+```bash
+# Per-skill cost breakdown for a session
+copilot-session-usage id 3a91c012-1b4e-4c8a-9f72-ab12cd34ef56 --skill-breakdown
+
+# Per-skill/per-subagent tool-call counts
+copilot-session-usage id 3a91c012-1b4e-4c8a-9f72-ab12cd34ef56 --tool-breakdown
+
+# Concise cost for a single skill
+copilot-session-usage id 3a91c012-1b4e-4c8a-9f72-ab12cd34ef56 \
+  --skill "/compendium-generic get-session-costs" \
+  --format json --detail minimal
+```
+
+## List skills across sessions
+
+```bash
+# Skills used in the last 7 days, with aggregated cost
+copilot-session-usage skills --last 7d --format table
+```
+
 ## Locating workspaceStorage manually
 
 | Platform | Default path |

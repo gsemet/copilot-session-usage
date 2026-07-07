@@ -61,6 +61,28 @@ copilot-session-usage batch 50 \
 `--workspace-filter` matches against the workspace folder name (substring,
 case-insensitive).
 
+## Skill spending report
+
+Use the `skills` command to see which skills drove the most cost over a time
+window:
+
+```bash
+# Skills used in the last 7 days
+copilot-session-usage skills --last 7d --format table
+
+# Skills used since a specific date
+copilot-session-usage skills --since 2026-07-01 --format table
+```
+
+Output:
+
+```
+Skills across 23 sessions:
+  Skill                              Sessions        Input     Output       Cached   Calls       Cost
+  ---------------------------------------------------------------------------------------------------
+  /compendium-generic get-session-costs       3    1137864      15729      1015825      24  $0.3636
+```
+
 ## Automate with cron (macOS/Linux)
 
 ```bash

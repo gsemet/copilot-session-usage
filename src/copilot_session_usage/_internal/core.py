@@ -502,12 +502,15 @@ def _dominant_model(per_model: dict[str, dict]) -> str:
 # ─── JSONL parsing ────────────────────────────────────────────────────────────
 
 
-def parse_jsonl_file(path: Path) -> dict:
+def parse_jsonl_file(path: Path, skill_timeline: list[tuple[int, str]] | None = None) -> dict:
     """Parse a single .jsonl file and return aggregated token stats.
 
     Only ``llm_request`` events carry token data — every other event type
     is ignored for cost purposes, though non-LLM timestamps still count
     toward wall-clock ``first_ts``/``last_ts``.
+
+    When ``skill_timeline`` is provided, each ``llm_request`` is attributed
+    to the most recently invoked skill at that timestamp.
     """
     stats: dict = {
         "file": path.name,
@@ -516,6 +519,7 @@ def parse_jsonl_file(path: Path) -> dict:
         "cached_tokens": 0,
         "llm_calls": 0,
         "per_model": {},
+        "per_skill": {},
         "models": set(),
         "first_ts": None,
         "last_ts": None,
@@ -557,6 +561,26 @@ def parse_jsonl_file(path: Path) -> dict:
                     bucket["cached"] += cch
                     bucket["calls"] += 1
                     bucket["nano_aiu"] += attrs.get("copilotUsageNanoAiu") or 0
+
+                    if skill_timeline and ts is not None:
+                        skill = active_skill_at_ts(ts, skill_timeline) or "unknown"
+                    else:
+                        skill = "unknown"
+                    skill_bucket = stats["per_skill"].setdefault(
+                        skill, {"input": 0, "output": 0, "cached": 0, "calls": 0, "per_model": {}}
+                    )
+                    skill_bucket["input"] += inp
+                    skill_bucket["output"] += out
+                    skill_bucket["cached"] += cch
+                    skill_bucket["calls"] += 1
+                    skill_model_bucket = skill_bucket["per_model"].setdefault(
+                        model, {"input": 0, "output": 0, "cached": 0, "calls": 0}
+                    )
+                    skill_model_bucket["input"] += inp
+                    skill_model_bucket["output"] += out
+                    skill_model_bucket["cached"] += cch
+                    skill_model_bucket["calls"] += 1
+
                     if ts is not None:
                         if stats["first_llm_ts"] is None or ts < stats["first_llm_ts"]:
                             stats["first_llm_ts"] = ts
@@ -625,6 +649,213 @@ def _resolve_subagent_name(filename: str, subagent_names: dict[str, str]) -> tup
     return stem.removeprefix("runSubagent-"), ""
 
 
+# ─── Skill detection and attribution ──────────────────────────────────────────
+
+
+def _extract_slash_command_skill(content: str) -> str | None:
+    """Extract a skill name from a slash-command user message.
+
+    Supports both ``/skill`` and ``/namespace skill-name`` forms.
+
+    Examples:
+        "/compendium-generic get-session-costs" → "/compendium-generic get-session-costs"
+        "/deploy" → "/deploy"
+    """
+    content = content.strip()
+    if not content.startswith("/"):
+        return None
+    # Capture the first two whitespace-separated tokens after the leading slash.
+    match = re.match(r"/([^\s]+)(?:\s+([^\s]+))?(?:\s+.*)?$", content)
+    if not match:
+        return None
+    namespace = match.group(1)
+    sub = match.group(2)
+    if sub:
+        return f"/{namespace} {sub}"
+    return f"/{namespace}"
+
+
+def _normalize_skill_name(name: str) -> str:
+    """Normalize a skill name for matching.
+
+    Maps colon-separated forms (``/namespace:skill``) to the slash-command
+    form (``/namespace skill``) so the same skill invoked different ways
+    is attributed consistently.
+    """
+    if name.startswith("/") and ":" in name.split()[0]:
+        parts = name[1:].split(":", 1)
+        return f"/{parts[0]} {parts[1]}".strip()
+    return name
+
+
+def _extract_skills_from_discovery(details: str) -> list[str]:
+    """Extract skill names from a Skill Discovery ``details`` string.
+
+    Pattern: ``loaded: [skill1, skill2, ...]``
+    """
+    match = re.search(r"loaded:\s*\[([^\]]+)\]", details)
+    if not match:
+        return []
+    items = match.group(1).split(",")
+    return [item.strip().strip("'\"") for item in items if item.strip()]
+
+
+def _extract_skills_from_generic_details(details: str) -> list[str]:
+    """Extract skill names from a Custom Instructions generic event details string.
+
+    Pattern: ``skills: [N] skill1, skill2, ...`` followed by ``agents:`` or end.
+    """
+    match = re.search(r"skills:\s*\[[^\]]+\]\s+(.+?)(?:\n\s*\w+:|$)", details, re.DOTALL)
+    if not match:
+        return []
+    items = match.group(1).split(",")
+    return [item.strip().strip("'\"") for item in items if item.strip()]
+
+
+def detect_session_skills(session_dir: Path) -> dict[str, list[str]]:
+    """Detect skills available in a session from multiple sources.
+
+    Sources (in order of preference):
+    - ``user_message`` events containing slash commands
+    - ``discovery`` events of type ``Skill Discovery``
+    - ``generic`` events named ``Custom Instructions`` with on-demand skill lists
+    """
+    detected: set[str] = set()
+    main = session_dir / "main.jsonl"
+    if main.exists():
+        try:
+            with main.open(encoding="utf-8") as f:
+                for raw in f:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    event_type = obj.get("type")
+                    name = obj.get("name", "")
+                    attrs = obj.get("attrs", {})
+                    if event_type == "user_message":
+                        skill = _extract_slash_command_skill(attrs.get("content", ""))
+                        if skill:
+                            detected.add(_normalize_skill_name(skill))
+                    elif event_type == "discovery" and name == "Skill Discovery":
+                        details = attrs.get("details", "")
+                        discovered = _extract_skills_from_discovery(details)
+                        detected.update(_normalize_skill_name(s) for s in discovered)
+                    elif event_type == "generic" and "Custom Instructions" in name:
+                        details = attrs.get("details", "")
+                        discovered = _extract_skills_from_generic_details(details)
+                        detected.update(_normalize_skill_name(s) for s in discovered)
+        except OSError:
+            pass
+    return {"detected": sorted(detected)}
+
+
+def build_skill_timeline(session_dir: Path) -> list[tuple[int, str]]:
+    """Build a chronological timeline of skill invocations from user messages.
+
+    Each entry is ``(timestamp_ms, skill_name)``. The active skill at any
+    later timestamp is the most recent entry whose timestamp is <= that timestamp.
+    """
+    timeline: list[tuple[int, str]] = []
+    main = session_dir / "main.jsonl"
+    if not main.exists():
+        return timeline
+    try:
+        with main.open(encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("type") == "user_message":
+                    skill = _extract_slash_command_skill(obj.get("attrs", {}).get("content", ""))
+                    if skill:
+                        timeline.append((obj.get("ts", 0), _normalize_skill_name(skill)))
+    except OSError:
+        pass
+    timeline.sort(key=lambda x: x[0])
+    return timeline
+
+
+def active_skill_at_ts(ts: int | None, timeline: list[tuple[int, str]]) -> str | None:
+    """Return the most recently invoked skill at or before ``ts``.
+
+    Returns ``None`` if ``ts`` is None or no skill was invoked before it.
+    """
+    if ts is None or not timeline:
+        return None
+    active: str | None = None
+    for t, skill in timeline:
+        if t <= ts:
+            active = skill
+        else:
+            break
+    return active
+
+
+def parse_tool_calls(
+    session_dir: Path, skill_timeline: list[tuple[int, str]] | None = None
+) -> list[dict]:
+    """Parse all tool_call events across JSONL files and attribute them to skills.
+
+    Each returned dict contains ``tool``, ``skill``, ``subagent``, and ``ts``.
+    """
+    calls: list[dict] = []
+    subagent_names = get_subagent_names(session_dir / "main.jsonl")
+    for jsonl_file in sorted(session_dir.glob("*.jsonl")):
+        subagent_name, _ = _resolve_subagent_name(jsonl_file.name, subagent_names)
+        try:
+            with jsonl_file.open(encoding="utf-8") as f:
+                for raw in f:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if obj.get("type") == "tool_call":
+                        ts: int | None = obj.get("ts")
+                        skill = active_skill_at_ts(ts, skill_timeline) if skill_timeline else None
+                        calls.append(
+                            {
+                                "tool": obj.get("name", "unknown"),
+                                "skill": skill or "unknown",
+                                "subagent": subagent_name,
+                                "ts": ts,
+                            }
+                        )
+        except OSError:
+            pass
+    return calls
+
+
+def aggregate_tool_calls(calls: list[dict]) -> list[dict]:
+    """Aggregate tool_call events into per-tool/per-skill/per-subagent counts."""
+    counts: dict[tuple[str, str, str], int] = {}
+    for call in calls:
+        key = (call["tool"], call["skill"], call["subagent"])
+        counts[key] = counts.get(key, 0) + 1
+
+    rows: list[dict] = [
+        {
+            "tool": tool,
+            "calls": calls_count,
+            "skill": skill,
+            "subagent": subagent,
+        }
+        for (tool, skill, subagent), calls_count in counts.items()
+    ]
+    rows.sort(key=lambda x: (-x["calls"], x["tool"], x["skill"], x["subagent"]))
+    return rows
+
+
 # ─── Session analysis ─────────────────────────────────────────────────────────
 
 
@@ -641,10 +872,15 @@ def analyze_session(session_dir: Path, pricing: dict) -> dict:
     Reads every *.jsonl file to capture costs from both the parent agent
     (main.jsonl) and all subagents (runSubagent-*.jsonl). Subagents
     often account for 70-80% of total cost.
+
+    Also detects invoked skills from user messages and attributes LLM calls
+    and tool calls to the active skill.
     """
     session_dir = Path(session_dir)
     session_id = session_dir.name
     subagent_names = get_subagent_names(session_dir / "main.jsonl")
+    skill_timeline = build_skill_timeline(session_dir)
+    detected_skills = detect_session_skills(session_dir)
 
     file_results: list[dict] = []
     global_first_ts: int | None = None
@@ -652,7 +888,7 @@ def analyze_session(session_dir: Path, pricing: dict) -> dict:
     all_models: set[str] = set()
 
     for jsonl_file in sorted(session_dir.glob("*.jsonl")):
-        stats = parse_jsonl_file(jsonl_file)
+        stats = parse_jsonl_file(jsonl_file, skill_timeline)
         if stats["llm_calls"] == 0:
             continue
         file_results.append(stats)
@@ -687,6 +923,30 @@ def analyze_session(session_dir: Path, pricing: dict) -> dict:
             global_per_model[model]["cached"] += tokens["cached"]
             global_per_model[model]["calls"] += tokens["calls"]
             global_per_model[model]["nano_aiu"] += tokens.get("nano_aiu", 0)
+
+    global_per_skill: dict[str, dict] = {}
+    for stats in file_results:
+        for skill, tokens in stats.get("per_skill", {}).items():
+            if skill not in global_per_skill:
+                global_per_skill[skill] = {
+                    "input": 0,
+                    "output": 0,
+                    "cached": 0,
+                    "calls": 0,
+                    "per_model": {},
+                }
+            global_per_skill[skill]["input"] += tokens["input"]
+            global_per_skill[skill]["output"] += tokens["output"]
+            global_per_skill[skill]["cached"] += tokens["cached"]
+            global_per_skill[skill]["calls"] += tokens["calls"]
+            for model, mtokens in tokens.get("per_model", {}).items():
+                skill_model = global_per_skill[skill]["per_model"].setdefault(
+                    model, {"input": 0, "output": 0, "cached": 0, "calls": 0}
+                )
+                skill_model["input"] += mtokens["input"]
+                skill_model["output"] += mtokens["output"]
+                skill_model["cached"] += mtokens["cached"]
+                skill_model["calls"] += mtokens["calls"]
 
     subagents: list[dict] = []
     total_usd = 0.0
@@ -753,6 +1013,30 @@ def analyze_session(session_dir: Path, pricing: dict) -> dict:
         model for model in global_per_model if model_uses_fallback_pricing(model, pricing)
     )
 
+    skill_breakdown = sorted(
+        [
+            {
+                "skill": skill,
+                "input_tokens": v["input"],
+                "output_tokens": v["output"],
+                "cached_tokens": v["cached"],
+                "llm_calls": v["calls"],
+                "estimated_usd": round(
+                    estimate_cost_for_file(v.get("per_model", {}), pricing),
+                    6,
+                ),
+            }
+            for skill, v in global_per_skill.items()
+        ],
+        key=lambda x: x["estimated_usd"],
+        reverse=True,
+    )
+
+    tool_calls = parse_tool_calls(session_dir, skill_timeline)
+    tool_breakdown = aggregate_tool_calls(tool_calls)
+
+    active_skill = skill_timeline[-1][1] if skill_timeline else None
+
     return {
         "session_id": session_id,
         "session_dir": str(session_dir),
@@ -773,6 +1057,12 @@ def analyze_session(session_dir: Path, pricing: dict) -> dict:
         "fallback_pricing_models": fallback_pricing_models,
         "model_breakdown": model_breakdown,
         "subagents": subagents,
+        "skills": {
+            "detected": detected_skills["detected"],
+            "active": active_skill,
+            "breakdown": skill_breakdown,
+            "tool_breakdown": tool_breakdown,
+        },
         "pricing_note": (
             "Cost estimates are approximations. Update rates in data/models-and-pricing.yml. "
             "Models listed in fallback_pricing_models were priced with the generic "
@@ -813,7 +1103,105 @@ def shape_session(data: dict, detail: str) -> dict:
 
     shaped["fallback_pricing_models"] = data.get("fallback_pricing_models", [])
     shaped["pricing_note"] = data.get("pricing_note")
+    shaped["skills"] = data.get("skills", {})
     return shaped
+
+
+def shape_session_skill_breakdown(data: dict) -> dict:
+    """Shape a session report to only its per-skill cost breakdown."""
+    return {
+        "session_id": data.get("session_id"),
+        "title": data.get("title"),
+        "skill_breakdown": data.get("skills", {}).get("breakdown", []),
+    }
+
+
+def shape_session_tool_breakdown(data: dict) -> dict:
+    """Shape a session report to only its per-skill/per-subagent tool breakdown."""
+    return {
+        "session_id": data.get("session_id"),
+        "title": data.get("title"),
+        "tool_breakdown": data.get("skills", {}).get("tool_breakdown", []),
+    }
+
+
+def shape_session_minimal_skill(data: dict, skill_name: str) -> dict | None:
+    """Return a minimal, stable JSON object for a single skill's cost.
+
+    Returns ``None`` if the skill is not present in the session.
+    """
+    for skill in data.get("skills", {}).get("breakdown", []):
+        if skill["skill"] == skill_name:
+            return {
+                "skill": skill_name,
+                "cost_usd": skill["estimated_usd"],
+                "input_tokens": skill["input_tokens"],
+                "output_tokens": skill["output_tokens"],
+                "cached_tokens": skill["cached_tokens"],
+                "llm_calls": skill["llm_calls"],
+            }
+    return None
+
+
+def parse_last_window_to_ms(window: str) -> int | None:
+    """Parse a relative duration like ``7d``, ``24h``, ``30m`` to epoch ms.
+
+    Returns the timestamp ``window`` ago from now (UTC).
+    """
+    match = re.match(r"^(\d+)\s*([dhm])$", window.strip().lower())
+    if not match:
+        return None
+    value = int(match.group(1))
+    unit = match.group(2)
+    delta_s = {"d": 86_400, "h": 3_600, "m": 60}.get(unit, 0) * value
+    return int((datetime.now(timezone.utc).timestamp() - delta_s) * 1000)
+
+
+def aggregate_skills(results: list[dict]) -> dict:
+    """Aggregate per-skill breakdowns across multiple sessions.
+
+    Returns a dict with ``skills`` (list of per-skill aggregates) and
+    ``session_count``.
+    """
+    per_skill: dict[str, dict] = {}
+    for r in results:
+        for skill in r.get("skills", {}).get("breakdown", []):
+            name = skill["skill"]
+            if name not in per_skill:
+                per_skill[name] = {
+                    "skill": name,
+                    "sessions": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cached_tokens": 0,
+                    "llm_calls": 0,
+                    "estimated_usd": 0.0,
+                }
+            bucket = per_skill[name]
+            bucket["sessions"] += 1
+            bucket["input_tokens"] += skill.get("input_tokens", 0)
+            bucket["output_tokens"] += skill.get("output_tokens", 0)
+            bucket["cached_tokens"] += skill.get("cached_tokens", 0)
+            bucket["llm_calls"] += skill.get("llm_calls", 0)
+            bucket["estimated_usd"] += skill.get("estimated_usd", 0.0)
+
+    skills = sorted(
+        [
+            {
+                "skill": v["skill"],
+                "sessions": v["sessions"],
+                "input_tokens": v["input_tokens"],
+                "output_tokens": v["output_tokens"],
+                "cached_tokens": v["cached_tokens"],
+                "llm_calls": v["llm_calls"],
+                "estimated_usd": round(v["estimated_usd"], 4),
+            }
+            for v in per_skill.values()
+        ],
+        key=lambda x: x["estimated_usd"],
+        reverse=True,
+    )
+    return {"session_count": len(results), "skills": skills}
 
 
 def shape_batch(results: list[dict], detail: str) -> dict:
@@ -1095,6 +1483,12 @@ def get_queryable_fields() -> dict[str, str]:
         "subagents": "Per-subagent/file attribution (list[dict])",
         "subagents[0].name": "Subagent name in first row (string)",
         "subagents[0].estimated_usd": "Estimated USD for first subagent (number)",
+        "skills.detected": "Skills detected in the session (list[string])",
+        "skills.active": "Most recently invoked skill (string)",
+        "skills.breakdown": "Per-skill token/cost breakdown (list[dict])",
+        "skills.breakdown[0].skill": "Skill name in first breakdown row (string)",
+        "skills.breakdown[0].estimated_usd": "Estimated USD for first skill (number)",
+        "skills.tool_breakdown": "Per-skill/per-subagent tool-call counts (list[dict])",
     }
 
 
@@ -1146,7 +1540,8 @@ def _render_columns(
 ) -> list[str]:
     """Render a small table with per-column widths computed from actual cell strings."""
     widths = [
-        max(len(headers[i]), max((len(r[i]) for r in rows), default=0)) for i in range(len(headers))
+        max(len(headers[i]), max((len(r[i] or "") for r in rows), default=0))
+        for i in range(len(headers))
     ]
 
     def _fmt_row(cells: tuple[str, ...]) -> str:
@@ -1228,6 +1623,71 @@ def render_table_single(data: dict) -> str:
         lines.append("Subagents:")
         lines.extend(_render_columns(headers, rows, left_cols={0, 1}))
 
+    return "\n".join(lines)
+
+
+def render_skill_breakdown(data: dict) -> str:
+    """Render a per-skill cost breakdown table."""
+    breakdown = data.get("skill_breakdown") or data.get("skills", {}).get("breakdown", [])
+    if not breakdown:
+        return "No skill breakdown available."
+    headers = ("Skill", "Input", "Cached", "Output", "Calls", "Cost")
+    rows = [
+        (
+            s["skill"],
+            f"{s['input_tokens']:,}",
+            f"{s['cached_tokens']:,}",
+            f"{s['output_tokens']:,}",
+            f"{s['llm_calls']:,}",
+            f"${s['estimated_usd']:.4f}",
+        )
+        for s in breakdown
+    ]
+    lines = ["Per-Skill Breakdown:"]
+    lines.extend(_render_columns(headers, rows, left_cols={0}))
+    return "\n".join(lines)
+
+
+def render_skills_aggregate(data: dict) -> str:
+    """Render the skills aggregate as a markdown table."""
+    skills = data.get("skills", [])
+    if not skills:
+        return "No skills found."
+    headers = ("Skill", "Sessions", "Input", "Output", "Cached", "Calls", "Cost")
+    rows = [
+        (
+            s["skill"],
+            f"{s['sessions']:,}",
+            f"{s['input_tokens']:,}",
+            f"{s['output_tokens']:,}",
+            f"{s['cached_tokens']:,}",
+            f"{s['llm_calls']:,}",
+            f"${s['estimated_usd']:.4f}",
+        )
+        for s in skills
+    ]
+    lines = [f"Skills across {data.get('session_count', 0)} sessions:"]
+    lines.extend(_render_columns(headers, rows, left_cols={0}))
+    return "\n".join(lines)
+
+
+def render_tool_breakdown(data: dict) -> str:
+    """Render a per-tool/per-skill/per-subagent call-count table."""
+    breakdown = data.get("tool_breakdown") or data.get("skills", {}).get("tool_breakdown", [])
+    if not breakdown:
+        return "No tool breakdown available."
+    headers = ("Tool", "Calls", "Skill", "Subagent")
+    rows = [
+        (
+            t["tool"],
+            f"{t['calls']:,}",
+            t["skill"],
+            t["subagent"],
+        )
+        for t in breakdown
+    ]
+    lines = ["Tool Breakdown:"]
+    lines.extend(_render_columns(headers, rows, left_cols={0, 2, 3}))
     return "\n".join(lines)
 
 
@@ -1485,8 +1945,14 @@ def render(payload: object, fmt: str, costed_list: bool = False) -> str:
             return render_table_list(payload["sessions"], summary=payload["summary"])
         if "session_count" in payload and "model_split" in payload:
             return render_aggregate(payload)
+        if "session_count" in payload and "skills" in payload:
+            return render_skills_aggregate(payload)
         if "model_split" in payload:
             return render_summary(payload)
+        if "skill_breakdown" in payload:
+            return render_skill_breakdown(payload)
+        if "tool_breakdown" in payload:
+            return render_tool_breakdown(payload)
     return render_table_single(payload)  # type: ignore[arg-type]
 
 
@@ -1552,6 +2018,48 @@ def output_option(f: Any) -> Any:
         "output_path",
         metavar="PATH",
         help="Write output to PATH instead of stdout.",
+    )(f)
+
+
+def skill_breakdown_option(f: Any) -> Any:
+    return click.option(
+        "--skill-breakdown",
+        is_flag=True,
+        help="Emit a per-skill cost breakdown instead of the default report.",
+    )(f)
+
+
+def tool_breakdown_option(f: Any) -> Any:
+    return click.option(
+        "--tool-breakdown",
+        is_flag=True,
+        help="Emit a per-skill/per-subagent tool-call count breakdown.",
+    )(f)
+
+
+def skill_filter_option(f: Any) -> Any:
+    return click.option(
+        "--skill",
+        "skill_name",
+        metavar="NAME",
+        help="Filter the report to a single skill (exact or substring match).",
+    )(f)
+
+
+def title_filter_option(f: Any) -> Any:
+    return click.option(
+        "--title",
+        "title_filter",
+        metavar="SUBSTRING",
+        help="Filter sessions by title substring (case-insensitive).",
+    )(f)
+
+
+def latest_option(f: Any) -> Any:
+    return click.option(
+        "--latest",
+        is_flag=True,
+        help="Analyze the most recent matching session instead of all matches.",
     )(f)
 
 

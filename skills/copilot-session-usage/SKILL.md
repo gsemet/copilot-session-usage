@@ -103,19 +103,77 @@ copilot-session-usage batch 10
 copilot-session-usage latest --detail full --format json
 ```
 
+## Skill-Aware Analysis
+
+The tool automatically detects and attributes costs to **skills** (e.g., `/skill-name`, `/namespace:skill-name`)
+by analyzing user messages, discovery events, and LLM call history. Use these commands
+to understand how skills are impacting your session costs.
+
+### Single-session skill analysis
+
+```bash
+# Show per-skill cost breakdown for a session
+copilot-session-usage id <session-id> --skill-breakdown
+
+# Filter to a specific skill and see only its costs
+copilot-session-usage id <session-id> --skill /my-skill
+
+# Show tool calls per skill and per subagent
+copilot-session-usage id <session-id> --tool-breakdown
+
+# Combine filters: skill + tool breakdown
+copilot-session-usage id <session-id> --skill /my-skill --tool-breakdown
+
+# Minimal JSON output (skill, cost_usd, tokens, llm_calls only)
+copilot-session-usage id <session-id> --skill /my-skill --format json --minimal
+```
+
+### Aggregate skills across sessions
+
+```bash
+# List all skills used in the last 7 days with aggregated costs
+copilot-session-usage skills --last 7d
+
+# List skills for a date range with detailed breakdown
+copilot-session-usage skills --since 2026-06-30 --until 2026-07-07 --format table
+
+# Filter sessions by title pattern, then aggregate skills
+copilot-session-usage skills --title "PRD" --last 30d --format table
+```
+
+### Session filtering by title
+
+```bash
+# Find sessions matching a substring (case-insensitive)
+copilot-session-usage list --title "my project" --format table
+
+# Analyze multiple sessions by title and aggregate
+copilot-session-usage analyze --title "bug fix" --aggregate --format table
+
+# Combine title filter with skill breakdown
+copilot-session-usage analyze --title "feature" --aggregate --skill-breakdown --format table
+```
+
 ## Key Features
 
 - **Per-model pricing** with cache-hit discounts
 - **Multi-model sessions** correctly handled
 - **Threshold-aware pricing** for long-context tiers
 - **Subagent cost attribution**
+- **Skill-aware cost attribution** — detect and attribute costs to skills used during session
 - **Cross-platform** (macOS, Linux, Windows, WSL2)
 - **Three detail levels**: minimal, compact, full
 - **JSON, table and detailed output**
 - **Regex session filtering** by title or ID (`--name`)
+- **Case-insensitive session title filtering** (`--title SUBSTRING`)
 - **Date-range filtering** (`--since`, `--until`, ISO 8601 with timezone)
+- **Relative date filtering** (`--last "7d"`, `--last "24h"`, `--last "30m"`)
 - **Aggregation** across many sessions in one command (`--aggregate`)
 - **Efficiency summaries** with cache ratio, model split, and cost per 1M tokens (`--summary`)
+- **Skill-breakdown analysis** — per-skill cost breakdown with `--skill-breakdown`
+- **Tool-call tracking** — per-skill/per-subagent tool invocation counts with `--tool-breakdown`
+- **Single-skill filtering** — focus analysis on one skill with `--skill SKILL`
+- **Skill aggregation** — list all skills and their costs across sessions with `skills` command
 - **Field extraction** with dot notation (`--query`)
 
 ## Pricing Data
@@ -148,9 +206,16 @@ the question:
 2. **Need totals across several sessions?** Use `analyze --name ... --aggregate`.
 3. **Need a per-session breakdown?** Use `analyze --name ... --summary --format table`.
 4. **Need full details for one session?** Use `analyze PATH --format table` or `--format detailed`.
+5. **Need to know which skills are expensive?** Use `skills --last 7d` to see aggregated costs per skill.
+6. **Need skill costs for one session?** Use `id <session-id> --skill-breakdown --format table`.
+7. **Need to focus on one skill?** Use `id <session-id> --skill /my-skill --format table`.
+8. **Need tool-call visibility per skill?** Use `--tool-breakdown` flag to see function invocations.
+9. **Need to find sessions by name?** Use `analyze --title "SUBSTRING" --aggregate` for batch analysis.
+10. **Need concise JSON?** Use `--format json --minimal` to get only {skill, cost_usd, tokens, llm_calls}.
 
 Avoid chaining `list` + multiple `analyze` calls when `--name` + `--aggregate` or
-`--summary` can do it in one pass.
+`--summary` can do it in one pass. Similarly, avoid looping over sessions for skill analysis
+when `skills` command can aggregate in one call.
 
 ## Preferred Output
 

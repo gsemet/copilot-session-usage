@@ -23,6 +23,13 @@ def sample_session_dir(tmp_path):
     events = [
         json.dumps(
             {
+                "ts": 500,
+                "type": "user_message",
+                "attrs": {"content": "/my-skill"},
+            }
+        ),
+        json.dumps(
+            {
                 "ts": 1_000_000,
                 "type": "llm_request",
                 "attrs": {
@@ -31,6 +38,14 @@ def sample_session_dir(tmp_path):
                     "outputTokens": 100,
                     "cachedTokens": 0,
                 },
+            }
+        ),
+        json.dumps(
+            {
+                "ts": 1_000_000,
+                "type": "tool_call",
+                "name": "read_file",
+                "attrs": {},
             }
         ),
     ]
@@ -505,3 +520,78 @@ def test_batch_command_until(runner, sample_session_dir, mocker):
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert data["summary"]["session_count"] == 1
+
+
+# ─── Skill-aware options ──────────────────────────────────────────────────────
+
+
+def test_id_command_skill_breakdown(runner, sample_session_dir, mocker):
+    mock_find = mocker.patch("copilot_session_usage._internal.vscode.find_session_dir_by_id")
+    mock_meta = mocker.patch("copilot_session_usage._internal.vscode.find_session_metadata_by_id")
+    mock_find.return_value = sample_session_dir
+    mock_meta.return_value = {"session_id": "abc-123", "title": "My Title"}
+    result = runner.invoke(cli, ["id", "abc-123", "--skill-breakdown", "--format", "table"])
+    assert result.exit_code == 0
+    assert "Per-Skill Breakdown" in result.output
+
+
+def test_id_command_tool_breakdown(runner, sample_session_dir, mocker):
+    mock_find = mocker.patch("copilot_session_usage._internal.vscode.find_session_dir_by_id")
+    mock_meta = mocker.patch("copilot_session_usage._internal.vscode.find_session_metadata_by_id")
+    mock_find.return_value = sample_session_dir
+    mock_meta.return_value = {"session_id": "abc-123", "title": "My Title"}
+    result = runner.invoke(cli, ["id", "abc-123", "--tool-breakdown", "--format", "table"])
+    assert result.exit_code == 0
+    assert "Tool Breakdown" in result.output
+
+
+def test_id_command_skill_filter(runner, sample_session_dir, mocker):
+    mock_find = mocker.patch("copilot_session_usage._internal.vscode.find_session_dir_by_id")
+    mock_meta = mocker.patch("copilot_session_usage._internal.vscode.find_session_metadata_by_id")
+    mock_find.return_value = sample_session_dir
+    mock_meta.return_value = {"session_id": "abc-123", "title": "My Title"}
+    result = runner.invoke(
+        cli, ["id", "abc-123", "--skill", "/my-skill", "--format", "json", "--detail", "minimal"]
+    )
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["skill"] == "/my-skill"
+
+
+def test_analyze_command_title_filter(runner, sample_session_dir, mocker):
+    mock_list = mocker.patch("copilot_session_usage._internal.vscode.list_recent_sessions")
+    mock_list.return_value = [
+        {
+            "session_id": "s1",
+            "title": "get-session-costs review",
+            "debug_log_dir": str(sample_session_dir),
+            "created_ms": 1_000_000,
+        }
+    ]
+    result = runner.invoke(
+        cli, ["analyze", "--title", "get-session-costs", "--latest", "--format", "table"]
+    )
+    assert result.exit_code == 0
+    assert "get-session-costs review" in result.output
+
+
+def test_list_command_title_filter(runner, mocker):
+    mock_list = mocker.patch("copilot_session_usage._internal.vscode.list_recent_sessions")
+    mock_list.return_value = [
+        {"session_id": "s1", "title": "get-session-costs review"},
+        {"session_id": "s2", "title": "Other"},
+    ]
+    result = runner.invoke(cli, ["list", "--title", "get-session-costs"])
+    assert result.exit_code == 0
+    assert "get-session-costs review" in result.output
+    assert "Other" not in result.output
+
+
+def test_skills_command(runner, sample_session_dir, mocker):
+    mock_list = mocker.patch("copilot_session_usage._internal.vscode.list_recent_sessions")
+    mock_list.return_value = [
+        {"session_id": "s1", "title": "Test", "debug_log_dir": str(sample_session_dir)}
+    ]
+    result = runner.invoke(cli, ["skills", "--format", "table"])
+    assert result.exit_code == 0
+    assert "Skills across" in result.output
