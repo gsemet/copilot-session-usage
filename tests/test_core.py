@@ -777,3 +777,161 @@ def test_parse_since_to_ms(value, expected_approx):
     result = core.parse_since_to_ms(value)
     assert result is not None
     assert abs(result - expected_approx) < 1000
+
+
+def test_parse_since_to_ms_with_timezone_offset():
+    result = core.parse_since_to_ms("2026-07-01T02:00:00+02:00")
+    assert result is not None
+    assert abs(result - 1_782_864_000_000) < 1000
+
+
+def test_parse_since_to_ms_invalid_returns_none():
+    assert core.parse_since_to_ms("not-a-date") is None
+
+
+# ─── Name filtering ───────────────────────────────────────────────────────────
+
+
+def test_filter_sessions_by_name_matches_title():
+    sessions = [
+        {"session_id": "s1", "title": "PRD: /path/to/prd"},
+        {"session_id": "s2", "title": "Other topic"},
+    ]
+    result = core.filter_sessions_by_name(sessions, r"PRD:.*/path/to/prd")
+    assert len(result) == 1
+    assert result[0]["session_id"] == "s1"
+
+
+def test_filter_sessions_by_name_matches_session_id():
+    sessions = [
+        {"session_id": "abc-123-prd", "title": "No match"},
+        {"session_id": "s2", "title": "Other"},
+    ]
+    result = core.filter_sessions_by_name(sessions, r"prd")
+    assert len(result) == 1
+    assert result[0]["session_id"] == "abc-123-prd"
+
+
+def test_filter_sessions_by_name_invalid_regex_raises():
+    with pytest.raises(ValueError, match="Invalid name regex"):
+        core.filter_sessions_by_name([], r"[invalid")
+
+
+# ─── Efficiency summary ───────────────────────────────────────────────────────
+
+
+def test_compute_efficiency_summary(full_session_result):
+    summary = core.compute_efficiency_summary(full_session_result)
+    assert summary["session_id"] == full_session_result["session_id"]
+    assert summary["cache_ratio"] == 0.5
+    assert summary["total_tokens"] == 1_700
+    assert summary["cost_per_1m_tokens"] > 0
+    assert len(summary["model_split"]) == 1
+    assert summary["model_split"][0]["model"] == "claude-sonnet-4.6"
+
+
+def test_compute_efficiency_summary_empty_model_breakdown():
+    result = {
+        "session_id": "s1",
+        "title": "Empty",
+        "total": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_tokens": 0,
+            "llm_calls": 0,
+            "estimated_usd": 0.0,
+            "cache_ratio": 0.0,
+        },
+        "model_breakdown": [],
+    }
+    summary = core.compute_efficiency_summary(result)
+    assert summary["total_tokens"] == 0
+    assert summary["cost_per_1m_tokens"] == 0.0
+    assert summary["model_split"] == []
+
+
+# ─── Aggregate sessions ───────────────────────────────────────────────────────
+
+
+def test_aggregate_sessions(full_session_result):
+    aggregate = core.aggregate_sessions([full_session_result, full_session_result])
+    assert aggregate["session_count"] == 2
+    assert aggregate["total_input_tokens"] == 2_000
+    assert aggregate["total_tokens"] == 3_400
+    assert aggregate["avg_cache_ratio"] == 0.5
+    assert aggregate["cost_per_1m_tokens"] > 0
+    assert len(aggregate["model_split"]) == 1
+
+
+def test_aggregate_sessions_empty():
+    aggregate = core.aggregate_sessions([])
+    assert aggregate["session_count"] == 0
+    assert aggregate["total_estimated_usd"] == 0.0
+    assert aggregate["model_split"] == []
+
+
+# ─── JSON path query ──────────────────────────────────────────────────────────
+
+
+def test_query_json_path_nested_dict():
+    data = {"total": {"estimated_usd": 1.23}}
+    assert core.query_json_path(data, ".total.estimated_usd") == 1.23
+
+
+def test_query_json_path_array_index():
+    data = {"items": [{"name": "first"}, {"name": "second"}]}
+    assert core.query_json_path(data, ".items[0].name") == "first"
+
+
+def test_query_json_path_array_wildcard():
+    data = {"items": [{"name": "first"}, {"name": "second"}]}
+    assert core.query_json_path(data, ".items[*]") == [{"name": "first"}, {"name": "second"}]
+
+
+def test_query_json_path_missing_key_returns_none():
+    data = {"total": {"estimated_usd": 1.23}}
+    assert core.query_json_path(data, ".total.missing") is None
+
+
+def test_query_json_path_no_leading_dot():
+    data = {"total": {"estimated_usd": 1.23}}
+    assert core.query_json_path(data, "total.estimated_usd") == 1.23
+
+
+# ─── Queryable fields reference ───────────────────────────────────────────────
+
+
+def test_get_queryable_fields():
+    fields = core.get_queryable_fields()
+    assert "session_id" in fields
+    assert "total.estimated_usd" in fields
+
+
+# ─── Directory session listing ────────────────────────────────────────────────
+
+
+def test_list_session_dirs(tmp_path):
+    debug_dir = tmp_path / "debug-logs"
+    debug_dir.mkdir()
+    session_a = debug_dir / "sess-a"
+    session_a.mkdir()
+    (session_a / "main.jsonl").write_text("{}", encoding="utf-8")
+    session_b = debug_dir / "sess-b"
+    session_b.mkdir()
+    (session_b / "main.jsonl").write_text("{}", encoding="utf-8")
+    (debug_dir / "not-a-session.txt").write_text("", encoding="utf-8")
+
+    sessions = core.list_session_dirs(debug_dir)
+    assert len(sessions) == 2
+    assert {s["session_id"] for s in sessions} == {"sess-a", "sess-b"}
+
+
+def test_list_session_dirs_missing_dir():
+    assert core.list_session_dirs(Path("/nonexistent/debug-logs")) == []
+
+
+def test_list_session_dirs_skips_dirs_without_jsonl(tmp_path):
+    debug_dir = tmp_path / "debug-logs"
+    debug_dir.mkdir()
+    (debug_dir / "empty-dir").mkdir()
+    assert core.list_session_dirs(debug_dir) == []

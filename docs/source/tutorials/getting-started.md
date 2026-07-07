@@ -135,6 +135,60 @@ Output includes a summary row with aggregate totals and a per-session table.
 
 ---
 
+## Filter and aggregate sessions efficiently
+
+When you want costs for a set of related sessions, avoid manual loops. Use
+`analyze --name` with a regex and `--aggregate` to get one summary.
+
+```bash
+# Aggregate all sessions matching a PRD path
+copilot-session-usage analyze --name "PRD: /path/to/prd" --aggregate --format table
+
+# Add date bounds
+copilot-session-usage analyze \
+  --name "PRD: /path/to/prd" \
+  --since 2026-06-30T00:00:00Z \
+  --until 2026-07-07T00:00:00Z \
+  --aggregate \
+  --format table
+```
+
+`--name` matches against the session title or ID (case-insensitive regex).
+
+---
+
+## Extract a single field
+
+When scripting, pull only the value you need instead of parsing full JSON.
+
+```bash
+copilot-session-usage analyze /path/to/debug-logs --query .total.estimated_usd
+```
+
+Use `--query-help` to see all supported paths.
+
+---
+
+## Cost-efficiency summary
+
+Get cache ratio, model split, and cost per 1M tokens in one block.
+
+```bash
+copilot-session-usage analyze /path/to/debug-logs --summary --format table
+```
+
+---
+
+## List sessions from a debug-logs directory
+
+When you already know the folder, skip workspace discovery and show cost columns.
+
+```bash
+copilot-session-usage list --dir /path/to/debug-logs --format table
+```
+
+---
+
 ## Next steps
 
 - [How-To Guides](../how-to/index.md) — export to JSON, filter by date, WSL2 setup

@@ -3,6 +3,26 @@
 Use this when you know the path to a session's debug-log directory or its UUID,
 and `latest` would pick the wrong session.
 
+## By name regex across all sessions
+
+When you want to analyze several related sessions at once, use `analyze --name`
+with a case-insensitive regex. This is more efficient than running `find` or
+`list` and then analyzing each session separately.
+
+```bash
+# Analyze all sessions whose title matches a PRD or feature
+copilot-session-usage analyze --name "feature-x" --format table
+
+# Aggregate them into a single summary
+copilot-session-usage analyze --name "feature-x" --aggregate --format table
+
+# Cost-efficiency summary for each matching session
+copilot-session-usage analyze --name "feature-x" --summary --format table
+```
+
+Add `--since` and `--until` to narrow the date range, or `--workspace` to
+restrict to one workspace folder.
+
 ## By debug-log path
 
 Each session is a directory inside VS Code's `workspaceStorage`:

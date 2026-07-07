@@ -33,6 +33,12 @@ copilot-session-usage list
 
 # Batch analyze the last 10 sessions
 copilot-session-usage batch 10
+
+# Aggregate cost across all sessions matching a PRD path
+copilot-session-usage analyze --name "PRD: /path/to/prd" --aggregate --format table
+
+# List sessions in a debug-logs folder with cost columns
+copilot-session-usage list --dir /path/to/debug-logs --format table
 ```
 
 ## Features
@@ -45,6 +51,10 @@ copilot-session-usage batch 10
 - **Three output formats** — `json` (default), `table`, `detailed`
 - **Three detail levels** — `minimal`, `compact`, `full`
 - **JSON and table output** — machine-readable or human-friendly
+- **Session filtering** — regex match by name, date-range filtering
+- **Aggregation** — roll up costs across many sessions in one command
+- **Efficiency summaries** — cache ratio, model split, cost per 1M tokens
+- **Field extraction** — pull specific values with `--query`
 
 ## How it works
 
@@ -76,12 +86,25 @@ just knowledge-validate
 
 | Command | Description |
 |---------|-------------|
-| `analyze PATH` | Analyze one session by its debug-log directory |
+| `analyze [PATH]` | Analyze one session by PATH, or many by `--name` regex |
 | `latest` | Analyze the most recently modified session |
 | `find TITLE` | Find and analyze a session by title (fuzzy match) |
 | `id SESSION_ID` | Analyze a session by exact UUID |
-| `list` | List recent sessions (metadata only, no cost) |
+| `list` | List recent sessions (metadata only by default) |
 | `batch N` | Analyze the N most recent sessions in one pass |
+
+### Analysis options
+
+| Option | Description |
+|--------|-------------|
+| `--name REGEX` | Filter sessions by title/ID regex (case-insensitive) |
+| `--since DATE` | Only sessions created after DATE (ISO 8601 with timezone) |
+| `--until DATE` | Only sessions created before DATE (ISO 8601 with timezone) |
+| `--workspace PATH` | Only sessions from this workspace folder |
+| `--aggregate` | Aggregate all matching sessions into one summary |
+| `--summary` | Output a cost-efficiency summary |
+| `--query PATH` | Extract a single field with dot notation |
+| `--query-help` | Print all `--query` field paths |
 
 ### Global options
 
@@ -131,6 +154,20 @@ Est. cost: $1.0880
 # Batch analyze last 5 sessions since July 1st
 copilot-session-usage batch 5 --since 2026-07-01
 
+# Aggregate all PRD-related sessions from the last week
+copilot-session-usage analyze \
+  --name "PRD: /path/to/prd" \
+  --since 2026-06-30T00:00:00Z \
+  --until 2026-07-07T00:00:00Z \
+  --aggregate \
+  --format table
+
+# Cost-efficiency summary for a single session
+copilot-session-usage analyze /path/to/debug-logs --summary --format table
+
+# Extract just the total cost from a session
+copilot-session-usage analyze /path/to/debug-logs --query .total.estimated_usd
+
 # WSL2: point to Windows host workspaceStorage
 copilot-session-usage latest \
   --workspace-storage /mnt/c/Users/$USER/AppData/Roaming/Code/User/workspaceStorage
@@ -139,7 +176,13 @@ copilot-session-usage latest \
 ## Python API
 
 ```python
-from copilot_session_usage.api import analyze_session, analyze_latest, batch_analyze
+from copilot_session_usage.api import (
+    analyze_session,
+    analyze_latest,
+    batch_analyze,
+    aggregate_sessions,
+    list_sessions,
+)
 
 # Analyze a session by path
 result = analyze_session(Path("/path/to/debug-logs"), detail="full")
@@ -149,6 +192,16 @@ result = analyze_latest(detail="compact")
 
 # Batch analyze the last 10 sessions
 batch = batch_analyze(10, detail="minimal")
+
+# Aggregate multiple full analyses into one efficiency summary
+aggregate = aggregate_sessions([result1, result2])
+
+# List sessions with regex and date-range filtering
+sessions = list_sessions(
+    name_pattern=r"PRD",
+    since="2026-07-01T00:00:00Z",
+    until="2026-07-07T00:00:00Z",
+)
 ```
 
 ## Development

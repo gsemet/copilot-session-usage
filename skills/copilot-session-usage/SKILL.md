@@ -24,6 +24,58 @@ Beware of `latest` session ID when several sessions are running in parallel.
 uv tool install copilot-session-usage
 ```
 
+## Token-efficient CLI usage
+
+The CLI is designed to replace manual loops with single commands. Prefer these
+patterns to minimize token spend and avoid parsing intermediate output.
+
+### Single session
+
+```bash
+# Fastest: analyze a known debug-log directory
+copilot-session-usage analyze /path/to/session/debug-logs --format table
+
+# Or analyze by exact session ID (use VSCODE_TARGET_SESSION_LOG)
+copilot-session-usage id <session-id> --format table
+```
+
+### Aggregate across matching sessions
+
+```bash
+# One command replaces: list → filter → analyze each → sum
+copilot-session-usage analyze --name "PRD: /path/to/prd" --aggregate --format table
+
+# Add date bounds to narrow the window
+copilot-session-usage analyze \
+  --name "PRD: /path/to/prd" \
+  --since 2026-06-30T00:00:00Z \
+  --until 2026-07-07T00:00:00Z \
+  --aggregate \
+  --format table
+```
+
+### Directory-level listing with costs
+
+```bash
+# When you already know the debug-logs folder, skip workspace discovery
+copilot-session-usage list --dir /path/to/debug-logs --format table
+```
+
+### Extract a single field
+
+```bash
+# Avoid parsing full JSON when you only need one value
+copilot-session-usage analyze /path/to/debug-logs --query .total.estimated_usd
+copilot-session-usage analyze --name "PRD" --aggregate --query .total_estimated_usd
+```
+
+### Cost-efficiency summary
+
+```bash
+# Cache ratio, model split, and cost per 1M tokens in one block
+copilot-session-usage analyze /path/to/debug-logs --summary --format table
+```
+
 ## CLI Usage
 
 ```bash
@@ -35,8 +87,14 @@ copilot-session-usage id <session-id>
 # Analyze a specific session by its debug-log directory
 copilot-session-usage analyze /path/to/session/debug-logs
 
+# Analyze many sessions by regex and aggregate
+copilot-session-usage analyze --name "PRD: /path/to/prd" --aggregate --format table
+
 # List recent sessions (metadata only)
 copilot-session-usage list
+
+# List sessions in a debug-logs folder with cost columns
+copilot-session-usage list --dir /path/to/debug-logs --format table
 
 # Batch analyze the last 10 sessions
 copilot-session-usage batch 10
@@ -54,6 +112,11 @@ copilot-session-usage latest --detail full --format json
 - **Cross-platform** (macOS, Linux, Windows, WSL2)
 - **Three detail levels**: minimal, compact, full
 - **JSON, table and detailed output**
+- **Regex session filtering** by title or ID (`--name`)
+- **Date-range filtering** (`--since`, `--until`, ISO 8601 with timezone)
+- **Aggregation** across many sessions in one command (`--aggregate`)
+- **Efficiency summaries** with cache ratio, model split, and cost per 1M tokens (`--summary`)
+- **Field extraction** with dot notation (`--query`)
 
 ## Pricing Data
 
@@ -75,6 +138,19 @@ Pricing data is bundled withing the copilot-session-usage package in `src/copilo
 - `table` — Human-readable aligned table (default)
 - `json` — Machine-readable JSON
 - `detailed` — Alias for `table` with `full` detail
+
+## Preferred workflow for agents
+
+When asked about session cost, use the most token-efficient command that answers
+the question:
+
+1. **Need one number?** Use `--query`.
+2. **Need totals across several sessions?** Use `analyze --name ... --aggregate`.
+3. **Need a per-session breakdown?** Use `analyze --name ... --summary --format table`.
+4. **Need full details for one session?** Use `analyze PATH --format table` or `--format detailed`.
+
+Avoid chaining `list` + multiple `analyze` calls when `--name` + `--aggregate` or
+`--summary` can do it in one pass.
 
 ## Preferred Output
 

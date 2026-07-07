@@ -2,6 +2,14 @@
 
 Use `batch` with `--since` to aggregate costs for a time window.
 
+For a specific set of related sessions (for example, all sessions whose title
+matches a PRD or feature), prefer `analyze --name ... --aggregate`. It reads
+only matching sessions and returns a single summary in one command.
+
+```bash
+copilot-session-usage analyze --name "feature-x" --aggregate --format table
+```
+
 ## Daily cost report
 
 ```bash
