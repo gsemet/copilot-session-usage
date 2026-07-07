@@ -674,6 +674,23 @@ def full_session_result():
             "cache_ratio": 0.5,
         },
         "pricing_note": "note",
+        "skills": {
+            "detected": ["/test-skill"],
+            "active": "/test-skill",
+            "breakdown": [
+                {
+                    "skill": "/test-skill",
+                    "input_tokens": 1_000,
+                    "output_tokens": 200,
+                    "cached_tokens": 500,
+                    "llm_calls": 5,
+                    "estimated_usd": 0.42,
+                }
+            ],
+            "tool_breakdown": [
+                {"tool": "read_file", "calls": 3, "skill": "/test-skill", "subagent": "main"}
+            ],
+        },
     }
 
 
@@ -687,6 +704,7 @@ def test_shape_session_minimal_smallest(full_session_result):
     assert "subagents" not in shaped
     assert "fallback_pricing_models" not in shaped
     assert "pricing_note" not in shaped
+    assert "skills" not in shaped
     assert shaped["total"] == full_session_result["total"]
     assert shaped["session_id"] == full_session_result["session_id"]
     assert "session_dir" not in shaped
@@ -699,6 +717,7 @@ def test_shape_session_compact_has_models_and_fallback_no_breakdown(full_session
     assert shaped["models"] == full_session_result["models"]
     assert shaped["fallback_pricing_models"] == []
     assert shaped["pricing_note"] == "note"
+    assert shaped["skills"] == full_session_result["skills"]
 
 
 # ─── --format detailed alias ──────────────────────────────────────────────────
@@ -935,3 +954,321 @@ def test_list_session_dirs_skips_dirs_without_jsonl(tmp_path):
     debug_dir.mkdir()
     (debug_dir / "empty-dir").mkdir()
     assert core.list_session_dirs(debug_dir) == []
+
+
+# ─── Skill detection and attribution ──────────────────────────────────────────
+
+
+def _make_user_message_event(content: str, ts: int = 1000) -> str:
+    return json.dumps({"ts": ts, "type": "user_message", "attrs": {"content": content}})
+
+
+def _make_skill_discovery_event(details: str, ts: int = 1000) -> str:
+    return json.dumps(
+        {"ts": ts, "type": "discovery", "name": "Skill Discovery", "attrs": {"details": details}}
+    )
+
+
+def _make_custom_instructions_event(details: str, ts: int = 1000) -> str:
+    return json.dumps(
+        {"ts": ts, "type": "generic", "name": "Custom Instructions", "attrs": {"details": details}}
+    )
+
+
+def test_extract_slash_command_skill_namespace():
+    assert (
+        core._extract_slash_command_skill("/compendium-generic get-session-costs")
+        == "/compendium-generic get-session-costs"
+    )
+
+
+def test_extract_slash_command_skill_single_token():
+    assert core._extract_slash_command_skill("/deploy") == "/deploy"
+
+
+def test_extract_slash_command_skill_ignores_regular_text():
+    assert core._extract_slash_command_skill("hello /world") is None
+
+
+def test_extract_slash_command_skill_trims_extra_args():
+    assert (
+        core._extract_slash_command_skill("/compendium-generic grill-me some extra args")
+        == "/compendium-generic grill-me"
+    )
+
+
+def test_extract_skills_from_discovery():
+    details = "loaded: ['skill-a', 'skill-b']"
+    assert core._extract_skills_from_discovery(details) == ["skill-a", "skill-b"]
+
+
+def test_extract_skills_from_generic_details():
+    details = "skills: [2] skill-a, skill-b\nagents: agent-1"
+    assert core._extract_skills_from_generic_details(details) == ["skill-a", "skill-b"]
+
+
+def test_build_skill_timeline_from_user_messages(tmp_path):
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    (session_dir / "main.jsonl").write_text(
+        _make_user_message_event("/skill-a", ts=1000)
+        + "\n"
+        + _make_user_message_event("/skill-b", ts=2000)
+        + "\n",
+        encoding="utf-8",
+    )
+    timeline = core.build_skill_timeline(session_dir)
+    assert timeline == [(1000, "/skill-a"), (2000, "/skill-b")]
+
+
+def test_active_skill_at_ts_returns_most_recent(tmp_path):
+    timeline = [(1000, "/skill-a"), (2000, "/skill-b")]
+    assert core.active_skill_at_ts(1500, timeline) == "/skill-a"
+    assert core.active_skill_at_ts(2500, timeline) == "/skill-b"
+    assert core.active_skill_at_ts(500, timeline) is None
+
+
+def test_detect_session_skills_from_multiple_sources(tmp_path):
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    (session_dir / "main.jsonl").write_text(
+        _make_user_message_event("/skill-a", ts=1000)
+        + "\n"
+        + _make_skill_discovery_event("loaded: ['skill-b']", ts=2000)
+        + "\n"
+        + _make_custom_instructions_event("skills: [1] skill-c\nagents: x", ts=3000)
+        + "\n",
+        encoding="utf-8",
+    )
+    detected = core.detect_session_skills(session_dir)
+    assert set(detected["detected"]) == {"/skill-a", "skill-b", "skill-c"}
+
+
+def test_parse_jsonl_file_attributes_to_skill(tmp_path):
+    f = tmp_path / "main.jsonl"
+    f.write_text(
+        _make_user_message_event("/my-skill", ts=500)
+        + "\n"
+        + _make_llm_event("claude-sonnet-4.6", 100, 50, ts=1000)
+        + "\n"
+        + _make_llm_event("claude-sonnet-4.6", 200, 30, ts=2000)
+        + "\n",
+        encoding="utf-8",
+    )
+    timeline = core.build_skill_timeline(tmp_path)
+    stats = core.parse_jsonl_file(f, timeline)
+    assert stats["per_skill"]["/my-skill"]["input"] == 300
+    assert stats["per_skill"]["/my-skill"]["calls"] == 2
+
+
+def test_parse_tool_calls(tmp_path):
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    (session_dir / "main.jsonl").write_text(
+        _make_user_message_event("/my-skill", ts=500)
+        + "\n"
+        + json.dumps({"ts": 1000, "type": "tool_call", "name": "read_file", "attrs": {}})
+        + "\n"
+        + json.dumps({"ts": 2000, "type": "tool_call", "name": "run_in_terminal", "attrs": {}})
+        + "\n",
+        encoding="utf-8",
+    )
+    timeline = core.build_skill_timeline(session_dir)
+    calls = core.parse_tool_calls(session_dir, timeline)
+    assert len(calls) == 2
+    assert calls[0]["tool"] == "read_file"
+    assert calls[0]["skill"] == "/my-skill"
+    assert calls[0]["subagent"] == "main"
+
+
+def test_aggregate_tool_calls(tmp_path):
+    calls = [
+        {"tool": "read_file", "skill": "/my-skill", "subagent": "main"},
+        {"tool": "read_file", "skill": "/my-skill", "subagent": "main"},
+        {"tool": "run_in_terminal", "skill": "/my-skill", "subagent": "main"},
+    ]
+    breakdown = core.aggregate_tool_calls(calls)
+    assert len(breakdown) == 2
+    read_file = next(b for b in breakdown if b["tool"] == "read_file")
+    assert read_file["calls"] == 2
+
+
+def test_analyze_session_skill_breakdown(tmp_path):
+    session_dir = _write_session(
+        tmp_path,
+        {
+            "main.jsonl": [
+                _make_user_message_event("/my-skill", ts=500),
+                _make_llm_event("claude-sonnet-4.6", 1000, 100, 200, ts=1000),
+                _make_llm_event("claude-sonnet-4.6", 500, 50, 0, ts=2000),
+            ]
+        },
+    )
+    result = core.analyze_session(session_dir, PRICING)
+    assert result["skills"]["active"] == "/my-skill"
+    assert "/my-skill" in {s["skill"] for s in result["skills"]["breakdown"]}
+    skill = next(s for s in result["skills"]["breakdown"] if s["skill"] == "/my-skill")
+    assert skill["input_tokens"] == 1500
+    assert skill["llm_calls"] == 2
+
+
+def test_shape_session_skill_breakdown():
+    data = {
+        "session_id": "s1",
+        "title": "Test",
+        "skills": {
+            "breakdown": [
+                {
+                    "skill": "/a",
+                    "input_tokens": 100,
+                    "output_tokens": 10,
+                    "cached_tokens": 0,
+                    "llm_calls": 1,
+                    "estimated_usd": 0.1,
+                }
+            ]
+        },
+    }
+    shaped = core.shape_session_skill_breakdown(data)
+    assert shaped["skill_breakdown"][0]["skill"] == "/a"
+
+
+def test_shape_session_tool_breakdown():
+    data = {
+        "session_id": "s1",
+        "title": "Test",
+        "skills": {
+            "tool_breakdown": [{"tool": "read_file", "calls": 5, "skill": "/a", "subagent": "main"}]
+        },
+    }
+    shaped = core.shape_session_tool_breakdown(data)
+    assert shaped["tool_breakdown"][0]["tool"] == "read_file"
+
+
+def test_shape_session_minimal_skill_found():
+    data = {
+        "skills": {
+            "breakdown": [
+                {
+                    "skill": "/a",
+                    "input_tokens": 100,
+                    "output_tokens": 10,
+                    "cached_tokens": 0,
+                    "llm_calls": 1,
+                    "estimated_usd": 0.1,
+                }
+            ]
+        }
+    }
+    shaped = core.shape_session_minimal_skill(data, "/a")
+    assert shaped == {
+        "skill": "/a",
+        "cost_usd": 0.1,
+        "input_tokens": 100,
+        "output_tokens": 10,
+        "cached_tokens": 0,
+        "llm_calls": 1,
+    }
+
+
+def test_shape_session_minimal_skill_not_found():
+    assert core.shape_session_minimal_skill({"skills": {"breakdown": []}}, "/missing") is None
+
+
+def test_aggregate_skills():
+    results = [
+        {
+            "skills": {
+                "breakdown": [
+                    {
+                        "skill": "/a",
+                        "input_tokens": 100,
+                        "output_tokens": 10,
+                        "cached_tokens": 0,
+                        "llm_calls": 1,
+                        "estimated_usd": 0.1,
+                    }
+                ]
+            }
+        },
+        {
+            "skills": {
+                "breakdown": [
+                    {
+                        "skill": "/a",
+                        "input_tokens": 200,
+                        "output_tokens": 20,
+                        "cached_tokens": 0,
+                        "llm_calls": 2,
+                        "estimated_usd": 0.2,
+                    }
+                ]
+            }
+        },
+    ]
+    aggregate = core.aggregate_skills(results)
+    assert aggregate["session_count"] == 2
+    skill = next(s for s in aggregate["skills"] if s["skill"] == "/a")
+    assert skill["input_tokens"] == 300
+    assert skill["llm_calls"] == 3
+    assert skill["estimated_usd"] == 0.3
+
+
+def test_parse_last_window_to_ms():
+    result = core.parse_last_window_to_ms("1h")
+    assert result is not None
+    from datetime import datetime, timezone
+
+    expected = int((datetime.now(timezone.utc).timestamp() - 3600) * 1000)
+    assert abs(result - expected) < 1000
+
+
+def test_parse_last_window_to_ms_invalid():
+    assert core.parse_last_window_to_ms("not-a-duration") is None
+
+
+def test_render_skill_breakdown():
+    data = {
+        "skill_breakdown": [
+            {
+                "skill": "/a",
+                "input_tokens": 1000,
+                "output_tokens": 100,
+                "cached_tokens": 0,
+                "llm_calls": 5,
+                "estimated_usd": 0.1234,
+            }
+        ]
+    }
+    text = core.render_skill_breakdown(data)
+    assert "/a" in text
+    assert "$0.1234" in text
+
+
+def test_render_tool_breakdown():
+    data = {
+        "tool_breakdown": [{"tool": "read_file", "calls": 5, "skill": "/a", "subagent": "main"}]
+    }
+    text = core.render_tool_breakdown(data)
+    assert "read_file" in text
+    assert "/a" in text
+
+
+def test_render_skills_aggregate():
+    data = {
+        "session_count": 2,
+        "skills": [
+            {
+                "skill": "/a",
+                "sessions": 2,
+                "input_tokens": 300,
+                "output_tokens": 30,
+                "cached_tokens": 0,
+                "llm_calls": 3,
+                "estimated_usd": 0.3,
+            }
+        ],
+    }
+    text = core.render_skills_aggregate(data)
+    assert "/a" in text
+    assert "$0.3000" in text

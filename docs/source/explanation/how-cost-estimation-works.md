@@ -103,6 +103,24 @@ VS Code AIC panel at **0.000% error** for Claude models.
 tracks them separately so `--detail full` can show which fraction of tokens
 was consumed by subagents vs. the main conversation.
 
+Subagent names are extracted from the JSONL filename
+(`runSubagent-<Name>-functions.runSubagent:<id>.jsonl`) and from
+`child_session_ref` events in `main.jsonl`.
+
+## Skill attribution
+
+Skills are detected from three sources in the debug logs:
+
+- `user_message` events containing slash commands such as `/skill-name` or
+  `/namespace skill-name`.
+- `discovery` events of type `Skill Discovery` that list loaded skills.
+- `generic` events named `Custom Instructions` that enumerate on-demand skills.
+
+Each `llm_request` and `tool_call` is attributed to the most recently invoked
+skill at that timestamp. The result is included in the session report under the
+`skills` key and can be surfaced with `--skill-breakdown`, `--tool-breakdown`,
+or `--skill <name>`.
+
 ---
 
 ## Accuracy

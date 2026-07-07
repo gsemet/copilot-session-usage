@@ -53,6 +53,10 @@ copilot-session-usage list --dir /path/to/debug-logs --format table
 - **JSON and table output** — machine-readable or human-friendly
 - **Session filtering** — regex match by name, date-range filtering
 - **Aggregation** — roll up costs across many sessions in one command
+- **Skill-aware cost attribution** — detect skills, attribute LLM and tool calls to the active skill
+- **Skill cost breakdown** — per-skill token counts and estimated cost
+- **Tool-call attribution** — per-skill/per-subagent tool-call counts
+- **Title filtering** — find sessions by title substring
 - **Efficiency summaries** — cache ratio, model split, cost per 1M tokens
 - **Field extraction** — pull specific values with `--query`
 
@@ -92,17 +96,22 @@ just knowledge-validate
 | `id SESSION_ID` | Analyze a session by exact UUID |
 | `list` | List recent sessions (metadata only by default) |
 | `batch N` | Analyze the N most recent sessions in one pass |
+| `skills` | List skills used across sessions with aggregated cost |
 
 ### Analysis options
 
 | Option | Description |
 |--------|-------------|
 | `--name REGEX` | Filter sessions by title/ID regex (case-insensitive) |
+| `--title SUBSTRING` | Filter sessions by title substring (case-insensitive) |
 | `--since DATE` | Only sessions created after DATE (ISO 8601 with timezone) |
 | `--until DATE` | Only sessions created before DATE (ISO 8601 with timezone) |
 | `--workspace PATH` | Only sessions from this workspace folder |
 | `--aggregate` | Aggregate all matching sessions into one summary |
 | `--summary` | Output a cost-efficiency summary |
+| `--skill-breakdown` | Emit a per-skill cost breakdown |
+| `--tool-breakdown` | Emit a per-skill/per-subagent tool-call count breakdown |
+| `--skill NAME` | Filter the report to a single skill |
 | `--query PATH` | Extract a single field with dot notation |
 | `--query-help` | Print all `--query` field paths |
 
@@ -150,7 +159,45 @@ Output:    22,166 tokens
 Cached:    1,224,340 (86%)
 LLM calls: 28
 Est. cost: $1.0880
+# Per-skill cost breakdown
+$ copilot-session-usage id 19e03be0-9cfa-4f21-a19a-4bdb754b3965 --skill-breakdown --format table
+Per-Skill Breakdown:
+  Skill                              Input      Cached  Output  Calls     Cost
+  ----------------------------------------------------------------------------
+  /compendium-generic get-session-costs  1,137,864  1,015,825  15,729     24  $0.3636
 
+# Per-skill/per-subagent tool-call counts
+$ copilot-session-usage id 19e03be0-9cfa-4f21-a19a-4bdb754b3965 --tool-breakdown --format table
+Tool Breakdown:
+  Tool                          Calls  Skill                         Subagent
+  ---------------------------------------------------------------------------
+  read_file                        25  /compendium-generic get-session-costs  main
+  vscode_askQuestions               3  /compendium-generic get-session-costs  main
+  runSubagent                       1  /compendium-generic get-session-costs  main
+
+# Concise skill cost (great for scripts)
+$ copilot-session-usage id 19e03be0-9cfa-4f21-a19a-4bdb754b3965 \
+    --skill "/compendium-generic get-session-costs" \
+    --format json --detail minimal
+{
+  "skill": "/compendium-generic get-session-costs",
+  "cost_usd": 0.3636,
+  "input_tokens": 1137864,
+  "output_tokens": 15729,
+  "cached_tokens": 1015825,
+  "llm_calls": 24
+}
+
+# List skills used across the last 7 days
+$ copilot-session-usage skills --last 7d --format table
+Skills across 23 sessions:
+  Skill                              Sessions        Input     Output       Cached   Calls       Cost
+  ---------------------------------------------------------------------------------------------------
+  /compendium-generic get-session-costs       3    1137864      15729      1015825      24  $0.3636
+
+# Filter sessions by title substring
+$ copilot-session-usage list --title "get-session-costs"
+$ copilot-session-usage analyze --title "grill-me" --latest
 # Batch analyze last 5 sessions since July 1st
 copilot-session-usage batch 5 --since 2026-07-01
 

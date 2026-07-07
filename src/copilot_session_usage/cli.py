@@ -81,8 +81,40 @@ def _apply_query(payload: object, query: str | None) -> object:
     return None
 
 
+def _shape_analysis_result(
+    result: dict,
+    *,
+    detail: str,
+    format_: str,
+    summary: bool,
+    skill_breakdown: bool,
+    tool_breakdown: bool,
+    skill_name: str | None,
+) -> object:
+    """Shape a single-session analysis result based on CLI flags."""
+    if summary:
+        return core.compute_efficiency_summary(result)
+    if skill_breakdown:
+        return core.shape_session_skill_breakdown(result)
+    if tool_breakdown:
+        return core.shape_session_tool_breakdown(result)
+    if skill_name:
+        normalized = core._normalize_skill_name(skill_name)
+        shaped = core.shape_session_minimal_skill(result, normalized)
+        if shaped is None:
+            raise click.ClickException(f"skill {skill_name!r} not found in session.")
+        return shaped
+    detail = core.resolve_detail(detail, format_)
+    return core.shape_session(result, detail)
+
+
 @cli.command()
 @core.analysis_options
+@core.skill_breakdown_option
+@core.tool_breakdown_option
+@core.skill_filter_option
+@core.title_filter_option
+@core.latest_option
 @click.option(
     "--name",
     metavar="REGEX",
@@ -125,6 +157,11 @@ def analyze(
     detail: str,
     format_: str,
     output_path: str | None,
+    skill_breakdown: bool,
+    tool_breakdown: bool,
+    skill_name: str | None,
+    title_filter: str | None,
+    latest: bool,
     name: str | None,
     since: str | None,
     until: str | None,
@@ -149,10 +186,10 @@ def analyze(
         click.echo("\n".join(lines))
         return
 
-    if log_dir and name:
-        raise click.ClickException("Provide either PATH or --name, not both.")
-    if not log_dir and not name:
-        raise click.ClickException("Provide a PATH or --name regex.")
+    if log_dir and (name or title_filter):
+        raise click.ClickException("Provide either PATH or --name/--title, not both.")
+    if not log_dir and not name and not title_filter:
+        raise click.ClickException("Provide a PATH or --name regex or --title substring.")
 
     out_path = Path(output_path) if output_path else None
     pricing = core.load_pricing()
@@ -163,11 +200,15 @@ def analyze(
             msg = f"log directory not found: {session_dir}"
             raise click.ClickException(msg)
         result = core.analyze_session(session_dir, pricing)
-        if summary:
-            shaped: object = core.compute_efficiency_summary(result)
-        else:
-            detail = core.resolve_detail(detail, format_)
-            shaped = core.shape_session(result, detail)
+        shaped = _shape_analysis_result(
+            result,
+            detail=detail,
+            format_=format_,
+            summary=summary,
+            skill_breakdown=skill_breakdown,
+            tool_breakdown=tool_breakdown,
+            skill_name=skill_name,
+        )
         output = _apply_query(shaped, query)
         core.emit(output, core.normalize_format(format_), out_path)
         return
@@ -181,6 +222,8 @@ def analyze(
         until_ms = core.parse_since_to_ms(until)
         if until_ms is not None:
             sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
+    if title_filter:
+        sessions = [s for s in sessions if title_filter.lower() in (s.get("title") or "").lower()]
     if name:
         try:
             sessions = core.filter_sessions_by_name(sessions, name)
@@ -188,6 +231,9 @@ def analyze(
             raise click.ClickException(str(exc)) from exc
     if not sessions:
         raise click.ClickException("no sessions matched the given filters.")
+
+    if latest:
+        sessions = [sessions[0]]
 
     results: list[dict] = []
     for session in sessions:
@@ -203,6 +249,19 @@ def analyze(
         payload = core.aggregate_sessions(results)
     elif summary:
         payload = [core.compute_efficiency_summary(r) for r in results]
+    elif skill_breakdown:
+        payload = [core.shape_session_skill_breakdown(r) for r in results]
+    elif tool_breakdown:
+        payload = [core.shape_session_tool_breakdown(r) for r in results]
+    elif skill_name:
+        normalized = core._normalize_skill_name(skill_name)
+        payload = [
+            core.shape_session_minimal_skill(r, normalized)
+            for r in results
+            if core.shape_session_minimal_skill(r, normalized) is not None
+        ]
+        if not payload:
+            raise click.ClickException(f"skill {skill_name!r} not found in any matching session.")
     else:
         detail = core.resolve_detail(detail, format_)
         payload = [core.shape_session(r, detail) for r in results]
@@ -299,6 +358,9 @@ def find_by_title(
 
 @cli.command(name="id")
 @core.analysis_options
+@core.skill_breakdown_option
+@core.tool_breakdown_option
+@core.skill_filter_option
 @click.argument("session_id")
 @click.pass_context
 def analyze_by_id(
@@ -307,6 +369,9 @@ def analyze_by_id(
     detail: str,
     format_: str,
     output_path: str | None,
+    skill_breakdown: bool,
+    tool_breakdown: bool,
+    skill_name: str | None,
 ) -> None:
     """Analyze a session by its exact SESSION_ID (UUID)."""
     ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
@@ -318,9 +383,17 @@ def analyze_by_id(
     result = core.analyze_session(session_dir, pricing)
     meta = vscode.find_session_metadata_by_id(session_id, ws_roots)
     result["title"] = meta.get("title") if meta else result.get("title")
-    detail = core.resolve_detail(detail, format_)
+    shaped = _shape_analysis_result(
+        result,
+        detail=detail,
+        format_=format_,
+        summary=False,
+        skill_breakdown=skill_breakdown,
+        tool_breakdown=tool_breakdown,
+        skill_name=skill_name,
+    )
     out_path = Path(output_path) if output_path else None
-    core.emit(core.shape_session(result, detail), core.normalize_format(format_), out_path)
+    core.emit(shaped, core.normalize_format(format_), out_path)
 
 
 @cli.command(name="list")
@@ -344,6 +417,12 @@ def analyze_by_id(
 )
 @click.option("--name", metavar="REGEX", help="Only sessions whose title or ID matches REGEX.")
 @click.option(
+    "--title",
+    "title_filter",
+    metavar="SUBSTRING",
+    help="Only sessions whose title contains SUBSTRING (case-insensitive).",
+)
+@click.option(
     "--dir",
     "dir_path",
     metavar="PATH",
@@ -362,6 +441,7 @@ def list_sessions(
     until: str | None,
     workspace: str | None,
     name: str | None,
+    title_filter: str | None,
     dir_path: str | None,
     costs: bool,
     format_: str,
@@ -393,6 +473,8 @@ def list_sessions(
         until_ms = core.parse_since_to_ms(until)
         if until_ms is not None:
             sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
+    if title_filter:
+        sessions = [s for s in sessions if title_filter.lower() in (s.get("title") or "").lower()]
     if name:
         try:
             sessions = core.filter_sessions_by_name(sessions, name)
@@ -415,6 +497,7 @@ def list_sessions(
 
 @cli.command()
 @core.analysis_options
+@core.title_filter_option
 @click.option(
     "--since", metavar="DATE", help="Only sessions created after DATE (ISO 8601 with timezone)."
 )
@@ -434,6 +517,7 @@ def batch(
     until: str | None,
     workspace: str | None,
     name: str | None,
+    title_filter: str | None,
     detail: str,
     format_: str,
     output_path: str | None,
@@ -457,6 +541,8 @@ def batch(
         until_ms = core.parse_since_to_ms(until)
         if until_ms is not None:
             sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
+    if title_filter:
+        sessions = [s for s in sessions if title_filter.lower() in (s.get("title") or "").lower()]
     if name:
         try:
             sessions = core.filter_sessions_by_name(sessions, name)
@@ -474,3 +560,73 @@ def batch(
     detail = core.resolve_detail(detail, format_)
     out_path = Path(output_path) if output_path else None
     core.emit(core.shape_batch(results, detail), core.normalize_format(format_), out_path)
+
+
+@cli.command(name="skills")
+@core.format_option
+@core.output_option
+@click.option(
+    "--last",
+    "last_window",
+    metavar="DURATION",
+    help="Only sessions started within the last DURATION (e.g. 7d, 24h, 30m).",
+)
+@click.option(
+    "--since", metavar="DATE", help="Only sessions created after DATE (ISO 8601 with timezone)."
+)
+@click.option(
+    "--until", metavar="DATE", help="Only sessions created before DATE (ISO 8601 with timezone)."
+)
+@click.option(
+    "--workspace", metavar="PATH", help="Only consider sessions from this workspace folder."
+)
+@click.pass_context
+def skills_command(
+    ctx: click.Context,
+    format_: str,
+    output_path: str | None,
+    last_window: str | None,
+    since: str | None,
+    until: str | None,
+    workspace: str | None,
+) -> None:
+    """List skills used across sessions with aggregated cost.
+
+    Discovers sessions from workspace storage, analyzes each one, and rolls
+    up per-skill token counts and estimated cost.
+    """
+    ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
+    since_ms = core.parse_since_to_ms(since) if since else None
+    if last_window:
+        since_ms = core.parse_last_window_to_ms(last_window)
+        if since_ms is None:
+            raise click.ClickException(
+                f"invalid --last value: {last_window!r}. Use e.g. 7d, 24h, 30m."
+            )
+    sessions = vscode.list_recent_sessions(
+        ws_roots,
+        limit=1000,
+        since_ms=since_ms,
+        workspace_filter=workspace,
+        require_logs=True,
+    )
+    if until:
+        until_ms = core.parse_since_to_ms(until)
+        if until_ms is not None:
+            sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
+    if not sessions:
+        raise click.ClickException("no sessions matched the given filters.")
+
+    pricing = core.load_pricing()
+    results: list[dict] = []
+    for session in sessions:
+        session_dir = Path(session["debug_log_dir"])
+        if not session_dir.exists():
+            continue
+        result = core.analyze_session(session_dir, pricing)
+        result["title"] = session.get("title") or result.get("title")
+        results.append(result)
+
+    payload = core.aggregate_skills(results)
+    out_path = Path(output_path) if output_path else None
+    core.emit(payload, core.normalize_format(format_), out_path)
