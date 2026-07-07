@@ -67,29 +67,148 @@ def cli(
     ctx.obj["agent"] = _resolve_agent(agent)
 
 
+def _apply_query(payload: object, query: str | None) -> object:
+    """Extract a field from a payload when --query is used."""
+    if not query:
+        return payload
+    if isinstance(payload, list):
+        return [
+            core.query_json_path(item, query) if isinstance(item, dict) else None
+            for item in payload
+        ]
+    if isinstance(payload, dict):
+        return core.query_json_path(payload, query)
+    return None
+
+
 @cli.command()
 @core.analysis_options
-@click.argument("log_dir", metavar="PATH")
+@click.option(
+    "--name",
+    metavar="REGEX",
+    help="Analyze sessions whose title matches REGEX (case-insensitive).",
+)
+@click.option(
+    "--since", metavar="DATE", help="Only sessions created after DATE (ISO 8601 with timezone)."
+)
+@click.option(
+    "--until", metavar="DATE", help="Only sessions created before DATE (ISO 8601 with timezone)."
+)
+@click.option(
+    "--workspace", metavar="PATH", help="Only consider sessions from this workspace folder."
+)
+@click.option(
+    "--aggregate",
+    is_flag=True,
+    help="Aggregate all matching sessions into a single summary.",
+)
+@click.option(
+    "--summary",
+    is_flag=True,
+    help="Output a cost-efficiency summary instead of the full session report.",
+)
+@click.option(
+    "--query",
+    metavar="PATH",
+    help="Extract a single field using dot notation (e.g. .total.estimated_usd).",
+)
+@click.option(
+    "--query-help",
+    is_flag=True,
+    help="Print a reference of queryable fields and exit.",
+)
+@click.argument("log_dir", required=False, metavar="PATH")
+@click.pass_context
 def analyze(
-    log_dir: str,
+    ctx: click.Context,
+    log_dir: str | None,
     detail: str,
     format_: str,
     output_path: str | None,
+    name: str | None,
+    since: str | None,
+    until: str | None,
+    workspace: str | None,
+    aggregate: bool,
+    summary: bool,
+    query: str | None,
+    query_help: bool,
 ) -> None:
-    """Analyze a single session by its debug-log directory PATH.
+    """Analyze a single session by PATH, or many sessions by --name regex.
 
-    PATH is typically the VS Code Copilot session debug log directory —
-    this is the fastest path, no discovery needed.
+    PATH is the fastest path: no discovery needed. When --name is given
+    instead, sessions are discovered from workspace storage, filtered by
+    the regex and optional date range, and analyzed in one pass. Use
+    --aggregate to roll them up into a single efficiency summary.
     """
-    session_dir = Path(log_dir)
-    if not session_dir.exists():
-        msg = f"log directory not found: {session_dir}"
-        raise click.ClickException(msg)
-    pricing = core.load_pricing()
-    result = core.analyze_session(session_dir, pricing)
-    detail = core.resolve_detail(detail, format_)
+    if query_help:
+        fields = core.get_queryable_fields()
+        lines = ["Queryable fields for --query:", ""]
+        for path, description in fields.items():
+            lines.append(f"  {path:<40} {description}")
+        click.echo("\n".join(lines))
+        return
+
+    if log_dir and name:
+        raise click.ClickException("Provide either PATH or --name, not both.")
+    if not log_dir and not name:
+        raise click.ClickException("Provide a PATH or --name regex.")
+
     out_path = Path(output_path) if output_path else None
-    core.emit(core.shape_session(result, detail), core.normalize_format(format_), out_path)
+    pricing = core.load_pricing()
+
+    if log_dir:
+        session_dir = Path(log_dir)
+        if not session_dir.exists():
+            msg = f"log directory not found: {session_dir}"
+            raise click.ClickException(msg)
+        result = core.analyze_session(session_dir, pricing)
+        if summary:
+            shaped: object = core.compute_efficiency_summary(result)
+        else:
+            detail = core.resolve_detail(detail, format_)
+            shaped = core.shape_session(result, detail)
+        output = _apply_query(shaped, query)
+        core.emit(output, core.normalize_format(format_), out_path)
+        return
+
+    ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
+    since_ms = core.parse_since_to_ms(since) if since else None
+    sessions = vscode.list_recent_sessions(
+        ws_roots, limit=1000, since_ms=since_ms, workspace_filter=workspace, require_logs=True
+    )
+    if until:
+        until_ms = core.parse_since_to_ms(until)
+        if until_ms is not None:
+            sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
+    if name:
+        try:
+            sessions = core.filter_sessions_by_name(sessions, name)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+    if not sessions:
+        raise click.ClickException("no sessions matched the given filters.")
+
+    results: list[dict] = []
+    for session in sessions:
+        session_dir = Path(session["debug_log_dir"])
+        if not session_dir.exists():
+            continue
+        result = core.analyze_session(session_dir, pricing)
+        result["title"] = session.get("title") or result.get("title")
+        results.append(result)
+
+    payload: object
+    if aggregate:
+        payload = core.aggregate_sessions(results)
+    elif summary:
+        payload = [core.compute_efficiency_summary(r) for r in results]
+    else:
+        detail = core.resolve_detail(detail, format_)
+        payload = [core.shape_session(r, detail) for r in results]
+
+    payload = _apply_query(payload, query)
+    core.emit(payload, core.normalize_format(format_), out_path)
 
 
 @cli.command()
@@ -215,45 +334,106 @@ def analyze_by_id(
     help="Max sessions to return.",
 )
 @click.option(
-    "--since", metavar="DATE", help="Only sessions created after DATE (YYYY-MM-DD or ISO 8601)."
+    "--since", metavar="DATE", help="Only sessions created after DATE (ISO 8601 with timezone)."
+)
+@click.option(
+    "--until", metavar="DATE", help="Only sessions created before DATE (ISO 8601 with timezone)."
 )
 @click.option(
     "--workspace", metavar="PATH", help="Only consider sessions from this workspace folder."
+)
+@click.option("--name", metavar="REGEX", help="Only sessions whose title or ID matches REGEX.")
+@click.option(
+    "--dir",
+    "dir_path",
+    metavar="PATH",
+    help="List sessions from this debug-logs directory instead of workspace storage.",
+)
+@click.option(
+    "--costs",
+    is_flag=True,
+    help="Analyze each session and include cost columns (implied by --dir).",
 )
 @click.pass_context
 def list_sessions(
     ctx: click.Context,
     limit: int,
     since: str | None,
+    until: str | None,
     workspace: str | None,
+    name: str | None,
+    dir_path: str | None,
+    costs: bool,
     format_: str,
     output_path: str | None,
 ) -> None:
-    """List recent sessions (metadata only — no cost analysis)."""
-    ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
-    since_ms = core.parse_since_to_ms(since) if since else None
-    sessions = vscode.list_recent_sessions(
-        ws_roots, limit=limit, since_ms=since_ms, workspace_filter=workspace
-    )
+    """List recent sessions with optional cost analysis.
+
+    Without --dir, sessions are discovered from workspace storage metadata.
+    With --dir, session directories under PATH are scanned and analyzed.
+    """
     out_path = Path(output_path) if output_path else None
-    core.emit(sessions, core.normalize_format(format_), out_path)
+    analyze_sessions = costs or bool(dir_path)
+    pricing = core.load_pricing()
+
+    if dir_path:
+        debug_dir = Path(dir_path)
+        if not debug_dir.exists():
+            msg = f"directory not found: {debug_dir}"
+            raise click.ClickException(msg)
+        sessions = core.list_session_dirs(debug_dir)
+    else:
+        ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
+        since_ms = core.parse_since_to_ms(since) if since else None
+        sessions = vscode.list_recent_sessions(
+            ws_roots, limit=limit, since_ms=since_ms, workspace_filter=workspace
+        )
+
+    if until:
+        until_ms = core.parse_since_to_ms(until)
+        if until_ms is not None:
+            sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
+    if name:
+        try:
+            sessions = core.filter_sessions_by_name(sessions, name)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+    if analyze_sessions:
+        analyzed: list[dict] = []
+        for session in sessions:
+            session_dir = Path(session["debug_log_dir"])
+            if not session_dir.exists():
+                continue
+            result = core.analyze_session(session_dir, pricing)
+            result["title"] = session.get("title") or result.get("title")
+            analyzed.append(result)
+        sessions = analyzed
+
+    core.emit(sessions, core.normalize_format(format_), out_path, costed_list=analyze_sessions)
 
 
 @cli.command()
 @core.analysis_options
 @click.option(
-    "--since", metavar="DATE", help="Only sessions created after DATE (YYYY-MM-DD or ISO 8601)."
+    "--since", metavar="DATE", help="Only sessions created after DATE (ISO 8601 with timezone)."
+)
+@click.option(
+    "--until", metavar="DATE", help="Only sessions created before DATE (ISO 8601 with timezone)."
 )
 @click.option(
     "--workspace", metavar="PATH", help="Only consider sessions from this workspace folder."
 )
+@click.option("--name", metavar="REGEX", help="Only sessions whose title or ID matches REGEX.")
 @click.argument("count", type=int, metavar="N")
 @click.pass_context
 def batch(
     ctx: click.Context,
     count: int,
     since: str | None,
+    until: str | None,
     workspace: str | None,
+    name: str | None,
     detail: str,
     format_: str,
     output_path: str | None,
@@ -273,6 +453,15 @@ def batch(
         workspace_filter=workspace,
         require_logs=True,
     )
+    if until:
+        until_ms = core.parse_since_to_ms(until)
+        if until_ms is not None:
+            sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
+    if name:
+        try:
+            sessions = core.filter_sessions_by_name(sessions, name)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
     pricing = core.load_pricing()
     results: list[dict] = []
     for session in sessions:

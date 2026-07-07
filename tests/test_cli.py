@@ -278,3 +278,230 @@ def test_list_command_no_workspace_storage(runner, mocker):
     result = runner.invoke(cli, ["list"])
     assert result.exit_code != 0
     assert "No workspaceStorage directory found" in result.output
+
+
+# ─── analyze command: new options ─────────────────────────────────────────────
+
+
+def test_analyze_command_summary(runner, sample_session_dir):
+    result = runner.invoke(
+        cli, ["analyze", str(sample_session_dir), "--summary", "--format", "table"]
+    )
+    assert result.exit_code == 0
+    assert "Cache ratio" in result.output
+    assert "Cost per 1M tokens" in result.output
+
+
+def test_analyze_command_query(runner, sample_session_dir):
+    result = runner.invoke(
+        cli, ["analyze", str(sample_session_dir), "--query", ".total.estimated_usd"]
+    )
+    assert result.exit_code == 0
+    # The value is a small number; just ensure it printed a number.
+    assert any(ch.isdigit() for ch in result.output)
+
+
+def test_analyze_command_query_help(runner):
+    result = runner.invoke(cli, ["analyze", "--query-help"])
+    assert result.exit_code == 0
+    assert "Queryable fields" in result.output
+    assert "total.estimated_usd" in result.output
+
+
+def test_analyze_command_name_filter_aggregate(runner, sample_session_dir, mocker):
+    mock_list = mocker.patch("copilot_session_usage._internal.vscode.list_recent_sessions")
+    mock_list.return_value = [
+        {
+            "session_id": "s1",
+            "title": "PRD: /path/to/prd",
+            "debug_log_dir": str(sample_session_dir),
+            "created_ms": 1_000_000,
+        }
+    ]
+    result = runner.invoke(
+        cli,
+        ["analyze", "--name", r"PRD:.*/path/to/prd", "--aggregate", "--format", "table"],
+    )
+    assert result.exit_code == 0
+    assert "Aggregate across 1 sessions" in result.output
+
+
+def test_analyze_command_name_filter_summary(runner, sample_session_dir, mocker):
+    mock_list = mocker.patch("copilot_session_usage._internal.vscode.list_recent_sessions")
+    mock_list.return_value = [
+        {
+            "session_id": "s1",
+            "title": "PRD: /path/to/prd",
+            "debug_log_dir": str(sample_session_dir),
+            "created_ms": 1_000_000,
+        }
+    ]
+    result = runner.invoke(cli, ["analyze", "--name", r"PRD", "--summary", "--format", "table"])
+    assert result.exit_code == 0
+    assert "Cache ratio" in result.output
+
+
+def test_analyze_command_name_and_path_mutually_exclusive(runner, sample_session_dir):
+    result = runner.invoke(cli, ["analyze", str(sample_session_dir), "--name", "PRD"])
+    assert result.exit_code != 0
+    assert "either PATH or --name" in result.output
+
+
+def test_analyze_command_requires_path_or_name(runner):
+    result = runner.invoke(cli, ["analyze"])
+    assert result.exit_code != 0
+    assert "PATH or --name" in result.output
+
+
+def test_analyze_command_invalid_name_regex(runner, mocker):
+    mock_list = mocker.patch("copilot_session_usage._internal.vscode.list_recent_sessions")
+    mock_list.return_value = []
+    result = runner.invoke(cli, ["analyze", "--name", "[invalid"])
+    assert result.exit_code != 0
+    assert "Invalid name regex" in result.output
+
+
+def test_analyze_command_name_no_matches(runner, mocker):
+    mock_list = mocker.patch("copilot_session_usage._internal.vscode.list_recent_sessions")
+    mock_list.return_value = [
+        {
+            "session_id": "s1",
+            "title": "Other",
+            "debug_log_dir": "/tmp/fake",
+            "created_ms": 1_000_000,
+        }
+    ]
+    result = runner.invoke(cli, ["analyze", "--name", "PRD"])
+    assert result.exit_code != 0
+    assert "no sessions matched" in result.output
+
+
+def test_analyze_command_since_until(runner, sample_session_dir, mocker):
+    mock_list = mocker.patch("copilot_session_usage._internal.vscode.list_recent_sessions")
+    mock_list.return_value = [
+        {
+            "session_id": "s1",
+            "title": "PRD",
+            "debug_log_dir": str(sample_session_dir),
+            "created_ms": 1_782_864_000_000,
+        }
+    ]
+    result = runner.invoke(
+        cli,
+        [
+            "analyze",
+            "--name",
+            "PRD",
+            "--since",
+            "2026-06-01T00:00:00Z",
+            "--until",
+            "2026-08-01T00:00:00+00:00",
+        ],
+    )
+    assert result.exit_code == 0
+
+
+# ─── list command: new options ────────────────────────────────────────────────
+
+
+def test_list_command_dir_with_costs(runner, sample_session_dir, tmp_path):
+    debug_dir = tmp_path / "debug-logs"
+    debug_dir.mkdir()
+    session_dir = debug_dir / sample_session_dir.name
+    session_dir.mkdir()
+    (session_dir / "main.jsonl").write_text(
+        (sample_session_dir / "main.jsonl").read_text(), encoding="utf-8"
+    )
+    result = runner.invoke(cli, ["list", "--dir", str(debug_dir), "--format", "table"])
+    assert result.exit_code == 0
+    assert sample_session_dir.name in result.output
+    assert "Tokens" in result.output
+    assert "Cost" in result.output
+
+
+def test_list_command_dir_not_found(runner):
+    result = runner.invoke(cli, ["list", "--dir", "/nonexistent/dir"])
+    assert result.exit_code != 0
+    assert "directory not found" in result.output
+
+
+def test_list_command_costs_from_workspace(runner, sample_session_dir, mocker):
+    mock_list = mocker.patch("copilot_session_usage._internal.vscode.list_recent_sessions")
+    mock_list.return_value = [
+        {"session_id": "s1", "title": "Test", "debug_log_dir": str(sample_session_dir)}
+    ]
+    result = runner.invoke(cli, ["list", "--costs", "--format", "table"])
+    assert result.exit_code == 0
+    assert "Tokens" in result.output
+    assert "Cost" in result.output
+
+
+def test_list_command_name_filter(runner, mocker):
+    mock_list = mocker.patch("copilot_session_usage._internal.vscode.list_recent_sessions")
+    mock_list.return_value = [
+        {"session_id": "s1", "title": "PRD design", "debug_log_dir": "/tmp/fake"},
+        {"session_id": "s2", "title": "Other", "debug_log_dir": "/tmp/fake2"},
+    ]
+    result = runner.invoke(cli, ["list", "--name", r"PRD"])
+    assert result.exit_code == 0
+    assert "PRD design" in result.output
+    assert "Other" not in result.output
+
+
+def test_list_command_until(runner, mocker):
+    mock_list = mocker.patch("copilot_session_usage._internal.vscode.list_recent_sessions")
+    mock_list.return_value = [
+        {
+            "session_id": "old",
+            "title": "Old",
+            "debug_log_dir": "/tmp/fake",
+            "created_ms": 1_000_000,
+        },
+        {
+            "session_id": "new",
+            "title": "New",
+            "debug_log_dir": "/tmp/fake2",
+            "created_ms": 2_000_000_000_000,
+        },
+    ]
+    result = runner.invoke(cli, ["list", "--until", "2026-07-01T00:00:00Z"])
+    assert result.exit_code == 0
+    assert "Old" in result.output
+    assert "New" not in result.output
+
+
+# ─── batch command: new options ───────────────────────────────────────────────
+
+
+def test_batch_command_name_filter(runner, sample_session_dir, mocker):
+    mock_list = mocker.patch("copilot_session_usage._internal.vscode.list_recent_sessions")
+    mock_list.return_value = [
+        {"session_id": "s1", "title": "PRD", "debug_log_dir": str(sample_session_dir)},
+        {"session_id": "s2", "title": "Other", "debug_log_dir": str(sample_session_dir)},
+    ]
+    result = runner.invoke(cli, ["batch", "10", "--name", r"PRD"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["summary"]["session_count"] == 1
+
+
+def test_batch_command_until(runner, sample_session_dir, mocker):
+    mock_list = mocker.patch("copilot_session_usage._internal.vscode.list_recent_sessions")
+    mock_list.return_value = [
+        {
+            "session_id": "s1",
+            "title": "Old",
+            "debug_log_dir": str(sample_session_dir),
+            "created_ms": 1_000_000,
+        },
+        {
+            "session_id": "s2",
+            "title": "New",
+            "debug_log_dir": str(sample_session_dir),
+            "created_ms": 2_000_000_000_000,
+        },
+    ]
+    result = runner.invoke(cli, ["batch", "10", "--until", "2026-07-01T00:00:00Z"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["summary"]["session_count"] == 1

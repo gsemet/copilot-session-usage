@@ -863,14 +863,269 @@ def shape_batch(results: list[dict], detail: str) -> dict:
 
 
 def parse_since_to_ms(since: str) -> int | None:
-    """Parse a date/datetime string to epoch milliseconds (UTC)."""
-    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+    """Parse a date/datetime string to epoch milliseconds (UTC).
+
+    Accepts ISO 8601 with timezone offsets (e.g. ``2026-07-01T00:00:00Z`` or
+    ``2026-07-01T02:00:00+02:00``) as well as the legacy formats
+    ``YYYY-MM-DDTHH:MM:SS`` and ``YYYY-MM-DD``.
+    """
+    since = since.strip()
+    if since.endswith("Z"):
+        since = since[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(since)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
             dt = datetime.strptime(since, fmt).replace(tzinfo=timezone.utc)
             return int(dt.timestamp() * 1000)
         except ValueError:
             continue
     return None
+
+
+def filter_sessions_by_name(sessions: list[dict], pattern: str) -> list[dict]:
+    """Return sessions whose title or session_id matches the regex pattern."""
+    try:
+        regex = re.compile(pattern, re.IGNORECASE)
+    except re.error as exc:
+        msg = f"Invalid name regex: {exc}"
+        raise ValueError(msg) from exc
+    return [
+        s
+        for s in sessions
+        if regex.search(s.get("title") or "") or regex.search(s.get("session_id") or "")
+    ]
+
+
+def compute_efficiency_summary(result: dict) -> dict:
+    """Compute a cost-efficiency summary for a single analyzed session."""
+    total = result.get("total", {})
+    input_tokens = total.get("input_tokens", 0)
+    output_tokens = total.get("output_tokens", 0)
+    cached_tokens = total.get("cached_tokens", 0)
+    total_tokens = input_tokens + output_tokens + cached_tokens
+    estimated_usd = total.get("estimated_usd", 0.0)
+
+    summary: dict = {
+        "session_id": result.get("session_id"),
+        "title": result.get("title"),
+        "cache_ratio": total.get("cache_ratio", 0.0),
+        "total_input_tokens": input_tokens,
+        "total_output_tokens": output_tokens,
+        "total_cached_tokens": cached_tokens,
+        "total_tokens": total_tokens,
+        "llm_calls": total.get("llm_calls", 0),
+        "estimated_usd": estimated_usd,
+        "cost_per_1m_tokens": (
+            round(estimated_usd / (total_tokens / 1_000_000), 4) if total_tokens > 0 else 0.0
+        ),
+        "model_split": [],
+    }
+
+    model_breakdown = result.get("model_breakdown", [])
+    total_input_for_split = sum(m.get("input_tokens", 0) for m in model_breakdown)
+    for m in sorted(model_breakdown, key=lambda x: x.get("estimated_usd", 0.0), reverse=True):
+        model_input = m.get("input_tokens", 0)
+        split_ratio = (
+            round(model_input / total_input_for_split, 3) if total_input_for_split > 0 else 0.0
+        )
+        summary["model_split"].append(
+            {
+                "model": m["model"],
+                "input_tokens": model_input,
+                "output_tokens": m.get("output_tokens", 0),
+                "cached_tokens": m.get("cached_tokens", 0),
+                "llm_calls": m.get("llm_calls", 0),
+                "estimated_usd": m.get("estimated_usd", 0.0),
+                "split_ratio": split_ratio,
+                "cost_per_1m_input_tokens": (
+                    round(m.get("estimated_usd", 0.0) / (model_input / 1_000_000), 4)
+                    if model_input > 0
+                    else 0.0
+                ),
+            }
+        )
+
+    return summary
+
+
+def aggregate_sessions(results: list[dict]) -> dict:
+    """Aggregate multiple session analyses into a single efficiency summary."""
+    total_input = total_output = total_cached = total_calls = 0
+    total_usd = 0.0
+    total_dur = total_active = 0
+    cache_ratios: list[float] = []
+    fallback_models: set[str] = set()
+    per_model_input: dict[str, int] = {}
+    per_model_output: dict[str, int] = {}
+    per_model_cached: dict[str, int] = {}
+    per_model_calls: dict[str, int] = {}
+    per_model_usd: dict[str, float] = {}
+
+    for r in results:
+        t = r.get("total", {})
+        inp = t.get("input_tokens", 0)
+        out = t.get("output_tokens", 0)
+        cch = t.get("cached_tokens", 0)
+        calls = t.get("llm_calls", 0)
+        usd = t.get("estimated_usd", 0.0)
+
+        total_input += inp
+        total_output += out
+        total_cached += cch
+        total_calls += calls
+        total_usd += usd
+        total_dur += r.get("duration_seconds") or 0
+        total_active += r.get("active_duration_seconds") or 0
+        cache_ratios.append(t.get("cache_ratio", 0.0))
+        fallback_models.update(r.get("fallback_pricing_models") or [])
+
+        for m in r.get("model_breakdown", []):
+            model = m["model"]
+            per_model_input[model] = per_model_input.get(model, 0) + m.get("input_tokens", 0)
+            per_model_output[model] = per_model_output.get(model, 0) + m.get("output_tokens", 0)
+            per_model_cached[model] = per_model_cached.get(model, 0) + m.get("cached_tokens", 0)
+            per_model_calls[model] = per_model_calls.get(model, 0) + m.get("llm_calls", 0)
+            per_model_usd[model] = per_model_usd.get(model, 0.0) + m.get("estimated_usd", 0.0)
+
+    total_tokens = total_input + total_output + total_cached
+    avg_cache = round(sum(cache_ratios) / len(cache_ratios), 3) if cache_ratios else 0.0
+
+    model_split = []
+    for model in sorted(per_model_usd.keys(), key=lambda m: per_model_usd[m], reverse=True):
+        inp = per_model_input[model]
+        model_split.append(
+            {
+                "model": model,
+                "input_tokens": inp,
+                "output_tokens": per_model_output[model],
+                "cached_tokens": per_model_cached[model],
+                "llm_calls": per_model_calls[model],
+                "estimated_usd": round(per_model_usd[model], 4),
+                "split_ratio": round(inp / total_input, 3) if total_input > 0 else 0.0,
+                "cost_per_1m_input_tokens": (
+                    round(per_model_usd[model] / (inp / 1_000_000), 4) if inp > 0 else 0.0
+                ),
+            }
+        )
+
+    return {
+        "session_count": len(results),
+        "total_input_tokens": total_input,
+        "total_output_tokens": total_output,
+        "total_cached_tokens": total_cached,
+        "total_tokens": total_tokens,
+        "total_llm_calls": total_calls,
+        "total_estimated_usd": round(total_usd, 4),
+        "avg_cache_ratio": avg_cache,
+        "cache_ratio": avg_cache,
+        "cost_per_1m_tokens": (
+            round(total_usd / (total_tokens / 1_000_000), 4) if total_tokens > 0 else 0.0
+        ),
+        "total_duration_seconds": total_dur,
+        "total_active_duration_seconds": total_active,
+        "fallback_pricing_models": sorted(fallback_models),
+        "model_split": model_split,
+    }
+
+
+def query_json_path(data: dict, path: str) -> Any:
+    """Extract a value from nested dicts/lists using a simple dot path.
+
+    Supported syntax:
+
+        .key.subkey       -> data["key"]["subkey"]
+        .key[0]           -> data["key"][0]
+        .key[*]           -> data["key"] (returns the whole list)
+    """
+    if path.startswith("."):
+        path = path[1:]
+    if not path:
+        return data
+
+    current: Any = data
+    for part in path.split("."):
+        array_match = re.match(r"^(.+)\[(\d+|\*)\]$", part)
+        if array_match:
+            key, idx = array_match.groups()
+            if not isinstance(current, dict) or key not in current:
+                return None
+            current = current[key]
+            if idx == "*":
+                if not isinstance(current, list):
+                    return None
+                return current
+            index = int(idx)
+            if not isinstance(current, list) or index >= len(current):
+                return None
+            current = current[index]
+        else:
+            if not isinstance(current, dict) or part not in current:
+                return None
+            current = current[part]
+    return current
+
+
+def get_queryable_fields() -> dict[str, str]:
+    """Return a reference of fields usable with --query."""
+    return {
+        "session_id": "Session UUID (string)",
+        "title": "Session title, if known (string)",
+        "started_at": "ISO 8601 start timestamp (string)",
+        "ended_at": "ISO 8601 end timestamp (string)",
+        "duration_seconds": "Wall-clock duration in seconds (number)",
+        "active_duration_seconds": "Duration covered by LLM calls in seconds (number)",
+        "models": "List of model names used (list[string])",
+        "fallback_pricing_models": "Models priced with the generic default rate (list[string])",
+        "total.input_tokens": "Total input tokens (number)",
+        "total.output_tokens": "Total output tokens (number)",
+        "total.cached_tokens": "Total cached tokens (number)",
+        "total.llm_calls": "Total LLM calls (number)",
+        "total.estimated_usd": "Estimated USD cost (number)",
+        "total.cache_ratio": "Cached tokens / input tokens (number)",
+        "model_breakdown": "Per-model token/cost breakdown (list[dict])",
+        "model_breakdown[0].model": "Model name in first breakdown row (string)",
+        "model_breakdown[0].input_tokens": "Input tokens for first model (number)",
+        "model_breakdown[0].estimated_usd": "Estimated USD for first model (number)",
+        "subagents": "Per-subagent/file attribution (list[dict])",
+        "subagents[0].name": "Subagent name in first row (string)",
+        "subagents[0].estimated_usd": "Estimated USD for first subagent (number)",
+    }
+
+
+def list_session_dirs(debug_logs_dir: Path) -> list[dict]:
+    """List session directories under a debug-logs folder.
+
+    Returns metadata dicts with session_id, title (fallback to session_id),
+    debug_log_dir, and has_debug_logs.
+    """
+    debug_logs_dir = Path(debug_logs_dir)
+    sessions: list[dict] = []
+    if not debug_logs_dir.is_dir():
+        return sessions
+    for session_dir in sorted(debug_logs_dir.iterdir()):
+        if not session_dir.is_dir():
+            continue
+        if not any(session_dir.glob("*.jsonl")):
+            continue
+        sessions.append(
+            {
+                "session_id": session_dir.name,
+                "title": session_dir.name,
+                "workspace_folder": "",
+                "workspace_hash": "",
+                "created_ms": None,
+                "last_message_ms": None,
+                "has_debug_logs": True,
+                "debug_log_dir": str(session_dir),
+            }
+        )
+    return sessions
 
 
 # ─── Rendering ─────────────────────────────────────────────────────────────────
@@ -1087,20 +1342,159 @@ def _render_metadata_rows(items: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def render(payload: object, fmt: str) -> str:
-    """Render a payload (single session, list, or batch) as text."""
+def render_summary(data: dict) -> str:
+    """Render a single-session efficiency summary as a human-readable block."""
+    lines = [
+        f"Session:   {data.get('session_id') or '(unknown)'}",
+        f"Title:     {data.get('title') or '(unknown)'}",
+        f"Cache ratio: {data.get('cache_ratio', 0):.0%}",
+        f"Total tokens: {data.get('total_tokens', 0):,}",
+        f"Input tokens: {data.get('total_input_tokens', 0):,}",
+        f"Output tokens: {data.get('total_output_tokens', 0):,}",
+        f"Cached tokens: {data.get('total_cached_tokens', 0):,}",
+        f"LLM calls: {data.get('llm_calls', 0)}",
+        f"Est. cost: ${data.get('estimated_usd', 0):.4f}",
+        f"Cost per 1M tokens: ${data.get('cost_per_1m_tokens', 0):.4f}",
+    ]
+    model_split = data.get("model_split", [])
+    if model_split:
+        lines.append("")
+        lines.append("Model split:")
+        headers = ("Model", "Input", "Split", "Cost", "$/1M input")
+        rows = [
+            (
+                m["model"],
+                f"{m['input_tokens']:,}",
+                f"{m['split_ratio']:.0%}",
+                f"${m['estimated_usd']:.2f}",
+                f"${m['cost_per_1m_input_tokens']:.2f}",
+            )
+            for m in model_split
+        ]
+        lines.extend(_render_columns(headers, rows, left_cols={0}))
+    return "\n".join(lines)
+
+
+def render_aggregate(data: dict) -> str:
+    """Render an aggregate summary across sessions as a human-readable block."""
+    lines = [
+        f"Aggregate across {data.get('session_count', 0)} sessions",
+        f"Total tokens: {data.get('total_tokens', 0):,}",
+        f"Input tokens: {data.get('total_input_tokens', 0):,}",
+        f"Output tokens: {data.get('total_output_tokens', 0):,}",
+        f"Cached tokens: {data.get('total_cached_tokens', 0):,} "
+        f"(avg ratio {data.get('avg_cache_ratio', 0):.0%})",
+        f"LLM calls: {data.get('total_llm_calls', 0)}",
+        f"Est. cost: ${data.get('total_estimated_usd', 0):.4f}",
+        f"Cost per 1M tokens: ${data.get('cost_per_1m_tokens', 0):.4f}",
+    ]
+    if data.get("total_duration_seconds"):
+        lines.append(f"Duration: {data['total_duration_seconds']}s")
+    model_split = data.get("model_split", [])
+    if model_split:
+        lines.append("")
+        lines.append("Model split:")
+        headers = ("Model", "Input", "Split", "Cost", "$/1M input")
+        rows = [
+            (
+                m["model"],
+                f"{m['input_tokens']:,}",
+                f"{m['split_ratio']:.0%}",
+                f"${m['estimated_usd']:.2f}",
+                f"${m['cost_per_1m_input_tokens']:.2f}",
+            )
+            for m in model_split
+        ]
+        lines.extend(_render_columns(headers, rows, left_cols={0}))
+    fallback = data.get("fallback_pricing_models")
+    if fallback:
+        lines.append(f"Warning: fallback pricing used for {', '.join(fallback)}")
+    return "\n".join(lines)
+
+
+def render_costed_list(items: list[dict]) -> str:
+    """Render a list of sessions with cost columns."""
+    if not items:
+        return "(no sessions found)"
+    rows = []
+    for s in items:
+        started = (s.get("started_at") or s.get("created_at") or "")[:19]
+        title = s.get("title") or "(no title)"
+        sid = s.get("session_id") or ""
+        total = s.get("total", {})
+        total_tokens = (
+            total.get("input_tokens", 0)
+            + total.get("output_tokens", 0)
+            + total.get("cached_tokens", 0)
+        )
+        model_count = len(s.get("models") or [])
+        rows.append(
+            (started, title, sid, model_count, total_tokens, total.get("estimated_usd", 0.0))
+        )
+
+    w_title = _col_width("Title", [r[1] for r in rows], cap=60)
+    w_id = _col_width("ID", [r[2] for r in rows])
+
+    lines = [
+        f"{'Started':<19} {'Title':<{w_title}} {'ID':<{w_id}} "
+        f"{'Models':>6} {'Tokens':>10} {'Cost':>8}"
+    ]
+    total_width = 19 + 1 + w_title + 1 + w_id + 1 + 6 + 1 + 10 + 1 + 8
+    lines.append("-" * total_width)
+
+    total_tokens = 0
+    total_usd = 0.0
+    for started, title, sid, model_count, tokens, usd in rows:
+        total_tokens += tokens
+        total_usd += usd
+        lines.append(
+            f"{started:<19} {title[:w_title]:<{w_title}} {sid:<{w_id}} "
+            f"{model_count:>6} {tokens:>10,} ${usd:>7.2f}"
+        )
+
+    lines.append("-" * total_width)
+    lines.append(
+        f"{'TOTAL':<19} {'':<{w_title}} {'':<{w_id}} {'':>6} {total_tokens:>10,} ${total_usd:>7.2f}"
+    )
+    return "\n".join(lines)
+
+
+def _is_summary(item: dict) -> bool:
+    """Return True if a dict is a per-session efficiency summary."""
+    return "model_split" in item and "cost_per_1m_tokens" in item
+
+
+def _render_summary_list(items: list[dict]) -> str:
+    """Render multiple efficiency summaries separated by blank lines."""
+    blocks = [render_summary(item) for item in items]
+    return "\n\n".join(blocks)
+
+
+def render(payload: object, fmt: str, costed_list: bool = False) -> str:
+    """Render a payload (single session, list, batch, summary, or aggregate) as text."""
     if fmt == "json":
         return json.dumps(payload, indent=2, ensure_ascii=False)
+    if costed_list:
+        return render_costed_list(payload)  # type: ignore[arg-type]
     if isinstance(payload, list):
+        if payload and _is_summary(payload[0]):
+            return _render_summary_list(payload)
         return render_table_list(payload)
-    if isinstance(payload, dict) and "summary" in payload and "sessions" in payload:
-        return render_table_list(payload["sessions"], summary=payload["summary"])
+    if isinstance(payload, dict):
+        if "summary" in payload and "sessions" in payload:
+            return render_table_list(payload["sessions"], summary=payload["summary"])
+        if "session_count" in payload and "model_split" in payload:
+            return render_aggregate(payload)
+        if "model_split" in payload:
+            return render_summary(payload)
     return render_table_single(payload)  # type: ignore[arg-type]
 
 
-def emit(payload: object, fmt: str, output_path: Path | None = None) -> None:
+def emit(
+    payload: object, fmt: str, output_path: Path | None = None, costed_list: bool = False
+) -> None:
     """Render and print (or save to file) a payload."""
-    text = render(payload, fmt)
+    text = render(payload, fmt, costed_list=costed_list)
     if output_path is not None:
         output_path.write_text(text, encoding="utf-8")
         click.echo(f"Saved {len(text):,} bytes to {output_path}")

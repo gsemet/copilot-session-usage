@@ -592,3 +592,122 @@ def test_normalize_format_table():
 
 def test_resolve_detail_table():
     assert core.resolve_detail("compact", "table") == "compact"
+
+
+# ─── Summary / aggregate / costed-list rendering ──────────────────────────────
+
+
+def test_render_summary():
+    summary = {
+        "session_id": "s1",
+        "title": "Test",
+        "cache_ratio": 0.5,
+        "total_tokens": 1_700,
+        "total_input_tokens": 1_000,
+        "total_output_tokens": 200,
+        "total_cached_tokens": 500,
+        "llm_calls": 5,
+        "estimated_usd": 0.42,
+        "cost_per_1m_tokens": 247.06,
+        "model_split": [
+            {
+                "model": "gpt-4o",
+                "input_tokens": 1_000,
+                "split_ratio": 1.0,
+                "estimated_usd": 0.42,
+                "cost_per_1m_input_tokens": 0.42,
+            }
+        ],
+    }
+    text = core.render(summary, "table")
+    assert "Cache ratio: 50%" in text
+    assert "Cost per 1M tokens: $247.06" in text
+    assert "Model split:" in text
+
+
+def test_render_aggregate():
+    aggregate = {
+        "session_count": 2,
+        "total_tokens": 3_400,
+        "total_input_tokens": 2_000,
+        "total_output_tokens": 400,
+        "total_cached_tokens": 1_000,
+        "total_llm_calls": 10,
+        "total_estimated_usd": 0.84,
+        "avg_cache_ratio": 0.5,
+        "cost_per_1m_tokens": 247.06,
+        "total_duration_seconds": 1_200,
+        "model_split": [
+            {
+                "model": "gpt-4o",
+                "input_tokens": 2_000,
+                "split_ratio": 1.0,
+                "estimated_usd": 0.84,
+                "cost_per_1m_input_tokens": 0.42,
+            }
+        ],
+    }
+    text = core.render(aggregate, "table")
+    assert "Aggregate across 2 sessions" in text
+    assert "Cost per 1M tokens: $247.06" in text
+    assert "Model split:" in text
+
+
+def test_render_costed_list():
+    items = [
+        {
+            "session_id": "s1",
+            "title": "First",
+            "started_at": "2026-07-01T12:00:00Z",
+            "models": ["gpt-4o"],
+            "total": {
+                "input_tokens": 1_000,
+                "output_tokens": 100,
+                "cached_tokens": 50,
+                "estimated_usd": 0.1,
+            },
+        },
+        {
+            "session_id": "s2",
+            "title": "Second",
+            "started_at": "2026-07-02T12:00:00Z",
+            "models": ["gpt-4o", "claude-sonnet-4.6"],
+            "total": {
+                "input_tokens": 2_000,
+                "output_tokens": 200,
+                "cached_tokens": 100,
+                "estimated_usd": 0.2,
+            },
+        },
+    ]
+    text = core.render(items, "table", costed_list=True)
+    assert "First" in text
+    assert "Second" in text
+    assert "TOTAL" in text
+    assert "Models" in text
+    assert "Tokens" in text
+
+
+def test_render_costed_list_empty():
+    assert core.render([], "table", costed_list=True) == "(no sessions found)"
+
+
+def test_emit_costed_list_to_file(tmp_path):
+    items = [
+        {
+            "session_id": "s1",
+            "title": "Test",
+            "started_at": "2026-07-01T12:00:00Z",
+            "models": ["gpt-4o"],
+            "total": {
+                "input_tokens": 1_000,
+                "output_tokens": 100,
+                "cached_tokens": 50,
+                "estimated_usd": 0.1,
+            },
+        }
+    ]
+    out_path = tmp_path / "out.txt"
+    core.emit(items, "table", out_path, costed_list=True)
+    assert out_path.exists()
+    assert "Test" in out_path.read_text(encoding="utf-8")

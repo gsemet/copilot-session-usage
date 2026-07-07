@@ -36,6 +36,8 @@ def list_sessions(
     workspace_roots: list[Path] | None = None,
     limit: int = 20,
     since: str | None = None,
+    until: str | None = None,
+    name_pattern: str | None = None,
     workspace_filter: str | None = None,
     agent: str = "vscode",
 ) -> list[dict]:
@@ -45,7 +47,9 @@ def list_sessions(
         workspace_roots: Override workspaceStorage directories.
             Auto-detected if None.
         limit: Maximum sessions to return.
-        since: Only sessions created after this date (YYYY-MM-DD or ISO 8601).
+        since: Only sessions created after this date (ISO 8601 with timezone).
+        until: Only sessions created before this date (ISO 8601 with timezone).
+        name_pattern: Only sessions whose title or ID matches this regex.
         workspace_filter: Only sessions from this workspace folder.
         agent: Provider to use (``vscode`` or ``cli``).
 
@@ -59,12 +63,19 @@ def list_sessions(
         workspace_roots = vscode.default_workspace_storage_roots()
 
     since_ms = core.parse_since_to_ms(since) if since else None
-    return vscode.list_recent_sessions(
+    sessions = vscode.list_recent_sessions(
         workspace_roots,
         limit=limit,
         since_ms=since_ms,
         workspace_filter=workspace_filter,
     )
+    if until:
+        until_ms = core.parse_since_to_ms(until)
+        if until_ms is not None:
+            sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
+    if name_pattern:
+        sessions = core.filter_sessions_by_name(sessions, name_pattern)
+    return sessions
 
 
 def find_sessions_by_title(
@@ -202,6 +213,19 @@ def batch_analyze(
         result["title"] = session.get("title") or result.get("title")
         results.append(result)
     return core.shape_batch(results, detail)
+
+
+def aggregate_sessions(results: list[dict]) -> dict:
+    """Aggregate multiple session analyses into a single efficiency summary.
+
+    Args:
+        results: Full session analysis dicts (e.g. from ``analyze_session``).
+
+    Returns:
+        Dict with session count, totals, average cache ratio, model split,
+        and cost per 1M tokens.
+    """
+    return core.aggregate_sessions(results)
 
 
 def load_pricing(ref_dir: Path | None = None) -> dict:

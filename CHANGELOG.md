@@ -1,5 +1,11 @@
 ## Unreleased
 
+### Feat
+
+- add session filtering/aggregation/summaries/field extraction
+
+## v0.3.0 (2026-07-06)
+
 ## v0.2.3 (2026-07-03)
 
 ## v0.2.2 (2026-07-03)
