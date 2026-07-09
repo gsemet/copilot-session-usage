@@ -1,5 +1,11 @@
 ## Unreleased
 
+### Fix
+
+- bad computation of AIC in trailers
+
+## v0.5.0 (2026-07-09)
+
 ### Feat
 
 - **cli**: add amend-commit command to inject session cost trailers

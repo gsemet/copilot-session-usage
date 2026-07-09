@@ -500,11 +500,12 @@ def build_session_usage_acc_trailers(result: dict[str, Any], pricing: dict[str, 
     is the raw name observed in the session logs; the vendor is derived from
     the bundled pricing data using both the internal normalized key and the
     original raw model name. Token counts are expressed in millions with two
-    decimals; the estimated USD cost is appended as ``aic`` (AIC = AI credits).
+    decimals; the estimated cost is appended as ``aic`` in AI credits
+    (1 AIC = $0.01, so USD * 100).
 
     Format::
 
-        Copilot-Session-Usage-Acc: <vendor>:<model-name>,in:4.12,out:1.21,cache:3.9,aic:0.42
+        Copilot-Session-Usage-Acc: <vendor>:<model-name>,in:4.12,out:1.21,cache:3.9,aic:42
 
     The model name keeps the casing from the bundled pricing YAML (for example
     ``"Claude Sonnet 4.6"``) rather than the lower-cased identifier used in
@@ -521,7 +522,7 @@ def build_session_usage_acc_trailers(result: dict[str, Any], pricing: dict[str, 
         input_m = _format_millions(entry.get("input_tokens", 0))
         output_m = _format_millions(entry.get("output_tokens", 0))
         cache_m = _format_millions(entry.get("cached_tokens", 0))
-        aic = round(entry.get("estimated_usd", 0.0), 2)
+        aic = _format_aic(round(entry.get("estimated_usd", 0.0) * 100, 2))
         trailers.append(
             f"Copilot-Session-Usage-Acc: "
             f"{provider}:{display_model},in:{input_m},out:{output_m},cache:{cache_m},aic:{aic}"
@@ -530,7 +531,7 @@ def build_session_usage_acc_trailers(result: dict[str, Any], pricing: dict[str, 
 
 
 def _format_aic(value: float) -> str:
-    """Format an AIC/USD value with at most 2 decimals, dropping trailing zeros."""
+    """Format an AIC value with at most 2 decimals, dropping trailing zeros."""
     formatted = f"{value:.2f}"
     if "." in formatted:
         formatted = formatted.rstrip("0").rstrip(".")
@@ -539,7 +540,7 @@ def _format_aic(value: float) -> str:
 
 def build_session_usage_aic_trailer(result: dict[str, Any]) -> str:
     """Build the ``Copilot-Session-Usage-AIC`` trailer with total AIC cost."""
-    total_aic = round(result.get("total", {}).get("estimated_usd", 0.0), 2)
+    total_aic = round(result.get("total", {}).get("estimated_usd", 0.0) * 100, 2)
     return f"Copilot-Session-Usage-AIC: {_format_aic(total_aic)}"
 
 

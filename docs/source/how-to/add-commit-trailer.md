@@ -10,9 +10,9 @@ One `Copilot-Session-Usage-Acc` trailer is added per model used in the
 session, followed by a single `Copilot-Session-Usage-AIC` total-cost trailer:
 
 ```text
-Copilot-Session-Usage-Acc: Moonshot AI:Kimi K2.7 Code,in:24.90,out:0.06,cache:21.88,aic:2.31
-Copilot-Session-Usage-Acc: Anthropic:Claude Haiku 4.5,in:0.03,out:0,cache:0,aic:0.01
-Copilot-Session-Usage-AIC: 23
+Copilot-Session-Usage-Acc: Moonshot AI:Kimi K2.7 Code,in:24.90,out:0.06,cache:21.88,aic:231
+Copilot-Session-Usage-Acc: Anthropic:Claude Haiku 4.5,in:0.03,out:0,cache:0,aic:1
+Copilot-Session-Usage-AIC: 232
 ```
 
 Beware, the costs are **accumulated** for the entire session, not just the current commit.
@@ -31,7 +31,7 @@ and model names keep the casing from `data/models-and-pricing.yml`.
 
 Token counts are expressed in millions of tokens with two decimals. The
 `aic` value and the `Copilot-Session-Usage-AIC` line show the cost in AI
-credits (USD) with two decimals. If the commit already contains
+credits (1 AIC = $0.01) with two decimals. If the commit already contains
 `Copilot-Session-Usage-Acc` or `Copilot-Session-Usage-AIC` trailers, they are
 replaced so the values stay fresh. Other trailers, such as `Signed-off-by`,
 are preserved and kept at the end of the message.
@@ -103,8 +103,8 @@ This produces:
 ```text
 Copilot-Session-Usage-Session-ID: abc-123
 Copilot-Session-Usage-Session-ID: def-456
-Copilot-Session-Usage-Acc: Moonshot AI:Kimi K2.7 Code,in:24.90,out:0.06,cache:21.88,aic:2.31
-Copilot-Session-Usage-AIC: 23
+Copilot-Session-Usage-Acc: Moonshot AI:Kimi K2.7 Code,in:24.90,out:0.06,cache:21.88,aic:231
+Copilot-Session-Usage-AIC: 232
 ```
 
 This will allow another process, not done by Copilot-Session-Cost, to later rewrite

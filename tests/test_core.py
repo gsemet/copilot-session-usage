@@ -867,18 +867,18 @@ def test_build_session_usage_acc_trailers():
     trailers = core.build_session_usage_acc_trailers(result, PRICING_WITH_PROVIDERS)
     assert len(trailers) == 2
     assert (
-        "Copilot-Session-Usage-Acc: Moonshot AI:Kimi K2.7 Code,in:4.12,out:1.21,cache:3.9,aic:2.31"
-        in trailers
+        "Copilot-Session-Usage-Acc: Moonshot AI:Kimi K2.7 Code,"
+        "in:4.12,out:1.21,cache:3.9,aic:230.55" in trailers
     )
     assert (
-        "Copilot-Session-Usage-Acc: Anthropic:Claude Sonnet 4.6,in:1,out:0.2,cache:0.5,aic:0.42"
-        in trailers
+        "Copilot-Session-Usage-Acc: Anthropic:Claude Sonnet 4.6,"
+        "in:1,out:0.2,cache:0.5,aic:42" in trailers
     )
 
 
 def test_build_session_usage_aic_trailer():
     result = {"total": {"estimated_usd": 23.4567}}
-    assert core.build_session_usage_aic_trailer(result) == "Copilot-Session-Usage-AIC: 23.46"
+    assert core.build_session_usage_aic_trailer(result) == "Copilot-Session-Usage-AIC: 2345.67"
 
 
 def test_build_session_usage_aic_trailer_zero():
