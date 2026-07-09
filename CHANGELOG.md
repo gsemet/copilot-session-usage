@@ -2,6 +2,13 @@
 
 ### Feat
 
+- **cli**: add amend-commit command to inject session cost trailers
+
+## v0.4.0 (2026-07-08)
+
+### Feat
+
+- skill-aware cost attribution and tool-call tracking
 - add session filtering/aggregation/summaries/field extraction
 
 ## v0.3.0 (2026-07-06)

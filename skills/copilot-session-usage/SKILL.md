@@ -9,6 +9,10 @@ Extract VS Code Copilot session cost KPIs from local debug logs.
 If you do not have information about which session to use, use `VSCODE_TARGET_SESSION_LOG`
 to find the current session ID.
 
+`VSCODE_TARGET_SESSION_LOG` is provided by VS Code Copilot as a **context/template variable**,
+not as an environment variable. Extract the session UUID from the last path component and
+pass it to the CLI with `--session-id`.
+
 Beware of `latest` session ID when several sessions are running in parallel.
 
 ## When to use
@@ -101,6 +105,13 @@ copilot-session-usage batch 10
 
 # Full detail JSON output
 copilot-session-usage latest --detail full --format json
+
+# Amend the current HEAD commit with accumulated session cost trailers.
+# Extract <session-id> from VSCODE_TARGET_SESSION_LOG in the Copilot context.
+copilot-session-usage amend-commit --session-id <session-id>
+
+# Preview trailers without amending
+copilot-session-usage amend-commit --session-id <session-id> --dry-run
 ```
 
 ## Skill-Aware Analysis
@@ -175,6 +186,50 @@ copilot-session-usage analyze --title "feature" --aggregate --skill-breakdown --
 - **Single-skill filtering** — focus analysis on one skill with `--skill SKILL`
 - **Skill aggregation** — list all skills and their costs across sessions with `skills` command
 - **Field extraction** with dot notation (`--query`)
+- **Commit amendment** with accumulated per-model cost trailers (`amend-commit`)
+
+## Injecting cost trailers into commits
+
+Use `amend-commit` to update the HEAD commit with accumulated session usage
+as Git commit-message trailers. One line is emitted per model, plus a total
+AIC (AI credits) summary line:
+
+```
+Copilot-Session-Usage-Acc: Moonshot AI:Kimi K2.7 Code,in:24.90,out:0.06,cache:21.88,aic:2.31
+Copilot-Session-Usage-AIC: 23
+```
+
+The vendor and model name come from the actual session context (debug-log
+`llm_request` events and bundled pricing data). Vendor names are rendered with
+human-readable casing (for example, `Moonshot AI` instead of `moonshot_ai`), and
+model names keep the casing from the pricing data (for example, `Kimi K2.7 Code`
+instead of the lower-cased log identifier `kimi-k2.7-code`). Token counts are in
+millions of tokens with two decimals; AIC values are rounded to two decimals.
+
+When a change spans several VS Code Copilot sessions, pass each session ID
+with a separate `--session-id` argument. The costs are accumulated and written
+as one trailer block. Add `--with-session-id` to also burn one
+`Copilot-Session-Usage-Session-ID` trailer per session ID, which makes it
+possible to rewrite the commit chain with commit-accurate costs later.
+
+### Finding the current session ID
+
+`VSCODE_TARGET_SESSION_LOG` is provided in the Copilot agent context as a
+template variable, **not** an environment variable. Extract the session UUID
+from the last path component:
+
+```bash
+# VSCODE_TARGET_SESSION_LOG looks like:
+# /.../workspaceStorage/<hash>/GitHub.copilot-chat/debug-logs/<session-id>
+SESSION_ID=$(basename "{{VSCODE_TARGET_SESSION_LOG}}")
+copilot-session-usage amend-commit --session-id "$SESSION_ID"
+```
+
+If the context does not expose the variable, fall back to `copilot-session-usage latest`
+or `copilot-session-usage list` to identify the session manually.
+
+`amend-commit` preserves any existing `Signed-off-by` trailer by placing the
+new cost trailers immediately before it, not after it.
 
 ## Pricing Data
 

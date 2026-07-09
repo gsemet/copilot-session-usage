@@ -7,7 +7,7 @@ from pathlib import Path
 
 import click
 
-from copilot_session_usage._internal import core, vscode
+from copilot_session_usage._internal import core, git, vscode
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
@@ -560,6 +560,115 @@ def batch(
     detail = core.resolve_detail(detail, format_)
     out_path = Path(output_path) if output_path else None
     core.emit(core.shape_batch(results, detail), core.normalize_format(format_), out_path)
+
+
+@cli.command(name="amend-commit")
+@click.option(
+    "--session-id",
+    "session_ids",
+    multiple=True,
+    metavar="UUID",
+    help="Session UUID to inject cost trailers for. May be given multiple times.",
+)
+@click.option(
+    "--with-session-id",
+    "with_session_id",
+    is_flag=True,
+    help="Also inject a Copilot-Session-Usage-Session-ID trailer per session ID.",
+)
+@click.option(
+    "--repo",
+    "repo_path",
+    metavar="PATH",
+    help="Path to the git repository (default: current directory).",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Print the trailers that would be injected without amending the commit.",
+)
+@click.pass_context
+def amend_commit(
+    ctx: click.Context,
+    session_ids: tuple[str, ...],
+    with_session_id: bool,
+    repo_path: str | None,
+    dry_run: bool,
+) -> None:
+    """Amend HEAD to inject accumulated session cost trailers.
+
+    Reads the VS Code Copilot debug logs for the given session IDs, computes
+    the accumulated per-model token counts, and amends the HEAD commit with
+    one ``Copilot-Session-Usage-Acc`` trailer per model plus a
+    ``Copilot-Session-Usage-AIC`` trailer with the total estimated cost.
+
+    When several ``--session-id`` values are provided, their costs and token
+    counts are merged before the trailers are built. This is useful when a
+    single coding change spanned multiple VS Code Copilot sessions.
+
+    Pass ``--with-session-id`` to also burn one
+    ``Copilot-Session-Usage-Session-ID`` trailer per session ID. This makes
+    it easier to rewrite commit history with commit-accurate costs later.
+
+    The current session ID is available to Copilot agents through the
+    ``VSCODE_TARGET_SESSION_LOG`` template variable in the editor context
+    (it is *not* an environment variable). Extract the UUID from that path
+    and pass it with ``--session-id``.
+
+    Use ``--dry-run`` to preview the trailers without touching the commit.
+    """
+    if not session_ids:
+        raise click.ClickException(
+            "No session ID provided. Pass --session-id or use the "
+            "VSCODE_TARGET_SESSION_LOG value from the Copilot context."
+        )
+
+    if repo_path:
+        repo = Path(repo_path)
+        if not repo.exists():
+            raise click.ClickException(f"path not found: {repo}")
+        if not git.is_git_repository(cwd=repo):
+            raise click.ClickException(f"not a git repository: {repo}")
+    else:
+        if not git.is_git_repository():
+            raise click.ClickException("not inside a git repository.")
+        repo = None
+
+    ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
+    session_dirs: list[Path] = []
+    for sid in session_ids:
+        session_dir = vscode.find_session_dir_by_id(sid, ws_roots)
+        if not session_dir:
+            msg = f"no debug logs found for session ID: {sid}"
+            raise click.ClickException(msg)
+        session_dirs.append(session_dir)
+
+    pricing = core.load_pricing()
+    results = [core.analyze_session(session_dir, pricing) for session_dir in session_dirs]
+    merged = core.merge_session_results(results)
+    merged = core.shape_session(merged, "full")
+    acc_trailers = core.build_session_usage_acc_trailers(merged, pricing)
+    if not acc_trailers:
+        click.echo("No LLM usage found; nothing to inject.")
+        return
+
+    aic_trailer = core.build_session_usage_aic_trailer(merged)
+    trailers: list[str] = []
+    if with_session_id:
+        trailers.extend(f"Copilot-Session-Usage-Session-ID: {sid}" for sid in session_ids)
+    trailers.extend(acc_trailers)
+    trailers.append(aic_trailer)
+
+    if dry_run:
+        click.echo("Trailers that would be injected:")
+        for line in trailers:
+            click.echo(line)
+        return
+
+    git.amend_commit_with_trailers(trailers, cwd=repo)
+    click.echo("Amended HEAD with session cost trailers.")
+    for line in trailers:
+        click.echo(line)
 
 
 @cli.command(name="skills")

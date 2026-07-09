@@ -129,3 +129,6 @@ clean:
 run-cli:
 	uv run -- copilot-session-usage batch 6 --format table
 	uv run -- copilot-session-usage batch 6 --format detailed
+
+run-amend-commit SESSION_ID:
+    uv run copilot-session-usage amend-commit --session-id {{SESSION_ID}}
