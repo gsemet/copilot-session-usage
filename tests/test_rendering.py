@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from copilot_session_usage._internal import core
 
 # ─── _parse_threshold edge cases ──────────────────────────────────────────────
@@ -64,28 +66,27 @@ def test_load_custom_pricing_non_dict_entry_skipped(tmp_path):
 # ─── load_pricing fallback paths ──────────────────────────────────────────────
 
 
-def test_load_pricing_missing_yaml_uses_defaults():
-    pricing = core.load_pricing(Path("/nonexistent"))
-    assert "models" in pricing
-    assert "default" in pricing["models"]
+def test_load_pricing_missing_yaml_raises():
+    with pytest.raises(FileNotFoundError):
+        core.load_pricing(Path("/nonexistent"))
 
 
-def test_load_pricing_bad_yaml_uses_defaults(tmp_path):
+def test_load_pricing_bad_yaml_raises(tmp_path):
     ref_dir = tmp_path / "refs"
     ref_dir.mkdir()
     bad_yaml = ref_dir / "models-and-pricing.yml"
     bad_yaml.write_text("not: valid: yaml: [", encoding="utf-8")
-    pricing = core.load_pricing(ref_dir)
-    assert "default" in pricing["models"]
+    with pytest.raises(ValueError):
+        core.load_pricing(ref_dir)
 
 
-def test_load_pricing_non_list_yaml_uses_defaults(tmp_path):
+def test_load_pricing_non_list_yaml_raises(tmp_path):
     ref_dir = tmp_path / "refs"
     ref_dir.mkdir()
     bad_yaml = ref_dir / "models-and-pricing.yml"
     bad_yaml.write_text("just_a_string", encoding="utf-8")
-    pricing = core.load_pricing(ref_dir)
-    assert "default" in pricing["models"]
+    with pytest.raises(ValueError):
+        core.load_pricing(ref_dir)
 
 
 # ─── _build_pricing_from_yaml edge cases ──────────────────────────────────────

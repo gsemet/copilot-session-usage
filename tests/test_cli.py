@@ -65,6 +65,7 @@ def test_cli_help(runner):
     assert "id" in result.output
     assert "list" in result.output
     assert "batch" in result.output
+    assert "amend-commit" in result.output
 
 
 def test_cli_agent_cli_raises(runner):
@@ -595,3 +596,139 @@ def test_skills_command(runner, sample_session_dir, mocker):
     result = runner.invoke(cli, ["skills", "--format", "table"])
     assert result.exit_code == 0
     assert "Skills across" in result.output
+
+
+# ─── amend-commit command ─────────────────────────────────────────────────────
+
+
+def test_amend_commit_dry_run(runner, sample_session_dir, tmp_path, mocker):
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@t.com"], cwd=str(repo), check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "T"], cwd=str(repo), check=True, capture_output=True
+    )
+    (repo / "f.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), check=True, capture_output=True)
+
+    mock_find = mocker.patch("copilot_session_usage._internal.vscode.find_session_dir_by_id")
+    mock_git_amend = mocker.patch("copilot_session_usage._internal.git.amend_commit_with_trailers")
+    mock_find.return_value = sample_session_dir
+    result = runner.invoke(
+        cli, ["amend-commit", "--session-id", "abc-123", "--dry-run", "--repo", str(repo)]
+    )
+    assert result.exit_code == 0
+    assert "Trailers that would be injected" in result.output
+    assert "Copilot-Session-Usage-Acc:" in result.output
+    mock_git_amend.assert_not_called()
+
+
+def test_amend_commit_no_session_id(runner):
+    result = runner.invoke(cli, ["amend-commit"])
+    assert result.exit_code != 0
+    assert "No session ID provided" in result.output
+
+
+def test_amend_commit_not_git_repo(runner, sample_session_dir, mocker, tmp_path):
+    mock_find = mocker.patch("copilot_session_usage._internal.vscode.find_session_dir_by_id")
+    mock_find.return_value = sample_session_dir
+    not_a_repo = tmp_path / "not-a-repo"
+    not_a_repo.mkdir()
+    result = runner.invoke(
+        cli, ["amend-commit", "--session-id", "abc-123", "--repo", str(not_a_repo)]
+    )
+    assert result.exit_code != 0
+    assert "not a git repository" in result.output
+
+
+def test_amend_commit_session_not_found(runner, mocker):
+    mock_find = mocker.patch("copilot_session_usage._internal.vscode.find_session_dir_by_id")
+    mock_find.return_value = None
+    result = runner.invoke(cli, ["amend-commit", "--session-id", "missing-id"])
+    assert result.exit_code != 0
+    assert "no debug logs found" in result.output
+
+
+def test_amend_commit_multiple_session_ids(runner, sample_session_dir, tmp_path, mocker):
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@t.com"], cwd=str(repo), check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "T"], cwd=str(repo), check=True, capture_output=True
+    )
+    (repo / "f.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), check=True, capture_output=True)
+
+    mock_find = mocker.patch("copilot_session_usage._internal.vscode.find_session_dir_by_id")
+    mock_git_amend = mocker.patch("copilot_session_usage._internal.git.amend_commit_with_trailers")
+    mock_find.return_value = sample_session_dir
+    result = runner.invoke(
+        cli,
+        [
+            "amend-commit",
+            "--session-id",
+            "abc-123",
+            "--session-id",
+            "def-456",
+            "--dry-run",
+            "--repo",
+            str(repo),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Copilot-Session-Usage-Acc:" in result.output
+    assert "Copilot-Session-Usage-AIC:" in result.output
+    assert "Copilot-Session-Usage-Session-ID:" not in result.output
+    mock_git_amend.assert_not_called()
+
+
+def test_amend_commit_with_session_id_trailers(runner, sample_session_dir, tmp_path, mocker):
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@t.com"], cwd=str(repo), check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "T"], cwd=str(repo), check=True, capture_output=True
+    )
+    (repo / "f.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo), check=True, capture_output=True)
+
+    mock_find = mocker.patch("copilot_session_usage._internal.vscode.find_session_dir_by_id")
+    mock_git_amend = mocker.patch("copilot_session_usage._internal.git.amend_commit_with_trailers")
+    mock_find.return_value = sample_session_dir
+    result = runner.invoke(
+        cli,
+        [
+            "amend-commit",
+            "--session-id",
+            "abc-123",
+            "--session-id",
+            "def-456",
+            "--with-session-id",
+            "--dry-run",
+            "--repo",
+            str(repo),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Copilot-Session-Usage-Session-ID: abc-123" in result.output
+    assert "Copilot-Session-Usage-Session-ID: def-456" in result.output
+    assert "Copilot-Session-Usage-Acc:" in result.output
+    mock_git_amend.assert_not_called()

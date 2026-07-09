@@ -46,76 +46,6 @@ def _read_data_file(name: str) -> str | None:
         return None
 
 
-# ─── Embedded default pricing (USD per million tokens) ───────────────────────
-# Approximate estimates; update data/models-and-pricing.yml manually.
-
-DEFAULT_PRICING: dict = {
-    "_note": "Approximate per-token costs (USD/M). Estimates only — not GitHub's billing.",
-    "_source": "embedded defaults",
-    "models": {
-        # Anthropic Claude
-        "claude-3-5-sonnet": [
-            {"input_per_m": 0.30, "output_per_m": 1.50, "cache_per_m": 0.030, "tier": "Default"}
-        ],
-        "claude-3-7-sonnet": [
-            {"input_per_m": 0.30, "output_per_m": 1.50, "cache_per_m": 0.030, "tier": "Default"}
-        ],
-        "claude-sonnet-4-5": [
-            {"input_per_m": 0.30, "output_per_m": 1.50, "cache_per_m": 0.030, "tier": "Default"}
-        ],
-        "claude-sonnet-4.6": [
-            {"input_per_m": 0.30, "output_per_m": 1.50, "cache_per_m": 0.030, "tier": "Default"}
-        ],
-        "claude-opus-4-5": [
-            {"input_per_m": 1.50, "output_per_m": 7.50, "cache_per_m": 0.150, "tier": "Default"}
-        ],
-        "claude-opus-4.6": [
-            {"input_per_m": 1.50, "output_per_m": 7.50, "cache_per_m": 0.150, "tier": "Default"}
-        ],
-        "claude-haiku-4-5": [
-            {"input_per_m": 0.08, "output_per_m": 0.40, "cache_per_m": 0.008, "tier": "Default"}
-        ],
-        "claude-haiku-4.6": [
-            {"input_per_m": 0.08, "output_per_m": 0.40, "cache_per_m": 0.008, "tier": "Default"}
-        ],
-        # OpenAI
-        "gpt-4o": [
-            {"input_per_m": 0.25, "output_per_m": 1.00, "cache_per_m": 0.025, "tier": "Default"}
-        ],
-        "gpt-4o-mini": [
-            {"input_per_m": 0.015, "output_per_m": 0.060, "cache_per_m": 0.002, "tier": "Default"}
-        ],
-        "o3": [
-            {"input_per_m": 10.00, "output_per_m": 40.00, "cache_per_m": 1.000, "tier": "Default"}
-        ],
-        "o3-mini": [
-            {"input_per_m": 1.10, "output_per_m": 4.40, "cache_per_m": 0.550, "tier": "Default"}
-        ],
-        "o4-mini": [
-            {"input_per_m": 1.10, "output_per_m": 4.40, "cache_per_m": 0.550, "tier": "Default"}
-        ],
-        # Google Gemini
-        "gemini-1.5-pro": [
-            {"input_per_m": 0.125, "output_per_m": 0.375, "cache_per_m": 0.013, "tier": "Default"}
-        ],
-        "gemini-2.0-flash": [
-            {"input_per_m": 0.075, "output_per_m": 0.30, "cache_per_m": 0.008, "tier": "Default"}
-        ],
-        "gemini-2.5-pro": [
-            {"input_per_m": 0.125, "output_per_m": 0.375, "cache_per_m": 0.013, "tier": "Default"}
-        ],
-        # Moonshot (Azure-hosted)
-        "Kimi-K2.6-azure": [
-            {"input_per_m": 0.15, "output_per_m": 0.60, "cache_per_m": 0.015, "tier": "Default"}
-        ],
-        # Fallback for unknown models
-        "default": [
-            {"input_per_m": 0.30, "output_per_m": 1.50, "cache_per_m": 0.030, "tier": "Default"}
-        ],
-    },
-}
-
-
 # ─── Pricing helpers ──────────────────────────────────────────────────────────
 
 
@@ -132,12 +62,27 @@ def _normalize_model_name(name: str) -> str:
         "Claude Sonnet 5[^sonnet-5-promo]" → "claude-sonnet-5"
         "Claude Opus 4.8 (fast mode) (preview)" → "claude-opus-4.8-fast-mode"
     """
+    cleaned = _clean_model_display_name(name)
+    return re.sub(r"\s+", "-", cleaned.lower())
+
+
+def _clean_model_display_name(name: str) -> str:
+    """Return a presentable model name preserving original casing.
+
+    Strips footnote markers and release-status parentheticals such as
+    ``(preview)``, while keeping functional descriptors like ``(fast mode)``.
+
+    Examples:
+        "GPT-5.4" → "GPT-5.4"
+        "Claude Sonnet 4.6" → "Claude Sonnet 4.6"
+        "Claude Sonnet 5[^sonnet-5-promo]" → "Claude Sonnet 5"
+        "Claude Opus 4.8 (fast mode) (preview)" → "Claude Opus 4.8 (fast mode)"
+    """
     cleaned = re.sub(r"\[\^[^\]]+\]", "", name)
     # Strip release-status markers like (preview), (GA), etc., but keep
     # functional descriptors such as (fast mode).
     cleaned = re.sub(r"\s*\(\s*preview\s*\)", "", cleaned, flags=re.IGNORECASE)
-    cleaned = cleaned.strip()
-    return re.sub(r"\s+", "-", cleaned.lower())
+    return cleaned.strip()
 
 
 def _parse_threshold(threshold: str) -> int | None:
@@ -219,7 +164,9 @@ def _load_custom_pricing(ref_dir: Path | None = None) -> dict[str, list[dict]] |
 def load_pricing(ref_dir: Path | None = None) -> dict:
     """Load pricing from models-and-pricing.yml, merge custom-models-pricing.yml.
 
-    Fall back to embedded defaults if files are missing or unreadable.
+    Raises:
+        FileNotFoundError: If ``models-and-pricing.yml`` is missing or unreadable.
+        ValueError: If the YAML cannot be parsed or has an unexpected shape.
 
     Args:
         ref_dir: Directory containing models-and-pricing.yml and
@@ -227,30 +174,35 @@ def load_pricing(ref_dir: Path | None = None) -> dict:
             shipped with the package via importlib.resources.
     """
     text: str | None = None
-    source = "embedded defaults"
+    source = "bundled models-and-pricing.yml"
     if ref_dir is not None:
         yaml_path = ref_dir / "models-and-pricing.yml"
         if yaml_path.exists():
-            with contextlib.suppress(Exception):
-                text = yaml_path.read_text(encoding="utf-8")
-                source = str(yaml_path)
+            text = yaml_path.read_text(encoding="utf-8")
+            source = str(yaml_path)
+        else:
+            msg = f"pricing file not found: {yaml_path}"
+            raise FileNotFoundError(msg)
     else:
         text = _read_data_file("models-and-pricing.yml")
-        source = "bundled models-and-pricing.yml"
+        if text is None:
+            msg = "bundled models-and-pricing.yml not found"
+            raise FileNotFoundError(msg)
 
-    pricing: dict | None = None
-    if text is not None:
-        try:
-            from ruamel.yaml import YAML
+    try:
+        from ruamel.yaml import YAML
 
-            yaml = YAML(typ="safe")
-            entries = yaml.load(text)
-            if isinstance(entries, list):
-                pricing = _build_pricing_from_yaml(entries, source)
-        except Exception:
-            pass
-    if pricing is None:
-        pricing = DEFAULT_PRICING.copy()
+        yaml = YAML(typ="safe")
+        entries = yaml.load(text)
+    except Exception as exc:
+        msg = f"failed to parse {source}: {exc}"
+        raise ValueError(msg) from exc
+
+    if not isinstance(entries, list):
+        msg = f"unexpected YAML structure in {source}: expected list, got {type(entries).__name__}"
+        raise ValueError(msg)
+
+    pricing = _build_pricing_from_yaml(entries, source)
 
     custom_models = _load_custom_pricing(ref_dir)
     if custom_models:
@@ -269,6 +221,7 @@ def _build_pricing_from_yaml(entries: list[dict], source: str) -> dict:
         if not raw_name:
             continue
         name = _normalize_model_name(raw_name)
+        display_name = _clean_model_display_name(raw_name)
         tier = {
             "input_per_m": _parse_price(entry.get("input", "0")),
             "output_per_m": _parse_price(entry.get("output", "0")),
@@ -276,6 +229,8 @@ def _build_pricing_from_yaml(entries: list[dict], source: str) -> dict:
             "cache_write_per_m": _parse_price(entry.get("cache_write", "0")),
             "tier": entry.get("tier", "Default"),
             "threshold_tokens": _parse_threshold(entry.get("threshold", "")),
+            "provider": entry.get("provider", "unknown"),
+            "display_name": display_name,
         }
         models.setdefault(name, []).append(tier)
 
@@ -285,7 +240,18 @@ def _build_pricing_from_yaml(entries: list[dict], source: str) -> dict:
         )
 
     if "default" not in models:
-        models["default"] = DEFAULT_PRICING["models"]["default"]
+        models["default"] = [
+            {
+                "input_per_m": 0.30,
+                "output_per_m": 1.50,
+                "cache_per_m": 0.030,
+                "cache_write_per_m": 0.0,
+                "tier": "Default",
+                "threshold_tokens": None,
+                "provider": "unknown",
+                "display_name": "unknown",
+            }
+        ]
 
     return {
         "_note": (
@@ -434,6 +400,147 @@ def model_uses_fallback_pricing(model: str, pricing: dict[str, Any]) -> bool:
     if model in models:
         return False
     return not any(key != "default" and model.startswith(key) for key in models)
+
+
+def _model_provider(model: str, pricing: dict[str, Any]) -> str:
+    """Return the provider name for a model from the pricing data.
+
+    Falls back to the provider of the longest matching prefix key, then to
+    ``"unknown"``. The returned value is the raw provider string from the
+    YAML (e.g. ``openai``, ``anthropic``, ``moonshot_ai``).
+    """
+    models = pricing.get("models", {})
+    tiers = models.get(model)
+    if tiers is not None and tiers:
+        return str(tiers[0].get("provider", "unknown"))
+
+    best_key = ""
+    best_tiers: list[dict] | None = None
+    for key in models:
+        if key == "default":
+            continue
+        if model.startswith(key) and len(key) > len(best_key):
+            best_key = key
+            best_tiers = models[key]
+
+    if best_tiers:
+        return str(best_tiers[0].get("provider", "unknown"))
+    return "unknown"
+
+
+# Human-readable provider names for the most common Copilot model vendors.
+# Unknown providers fall back to the raw provider string from the YAML.
+_PROVIDER_DISPLAY_NAMES: dict[str, str] = {
+    "openai": "OpenAI",
+    "anthropic": "Anthropic",
+    "google": "Google",
+    "microsoft": "Microsoft",
+    "github": "GitHub",
+    "moonshot_ai": "Moonshot AI",
+}
+
+
+def _format_millions(value: float, decimals: int = 2) -> str:
+    """Format a token count as millions with at most ``decimals`` decimals.
+
+    Examples (with the default 2 decimals):
+        4_123_000   -> "4.12"
+        1_213_000   -> "1.21"
+        3_900_000   -> "3.9"
+        0           -> "0"
+    """
+    millions = value / 1_000_000.0
+    # Round to the requested decimals, then strip unnecessary trailing zeros.
+    formatted = f"{millions:.{decimals}f}"
+    if "." in formatted:
+        formatted = formatted.rstrip("0").rstrip(".")
+    return formatted or "0"
+
+
+def _provider_display_name(provider: str) -> str:
+    """Return a human-readable provider name, falling back to the raw key."""
+    return _PROVIDER_DISPLAY_NAMES.get(provider, provider)
+
+
+def _model_display_name(model: str, pricing: dict[str, Any]) -> str:
+    """Return the canonical display name for a model from the pricing data.
+
+    Falls back to the longest matching prefix key, then to the raw ``model``
+    name (e.g. the value from the debug log) when no pricing entry exists.
+    The returned name preserves the casing from the YAML, such as
+    ``"Claude Sonnet 4.6"`` instead of ``"claude-sonnet-4.6"``.
+    """
+    models = pricing.get("models", {})
+    tiers = models.get(model)
+    if tiers is not None and tiers:
+        display = tiers[0].get("display_name")
+        if display:
+            return str(display)
+
+    best_key = ""
+    best_tiers: list[dict] | None = None
+    for key in models:
+        if key == "default":
+            continue
+        if model.startswith(key) and len(key) > len(best_key):
+            best_key = key
+            best_tiers = models[key]
+
+    if best_tiers:
+        display = best_tiers[0].get("display_name")
+        if display:
+            return str(display)
+    return model
+
+
+def build_session_usage_acc_trailers(result: dict[str, Any], pricing: dict[str, Any]) -> list[str]:
+    """Build ``Copilot-Session-Usage-Acc`` trailer lines from a session analysis.
+
+    One line is emitted per model found in ``model_breakdown``. The model name
+    is the raw name observed in the session logs; the vendor is derived from
+    the bundled pricing data using both the internal normalized key and the
+    original raw model name. Token counts are expressed in millions with two
+    decimals; the estimated USD cost is appended as ``aic`` (AIC = AI credits).
+
+    Format::
+
+        Copilot-Session-Usage-Acc: <vendor>:<model-name>,in:4.12,out:1.21,cache:3.9,aic:0.42
+
+    The model name keeps the casing from the bundled pricing YAML (for example
+    ``"Claude Sonnet 4.6"``) rather than the lower-cased identifier used in
+    the debug log.
+    """
+    trailers: list[str] = []
+    for entry in result.get("model_breakdown", []):
+        model = entry.get("model", "unknown")
+        provider = _model_provider(model, pricing)
+        if provider == "unknown":
+            provider = _model_provider(_normalize_model_name(model), pricing)
+        provider = _provider_display_name(provider)
+        display_model = _model_display_name(model, pricing)
+        input_m = _format_millions(entry.get("input_tokens", 0))
+        output_m = _format_millions(entry.get("output_tokens", 0))
+        cache_m = _format_millions(entry.get("cached_tokens", 0))
+        aic = round(entry.get("estimated_usd", 0.0), 2)
+        trailers.append(
+            f"Copilot-Session-Usage-Acc: "
+            f"{provider}:{display_model},in:{input_m},out:{output_m},cache:{cache_m},aic:{aic}"
+        )
+    return trailers
+
+
+def _format_aic(value: float) -> str:
+    """Format an AIC/USD value with at most 2 decimals, dropping trailing zeros."""
+    formatted = f"{value:.2f}"
+    if "." in formatted:
+        formatted = formatted.rstrip("0").rstrip(".")
+    return formatted or "0"
+
+
+def build_session_usage_aic_trailer(result: dict[str, Any]) -> str:
+    """Build the ``Copilot-Session-Usage-AIC`` trailer with total AIC cost."""
+    total_aic = round(result.get("total", {}).get("estimated_usd", 0.0), 2)
+    return f"Copilot-Session-Usage-AIC: {_format_aic(total_aic)}"
 
 
 def estimate_cost(
@@ -1340,6 +1447,65 @@ def compute_efficiency_summary(result: dict) -> dict:
         )
 
     return summary
+
+
+def merge_session_results(results: list[dict]) -> dict:
+    """Merge multiple raw session analyses into one result-shaped dict.
+
+    Totals and per-model breakdowns are summed across sessions. The returned
+    dict has the same ``total`` / ``model_breakdown`` structure produced by
+    ``analyze_session``, so it can be passed directly to the trailer builders.
+    """
+    if not results:
+        return {"total": {}, "model_breakdown": []}
+
+    total_input = total_output = total_cached = total_calls = 0
+    total_usd = 0.0
+    per_model: dict[str, dict] = {}
+
+    for r in results:
+        t = r.get("total", {})
+        total_input += t.get("input_tokens", 0)
+        total_output += t.get("output_tokens", 0)
+        total_cached += t.get("cached_tokens", 0)
+        total_calls += t.get("llm_calls", 0)
+        total_usd += t.get("estimated_usd", 0.0)
+
+        for m in r.get("model_breakdown", []):
+            model = m["model"]
+            if model not in per_model:
+                per_model[model] = {
+                    "model": model,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cached_tokens": 0,
+                    "llm_calls": 0,
+                    "estimated_usd": 0.0,
+                }
+            per_model[model]["input_tokens"] += m.get("input_tokens", 0)
+            per_model[model]["output_tokens"] += m.get("output_tokens", 0)
+            per_model[model]["cached_tokens"] += m.get("cached_tokens", 0)
+            per_model[model]["llm_calls"] += m.get("llm_calls", 0)
+            per_model[model]["estimated_usd"] += m.get("estimated_usd", 0.0)
+
+    cache_ratio = round(total_cached / total_input, 3) if total_input > 0 else 0.0
+    model_breakdown = sorted(
+        per_model.values(),
+        key=lambda x: x["estimated_usd"],
+        reverse=True,
+    )
+
+    return {
+        "total": {
+            "input_tokens": total_input,
+            "output_tokens": total_output,
+            "cached_tokens": total_cached,
+            "llm_calls": total_calls,
+            "estimated_usd": round(total_usd, 4),
+            "cache_ratio": cache_ratio,
+        },
+        "model_breakdown": model_breakdown,
+    }
 
 
 def aggregate_sessions(results: list[dict]) -> dict:

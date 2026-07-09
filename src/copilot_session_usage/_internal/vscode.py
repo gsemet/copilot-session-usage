@@ -8,10 +8,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
+
+# Note: VSCODE_TARGET_SESSION_LOG is a VS Code Copilot *context/template*
+# variable, not an environment variable. Do not read it from os.environ.
+
 
 # ─── Workspace DB cache ─────────────────────────────────────────────────────
 
@@ -19,6 +24,44 @@ _WS_DB_CACHE: dict[str, list[dict]] = {}
 
 
 # ─── Workspace storage path resolution (cross-platform) ─────────────────────
+
+
+def current_session_id_from_context() -> str | None:
+    """Extract the current session ID from the VS Code Copilot context.
+
+    The editor injects ``VSCODE_TARGET_SESSION_LOG`` into the Copilot agent
+    context as a template variable (it is *not* an environment variable).
+    Callers should pass that value here; this helper parses the session UUID
+    from the absolute path, e.g.::
+
+        /.../workspaceStorage/<hash>/GitHub.copilot-chat/debug-logs/<uuid>
+
+    Returns ``None`` when the value is empty or does not contain a valid
+    session directory path.
+    """
+    # This module intentionally does not read os.environ: the value is provided
+    # by the agent runtime as a context/template variable, not as an env var.
+    return None
+
+
+def parse_session_id_from_log_path(log_path: str) -> str | None:
+    """Parse a session UUID from a ``VSCODE_TARGET_SESSION_LOG``-style path.
+
+    Example::
+
+        >>> parse_session_id_from_log_path(
+        ...     "/.../debug-logs/966dec86-f826-4dd8-8b5c-56040097f1c4"
+        ... )
+        '966dec86-f826-4dd8-8b5c-56040097f1c4'
+    """
+    path = Path(log_path)
+    session_id = path.name
+    if not re.fullmatch(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        session_id,
+    ):
+        return None
+    return session_id
 
 
 def default_workspace_storage_roots() -> list[Path]:

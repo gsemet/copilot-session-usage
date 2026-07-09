@@ -9,6 +9,7 @@ license = "MIT"
 dependencies = [
     "click>=8.0",
     "ruamel.yaml>=0.18.0",
+    "GitPython>=3.1.0",
 ]
 
 [project.scripts]

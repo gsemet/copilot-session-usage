@@ -7,6 +7,7 @@
 - **[README](README.md)** — User-facing overview and quickstart
 - **[CONTRIBUTING](CONTRIBUTING.md)** — Developer setup and conventions
 - **[.github/guidelines/knowledge-base.guidelines.md](.github/guidelines/knowledge-base.guidelines.md)** - How to use, update and maintain the knowledge base
+- **[.github/guidelines/git-commit-message.guideline.md](.github/guidelines/git-commit-message.guideline.md)** — Commit message conventions
 
 ## Technology Stack
 

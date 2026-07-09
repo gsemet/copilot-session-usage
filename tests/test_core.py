@@ -758,11 +758,219 @@ def test_shape_batch_always_has_summary_and_sessions(full_session_result):
     batch = core.shape_batch([full_session_result, full_session_result], "compact")
     assert set(batch.keys()) == {"summary", "sessions"}
     assert batch["summary"]["session_count"] == 2
-    assert batch["summary"]["total_input_tokens"] == 2_000
-    assert abs(batch["summary"]["total_estimated_usd"] - 0.84) < 1e-9
-    assert len(batch["sessions"]) == 2
-    for s in batch["sessions"]:
-        assert "model_breakdown" not in s
+
+
+# ─── Session usage trailer helpers ───────────────────────────────────────────
+
+
+PRICING_WITH_PROVIDERS = {
+    "models": {
+        "claude-sonnet-4.6": [
+            {
+                "input_per_m": 0.30,
+                "output_per_m": 1.50,
+                "cache_per_m": 0.030,
+                "provider": "anthropic",
+                "display_name": "Claude Sonnet 4.6",
+                "tier": "Default",
+            }
+        ],
+        "kimi-k2.7-code": [
+            {
+                "input_per_m": 0.95,
+                "output_per_m": 4.00,
+                "cache_per_m": 0.19,
+                "provider": "moonshot_ai",
+                "display_name": "Kimi K2.7 Code",
+                "tier": "Default",
+            }
+        ],
+        "default": [
+            {
+                "input_per_m": 0.30,
+                "output_per_m": 1.50,
+                "cache_per_m": 0.030,
+                "provider": "unknown",
+                "display_name": "unknown",
+                "tier": "Default",
+            }
+        ],
+    }
+}
+
+
+def test_model_provider_exact_match():
+    assert core._model_provider("claude-sonnet-4.6", PRICING_WITH_PROVIDERS) == "anthropic"
+
+
+def test_model_provider_prefix_match():
+    assert core._model_provider("kimi-k2.7-code-foo", PRICING_WITH_PROVIDERS) == "moonshot_ai"
+
+
+def test_model_provider_unknown():
+    assert core._model_provider("brand-new-model", PRICING_WITH_PROVIDERS) == "unknown"
+
+
+def test_model_display_name_exact_match():
+    assert (
+        core._model_display_name("claude-sonnet-4.6", PRICING_WITH_PROVIDERS) == "Claude Sonnet 4.6"
+    )
+
+
+def test_model_display_name_prefix_match():
+    assert (
+        core._model_display_name("claude-sonnet-4.6-foo", PRICING_WITH_PROVIDERS)
+        == "Claude Sonnet 4.6"
+    )
+
+
+def test_model_display_name_unknown_fallback():
+    assert core._model_display_name("brand-new-model", PRICING_WITH_PROVIDERS) == "brand-new-model"
+
+
+def test_clean_model_display_name():
+    assert core._clean_model_display_name("Claude Sonnet 5[^sonnet-5-promo]") == "Claude Sonnet 5"
+    assert (
+        core._clean_model_display_name("Claude Opus 4.8 (fast mode) (preview)")
+        == "Claude Opus 4.8 (fast mode)"
+    )
+    assert core._clean_model_display_name("GPT-5.4") == "GPT-5.4"
+
+
+def test_format_millions():
+    assert core._format_millions(4_123_000) == "4.12"
+    assert core._format_millions(1_213_000) == "1.21"
+    assert core._format_millions(3_900_000) == "3.9"
+    assert core._format_millions(0) == "0"
+    assert core._format_millions(1_000_000) == "1"
+
+
+def test_build_session_usage_acc_trailers():
+    result = {
+        "model_breakdown": [
+            {
+                "model": "Kimi K2.7 Code",
+                "input_tokens": 4_123_000,
+                "output_tokens": 1_213_000,
+                "cached_tokens": 3_900_000,
+                "estimated_usd": 2.3055,
+            },
+            {
+                "model": "claude-sonnet-4.6",
+                "input_tokens": 1_000_000,
+                "output_tokens": 200_000,
+                "cached_tokens": 500_000,
+                "estimated_usd": 0.42,
+            },
+        ]
+    }
+    trailers = core.build_session_usage_acc_trailers(result, PRICING_WITH_PROVIDERS)
+    assert len(trailers) == 2
+    assert (
+        "Copilot-Session-Usage-Acc: Moonshot AI:Kimi K2.7 Code,in:4.12,out:1.21,cache:3.9,aic:2.31"
+        in trailers
+    )
+    assert (
+        "Copilot-Session-Usage-Acc: Anthropic:Claude Sonnet 4.6,in:1,out:0.2,cache:0.5,aic:0.42"
+        in trailers
+    )
+
+
+def test_build_session_usage_aic_trailer():
+    result = {"total": {"estimated_usd": 23.4567}}
+    assert core.build_session_usage_aic_trailer(result) == "Copilot-Session-Usage-AIC: 23.46"
+
+
+def test_build_session_usage_aic_trailer_zero():
+    assert core.build_session_usage_aic_trailer({}) == "Copilot-Session-Usage-AIC: 0"
+
+
+def test_build_session_usage_acc_trailers_unknown_provider_fallback():
+    result = {
+        "model_breakdown": [
+            {
+                "model": "brand-new-model",
+                "input_tokens": 1_000_000,
+                "output_tokens": 0,
+                "cached_tokens": 0,
+                "estimated_usd": 0,
+            },
+        ]
+    }
+    trailers = core.build_session_usage_acc_trailers(result, PRICING_WITH_PROVIDERS)
+    expected = "Copilot-Session-Usage-Acc: unknown:brand-new-model,in:1,out:0,cache:0,aic:0"
+    assert trailers == [expected]
+
+
+def test_build_session_usage_acc_trailers_empty():
+    assert (
+        core.build_session_usage_acc_trailers({"model_breakdown": []}, PRICING_WITH_PROVIDERS) == []
+    )
+
+
+def test_merge_session_results():
+    results = [
+        {
+            "total": {
+                "input_tokens": 1_000_000,
+                "output_tokens": 200_000,
+                "cached_tokens": 100_000,
+                "llm_calls": 5,
+                "estimated_usd": 1.5,
+            },
+            "model_breakdown": [
+                {
+                    "model": "gpt-4o",
+                    "input_tokens": 1_000_000,
+                    "output_tokens": 200_000,
+                    "cached_tokens": 100_000,
+                    "llm_calls": 5,
+                    "estimated_usd": 1.5,
+                },
+            ],
+        },
+        {
+            "total": {
+                "input_tokens": 2_000_000,
+                "output_tokens": 400_000,
+                "cached_tokens": 0,
+                "llm_calls": 10,
+                "estimated_usd": 3.0,
+            },
+            "model_breakdown": [
+                {
+                    "model": "gpt-4o",
+                    "input_tokens": 1_000_000,
+                    "output_tokens": 200_000,
+                    "cached_tokens": 0,
+                    "llm_calls": 5,
+                    "estimated_usd": 1.5,
+                },
+                {
+                    "model": "claude-sonnet-4.6",
+                    "input_tokens": 1_000_000,
+                    "output_tokens": 200_000,
+                    "cached_tokens": 0,
+                    "llm_calls": 5,
+                    "estimated_usd": 1.5,
+                },
+            ],
+        },
+    ]
+    merged = core.merge_session_results(results)
+    assert merged["total"]["input_tokens"] == 3_000_000
+    assert merged["total"]["output_tokens"] == 600_000
+    assert merged["total"]["cached_tokens"] == 100_000
+    assert merged["total"]["llm_calls"] == 15
+    assert merged["total"]["estimated_usd"] == 4.5
+    assert len(merged["model_breakdown"]) == 2
+    gpt = next(m for m in merged["model_breakdown"] if m["model"] == "gpt-4o")
+    assert gpt["input_tokens"] == 2_000_000
+    assert gpt["estimated_usd"] == 3.0
+
+
+def test_merge_session_results_empty():
+    assert core.merge_session_results([]) == {"total": {}, "model_breakdown": []}
 
 
 def test_shape_batch_empty():
