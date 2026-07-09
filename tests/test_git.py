@@ -56,36 +56,36 @@ def test_amend_commit_with_trailers(empty_repo):
 
 def test_amend_commit_replaces_existing_trailers(empty_repo):
     git.amend_commit_with_trailers(
-        ["Copilot-Session-Usage-Acc: old:model,in:1,out:1,cache:1,aic:0.1"],
+        ["Copilot-Session-Usage-Acc: old:model,in:1,out:1,cache:1,aic:10"],
         cwd=empty_repo,
     )
     git.amend_commit_with_trailers(
-        ["Copilot-Session-Usage-Acc: new:model,in:2,out:2,cache:2,aic:0.2"],
+        ["Copilot-Session-Usage-Acc: new:model,in:2,out:2,cache:2,aic:20"],
         cwd=empty_repo,
     )
     msg = git.get_head_commit_message(cwd=empty_repo)
     assert "old:model" not in msg
-    assert "new:model,in:2,out:2,cache:2,aic:0.2" in msg
+    assert "new:model,in:2,out:2,cache:2,aic:20" in msg
 
 
 def test_amend_commit_replaces_aic_trailer(empty_repo):
     git.amend_commit_with_trailers(
         [
-            "Copilot-Session-Usage-Acc: a:b,in:1,out:1,cache:1,aic:0.1",
-            "Copilot-Session-Usage-AIC: 1.23",
+            "Copilot-Session-Usage-Acc: a:b,in:1,out:1,cache:1,aic:10",
+            "Copilot-Session-Usage-AIC: 123",
         ],
         cwd=empty_repo,
     )
     git.amend_commit_with_trailers(
         [
-            "Copilot-Session-Usage-Acc: a:b,in:2,out:2,cache:2,aic:0.2",
-            "Copilot-Session-Usage-AIC: 2.34",
+            "Copilot-Session-Usage-Acc: a:b,in:2,out:2,cache:2,aic:20",
+            "Copilot-Session-Usage-AIC: 234",
         ],
         cwd=empty_repo,
     )
     msg = git.get_head_commit_message(cwd=empty_repo)
-    assert "Copilot-Session-Usage-AIC: 2.34" in msg
-    assert "Copilot-Session-Usage-AIC: 1.23" not in msg
+    assert "Copilot-Session-Usage-AIC: 234" in msg
+    assert "Copilot-Session-Usage-AIC: 123" not in msg
 
 
 def test_amend_commit_preserves_other_lines(empty_repo):
@@ -150,24 +150,24 @@ def test_amend_commit_replaces_session_id_trailer(empty_repo):
     git.amend_commit_with_trailers(
         [
             "Copilot-Session-Usage-Session-ID: old-id",
-            "Copilot-Session-Usage-Acc: a:b,in:1,out:1,cache:1,aic:0.1",
-            "Copilot-Session-Usage-AIC: 1.23",
+            "Copilot-Session-Usage-Acc: a:b,in:1,out:1,cache:1,aic:10",
+            "Copilot-Session-Usage-AIC: 123",
         ],
         cwd=empty_repo,
     )
     git.amend_commit_with_trailers(
         [
             "Copilot-Session-Usage-Session-ID: new-id",
-            "Copilot-Session-Usage-Acc: a:b,in:2,out:2,cache:2,aic:0.2",
-            "Copilot-Session-Usage-AIC: 2.34",
+            "Copilot-Session-Usage-Acc: a:b,in:2,out:2,cache:2,aic:20",
+            "Copilot-Session-Usage-AIC: 234",
         ],
         cwd=empty_repo,
     )
     msg = git.get_head_commit_message(cwd=empty_repo)
     assert "Copilot-Session-Usage-Session-ID: new-id" in msg
     assert "Copilot-Session-Usage-Session-ID: old-id" not in msg
-    assert "Copilot-Session-Usage-AIC: 2.34" in msg
-    assert "Copilot-Session-Usage-AIC: 1.23" not in msg
+    assert "Copilot-Session-Usage-AIC: 234" in msg
+    assert "Copilot-Session-Usage-AIC: 123" not in msg
 
 
 def test_amend_commit_with_no_trailers_does_nothing(empty_repo):

@@ -195,8 +195,8 @@ as Git commit-message trailers. One line is emitted per model, plus a total
 AIC (AI credits) summary line:
 
 ```
-Copilot-Session-Usage-Acc: Moonshot AI:Kimi K2.7 Code,in:24.90,out:0.06,cache:21.88,aic:2.31
-Copilot-Session-Usage-AIC: 23
+Copilot-Session-Usage-Acc: Moonshot AI:Kimi K2.7 Code,in:24.90,out:0.06,cache:21.88,aic:231
+Copilot-Session-Usage-AIC: 232
 ```
 
 The vendor and model name come from the actual session context (debug-log
@@ -204,7 +204,7 @@ The vendor and model name come from the actual session context (debug-log
 human-readable casing (for example, `Moonshot AI` instead of `moonshot_ai`), and
 model names keep the casing from the pricing data (for example, `Kimi K2.7 Code`
 instead of the lower-cased log identifier `kimi-k2.7-code`). Token counts are in
-millions of tokens with two decimals; AIC values are rounded to two decimals.
+millions of tokens with two decimals; AIC values are USD * 100 and rounded to two decimals (1 AIC = $0.01).
 
 When a change spans several VS Code Copilot sessions, pass each session ID
 with a separate `--session-id` argument. The costs are accumulated and written
