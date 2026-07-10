@@ -1,5 +1,11 @@
 ## Unreleased
 
+### Feat
+
+- integrate GPT5.6 pricing
+
+## v0.5.1 (2026-07-10)
+
 ### Fix
 
 - bad computation of AIC in trailers
