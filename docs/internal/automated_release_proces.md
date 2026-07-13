@@ -293,9 +293,10 @@ The Copilot invocation disables the built-in GitHub MCP server and exposes only
 reading, Git inspection, and the file tools needed to create `release-notes.md`.
 It explicitly instructs the skill not to modify, commit, or push any other
 repository files. The workflow discards the Copilot response stream and uses the
-skill-written file directly, after validating it for traces, code fences, titles,
-and preambles. The allowed documentation hosts are the project repository and
-the published Read the Docs site.
+skill-written file directly, after normalizing harmless titles and preambles and
+rejecting traces, code fences, or unusable content. Polluted no-product fallbacks
+are replaced with the canonical maintenance wording. The allowed documentation
+hosts are the project repository and the published Read the Docs site.
 
 ## Release-note generation
 
