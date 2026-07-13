@@ -108,11 +108,10 @@ jobs:
           fi
 
           git tag "$target_tag"
-          git push origin "$target_tag"
 
           echo "previous_tag=$previous_tag" >> "$GITHUB_OUTPUT"
           echo "target_tag=$target_tag" >> "$GITHUB_OUTPUT"
-          echo "Generated $target_tag from $previous_tag without modifying the default branch."
+          echo "Prepared local tag $target_tag from $previous_tag without modifying the default branch."
 
       - name: Verify release-note skill
         env:
@@ -182,6 +181,13 @@ jobs:
             echo "::error::A GitHub Release already exists for $TARGET_TAG."
             exit 1
           fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$TARGET_TAG" >/dev/null 2>&1; then
+            echo "::error::The remote tag $TARGET_TAG already exists."
+            exit 1
+          fi
+
+          git push origin "$TARGET_TAG"
 
           release_args=(
             --repo "$GITHUB_REPOSITORY"

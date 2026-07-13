@@ -22,11 +22,11 @@ The normal flow is:
    as a draft.
 6. Commitizen calculates the next version without modifying files or creating a
    release commit.
-7. The workflow creates and pushes a `vX.Y.Z` tag on the existing default-branch
+7. The workflow creates a local `vX.Y.Z` tag on the existing default-branch
    commit.
 8. GitHub Copilot CLI, invoked through `gh copilot`, runs the repository skill
    `gh-release-notes` against the actual tag-to-tag diff.
-9. The generated Markdown is uploaded as an artifact and used to create the
+9. After clean notes are generated, the workflow pushes the tag and creates the
    GitHub Release.
 10. Publishing the GitHub Release triggers CI and the PyPI publication workflow.
 
@@ -37,7 +37,7 @@ The normal workflow is defined in
 
 | File | Responsibility |
 | --- | --- |
-| `.github/workflows/release.yml` | Normal end-to-end release: bump, commit, tag, push, note generation, and GitHub Release creation. |
+| `.github/workflows/release.yml` | Normal end-to-end release: bump, local tag, note generation, tag push, and GitHub Release creation. |
 | `.github/workflows/release-notes.yml` | Manual fallback for generating notes and creating a draft release for an existing tag. It does not bump versions or create tags. |
 | `.github/workflows/publish.yml` | Runs when a GitHub Release is published, executes CI, builds the package, and publishes to PyPI using OIDC. |
 | `.github/workflows/ci.yml` | Reusable CI workflow required before PyPI publication. |
@@ -256,10 +256,12 @@ commit is present. Use that option carefully; it can create a release containing
 no user-visible change.
 
 The release workflow does not update `CHANGELOG.md` or create a release commit.
-It creates a lightweight `vX.Y.Z` tag on the current default-branch commit and
-pushes only that tag. This is required because the default branch is protected
-and requires changes to be made through a pull request. Release notes are
-generated from the actual previous-tag-to-new-tag diff by `gh-release-notes`.
+It creates a lightweight local `vX.Y.Z` tag on the current default-branch commit,
+generates and validates release notes, then pushes only that tag. This ordering
+prevents a failed note-generation step from leaving a remote tag without a
+release. It is required because the default branch is protected and requires
+changes to be made through a pull request. Release notes are generated from the
+actual previous-tag-to-new-tag diff by `gh-release-notes`.
 
 ## What the normal workflow does internally
 
@@ -277,16 +279,15 @@ The steps occur in this order:
    modifying files; in forced `auto` mode, allows the patch fallback.
 7. **Tag validation** — verifies that the new tag matches the semantic-version
    pattern `vX.Y.Z`, with optional prerelease/build suffixes.
-8. **Push** — pushes only the new tag; the default branch is never modified by
-   the release workflow.
-9. **Skill verification** — checks that `gh-release-notes` is discoverable with
+8. **Skill verification** — checks that `gh-release-notes` is discoverable with
    `gh copilot -- skill list` and that `COPILOT_GITHUB_TOKEN` is present.
-10. **Note generation** — invokes `gh copilot` with `/gh-release-notes` and the
+9. **Note generation** — invokes `gh copilot` with `/gh-release-notes` and the
     exact previous-to-target tag range.
-11. **Artifact upload** — stores `release-notes.md` as a workflow artifact named
+10. **Artifact upload** — stores `release-notes.md` as a workflow artifact named
     `release-notes-vX.Y.Z`.
-12. **Release creation** — refuses to overwrite an existing release and calls
-    `gh release create` with the generated Markdown.
+11. **Push and release creation** — verifies that the remote tag does not already
+   exist, pushes only the new tag, refuses to overwrite an existing release, and
+   calls `gh release create` with the generated Markdown.
 
 The Copilot invocation disables the built-in GitHub MCP server and limits the
 available operations to reading and Git inspection. It explicitly instructs the
@@ -381,19 +382,21 @@ First inspect GitHub for:
 If the tag is missing, rerun the release workflow after verifying the calculated
 version. If the tag exists, use the manual notes fallback for that tag.
 
-### Tag exists but Copilot note generation fails
+### Copilot note generation fails
 
-This is the most important recovery case. The tag has already been pushed, but no
-GitHub Release may exist.
+The normal workflow now pushes the tag only after clean notes have been generated,
+so a note-generation failure should not leave a remote tag.
 
 1. Read the failed job logs and identify whether the problem is the token,
    Copilot allowance, CLI availability, skill discovery, or the prompt itself.
-2. Confirm that the target tag exists and that no GitHub Release exists for it.
-3. Fix the secret or configuration problem.
-4. Run **Generate release notes (manual)** with the existing target tag.
-5. Review and publish the resulting draft release when ready.
+2. Fix the secret or configuration problem.
+3. Rerun the **Release** workflow after confirming that no remote target tag was
+   created. Use **Generate release notes (manual)** only when a tag already exists
+   and needs a new draft release.
 
-Do not run another automatic version bump for the same intended release.
+If a failed run from an older workflow already created the tag, confirm that no
+GitHub Release exists and use the manual fallback for that existing tag, or remove
+the abandoned tag before retrying the same version.
 
 ### Notes are empty or poor quality
 
