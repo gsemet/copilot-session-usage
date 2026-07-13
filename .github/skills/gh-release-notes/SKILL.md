@@ -1,3 +1,10 @@
+---
+name: gh-release-notes
+description: Generate end-user-friendly GitHub release notes from the actual diff between releases, including user impact, examples, breaking changes, and public documentation links.
+argument-hint: "from_tag=... to_tag=... repo_path=..."
+user-invocable: true
+---
+
 # Release Notes Generator (Git Diff Based)
 
 Generate **end-user friendly** release notes by analyzing actual code changes between releases.
@@ -185,6 +192,15 @@ Organize changes into buckets. **Only include sections that have content.** Omit
 - Do not add a "Notes", "Miscellaneous", or "Other" catch-all section
 
 ---
+
+## Non-interactive automation mode
+
+When this skill is invoked by a CI job with an explicit request for machine-readable output:
+
+- Honor the requested tag range and repository path exactly.
+- Do not modify, commit, or push repository files unless the caller explicitly requests it.
+- Return only the final release-note Markdown, without an explanation or a code fence.
+- Preserve the user-impact categories, examples, breaking-change detection, and public documentation links described above.
 
 ## How to Use This Skill in a Session
 

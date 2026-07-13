@@ -44,6 +44,20 @@ just docs-serve
 
 ## Release process
 
-1. Tag a release: `git tag v1.2.3`
-2. Push tags: `git push --tags`
-3. CI builds and publishes to PyPI via OIDC
+1. Open the **Release** workflow under the repository's Actions tab.
+2. Run it from the default branch, choosing `auto` to derive the major, minor, or
+	patch bump from conventional commits, or choose an explicit bump.
+3. The workflow runs Commitizen, commits the version/changelog update, creates and
+	pushes the `vX.Y.Z` tag, and invokes the `gh-release-notes` skill through
+	`gh copilot`.
+4. The generated notes are uploaded as an artifact and used to create the GitHub
+	Release. Enable the `draft` option if the release needs review before publishing.
+5. Publishing the GitHub Release triggers CI and publishes the package to PyPI via
+	OIDC.
+
+The workflow requires a repository secret named `COPILOT_GITHUB_TOKEN`. It must be
+a fine-grained token with the **Copilot Requests** permission. The normal Actions
+`GITHUB_TOKEN` is used for repository writes and GitHub Release creation.
+
+The **Generate release notes (manual)** workflow remains available when notes need
+to be regenerated for an existing tag without creating a new release.
