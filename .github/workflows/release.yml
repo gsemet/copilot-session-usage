@@ -143,7 +143,7 @@ jobs:
 
           Generate the final release notes for ${TARGET_TAG}, covering the actual changes from ${PREVIOUS_TAG} to ${TARGET_TAG} in ${GITHUB_WORKSPACE}.
 
-          Follow the skill's diff-based analysis process. Use the project's public documentation URL when documentation links are appropriate. Return only the final release-note Markdown, with no introduction, explanation, or code fence. Do not modify, commit, or push any repository files."
+          Follow the skill's diff-based analysis process. Include only changes with a proven user-facing consequence; exclude CI, workflows, release automation, internal skills, guidelines, tests, file lists, and other repository housekeeping unless the diff proves direct product impact. If there is no product impact, emit one concise Maintenance, Documentation, or Internal section. Return only the final release-note Markdown, with no title heading, introduction, explanation, file summary, or code fence. Do not modify, commit, or push any repository files."
 
           gh copilot -- \
             --prompt "$prompt" \
