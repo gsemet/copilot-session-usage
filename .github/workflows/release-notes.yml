@@ -76,14 +76,14 @@ jobs:
         run: |
           set -euo pipefail
 
+          output_file="release-notes.md"
+          rm -f "$output_file"
+
           prompt="Use the /gh-release-notes skill.
 
           Generate the final release notes for ${TARGET_TAG}, covering the actual changes from ${PREVIOUS_TAG} to ${TARGET_TAG} in ${GITHUB_WORKSPACE}.
 
-          Follow the skill's diff-based analysis process. Include only changes with a proven user-facing consequence; exclude CI, workflows, release automation, internal skills, guidelines, tests, file lists, and other repository housekeeping unless the diff proves direct product impact. If there is no product impact, emit exactly one bold Maintenance, Documentation, or Internal label followed by one concise paragraph, using the same label-plus-paragraph shape as the skill's example. Return only the final release-note Markdown, with no title heading, introduction, explanation, file summary, or code fence. Do not modify any repository files."
-
-          copilot_output="$(mktemp)"
-          trap 'rm -f "$copilot_output"' EXIT
+          Follow the skill's diff-based analysis process. Include only changes with a proven user-facing consequence; exclude CI, workflows, release automation, internal skills, guidelines, tests, file lists, and other repository housekeeping unless the diff proves direct product impact. If there is no product impact, emit exactly one bold Maintenance, Documentation, or Internal label followed by one concise generic paragraph; do not name CI, workflows, release automation, internal guidelines, tests, commits, pull requests, or individual files. Write the final release-note Markdown directly to ${output_file} in the current workspace using the file-writing tool. Do not put the release notes in your response because the response stream is discarded. Do not modify, commit, or push any other repository files."
 
           gh copilot -- \
             --prompt "$prompt" \
@@ -91,16 +91,22 @@ jobs:
             --no-ask-user \
             --no-auto-update \
             --no-color \
-            --output-format json \
+            --output-format text \
             --disable-builtin-mcps \
-            --available-tools='read,shell' \
+            --available-tools='read,create,edit,bash' \
             --allow-tool='read' \
+            --allow-tool='write' \
             --allow-tool='shell(git:*)' \
             --allow-url='https://github.com' \
             --allow-url='https://copilot-session-usage.readthedocs.io' \
-            > "$copilot_output"
+            > /dev/null
 
-          python scripts/extract_release_notes.py "$copilot_output" release-notes.md
+          if [[ ! -s "$output_file" ]]; then
+            echo "::error::The gh-release-notes skill did not create $output_file."
+            exit 1
+          fi
+
+          python scripts/validate_release_notes.py "$output_file"
 
       - name: Upload generated notes for review
         uses: actions/upload-artifact@v4

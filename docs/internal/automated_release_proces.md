@@ -289,10 +289,13 @@ The steps occur in this order:
    exist, pushes only the new tag, refuses to overwrite an existing release, and
    calls `gh release create` with the generated Markdown.
 
-The Copilot invocation disables the built-in GitHub MCP server and limits the
-available operations to reading and Git inspection. It explicitly instructs the
-skill not to modify, commit, or push repository files. The allowed documentation
-hosts are the project repository and the published Read the Docs site.
+The Copilot invocation disables the built-in GitHub MCP server and exposes only
+reading, Git inspection, and the file tools needed to create `release-notes.md`.
+It explicitly instructs the skill not to modify, commit, or push any other
+repository files. The workflow discards the Copilot response stream and uses the
+skill-written file directly, after validating it for traces, code fences, titles,
+and preambles. The allowed documentation hosts are the project repository and
+the published Read the Docs site.
 
 ## Release-note generation
 
@@ -307,7 +310,7 @@ It is expected to:
 - omit empty sections;
 - include concrete user examples when the diff supports them;
 - use public documentation links with fragments where appropriate; and
-- return only release-note Markdown in CI mode.
+- write only release-note Markdown to the requested output file in CI mode.
 
 Do not replace this step with GitHub's generic `--generate-notes` behavior unless
 the project intentionally changes its release-note policy. The custom skill exists
