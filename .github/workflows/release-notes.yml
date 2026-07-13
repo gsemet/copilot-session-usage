@@ -1,0 +1,127 @@
+name: Generate release notes (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing version tag to generate a draft release for"
+        required: true
+        type: string
+
+concurrency:
+  group: release-notes-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  generate-release-notes:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve release range
+        id: range
+        shell: bash
+        env:
+          TARGET_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$TARGET_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
+            echo "::error::Expected a semantic-version tag such as v0.7.0, got '$TARGET_TAG'."
+            exit 1
+          fi
+
+          previous_tag="$(git tag --sort=-v:refname --merged "$TARGET_TAG" \
+            | awk -v current="$TARGET_TAG" '$0 != current { print; exit }')"
+
+          if [[ -z "$previous_tag" ]]; then
+            echo "::error::Could not find a previous release tag for $TARGET_TAG."
+            exit 1
+          fi
+
+          echo "target_tag=$TARGET_TAG" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=$previous_tag" >> "$GITHUB_OUTPUT"
+          echo "Generating notes from $previous_tag to $TARGET_TAG."
+
+      - name: Verify release-note skill
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${COPILOT_GITHUB_TOKEN:-}" ]]; then
+            echo "::error::The COPILOT_GITHUB_TOKEN repository secret is not configured."
+            echo "Create a fine-grained PAT with the Copilot Requests permission and add it as a repository secret."
+            exit 1
+          fi
+
+          if ! gh copilot -- skill list | grep -Fq 'gh-release-notes'; then
+            echo "::error::The gh-release-notes skill was not discovered by GitHub CLI."
+            exit 1
+          fi
+
+      - name: Generate release notes with the skill
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          PREVIOUS_TAG: ${{ steps.range.outputs.previous_tag }}
+          TARGET_TAG: ${{ steps.range.outputs.target_tag }}
+        run: |
+          set -euo pipefail
+
+          prompt="Use the /gh-release-notes skill.
+
+          Generate the final release notes for ${TARGET_TAG}, covering the actual changes from ${PREVIOUS_TAG} to ${TARGET_TAG} in ${GITHUB_WORKSPACE}.
+
+          Follow the skill's diff-based analysis process. Use the project's public documentation URL when documentation links are appropriate. Return only the final release-note Markdown, with no introduction, explanation, or code fence. Do not modify any repository files."
+
+          gh copilot -- \
+            --prompt "$prompt" \
+            --silent \
+            --no-ask-user \
+            --no-auto-update \
+            --no-color \
+            --disable-builtin-mcps \
+            --available-tools='read,shell' \
+            --allow-tool='read' \
+            --allow-tool='shell(git:*)' \
+            --allow-url='https://github.com' \
+            --allow-url='https://copilot-session-usage.readthedocs.io' \
+            > release-notes.md
+
+          if [[ ! -s release-notes.md ]]; then
+            echo "::error::The release-note skill returned an empty document."
+            exit 1
+          fi
+
+      - name: Upload generated notes for review
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes-${{ steps.range.outputs.target_tag }}
+          path: release-notes.md
+
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_TAG: ${{ steps.range.outputs.target_tag }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TARGET_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::A GitHub Release already exists for $TARGET_TAG."
+            exit 1
+          fi
+
+          gh release create "$TARGET_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --title "$TARGET_TAG" \
+            --notes-file release-notes.md
