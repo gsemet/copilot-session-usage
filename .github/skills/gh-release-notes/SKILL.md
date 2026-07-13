@@ -41,6 +41,11 @@ What changed since the last release tag?
 8. **Consolidates related changes** — groups related diffs and eliminates back-and-forth noise
 9. **Outputs clean markdown** — ready to paste into a GitHub Release note
 
+When invoked through Copilot CLI JSON output, the copyable release body is the
+`data.content` value of the final `assistant.message` event. Never copy
+`assistant.reasoning_delta`, tool calls, system notifications, or any other
+session events into the release body.
+
 ---
 
 ## Input
@@ -126,13 +131,13 @@ Breaking changes come from:
 
 Organize qualifying changes into buckets. **Only include sections that have content.** Omit empty sections entirely. Do not add a title heading.
 
-If there are no qualifying product changes, use exactly one concise fallback section:
+If there are no qualifying product changes, use exactly one concise fallback block. Keep its structure consistent across releases while adapting the wording to the evidence:
 
-- `## Maintenance` for a maintenance release containing internal upkeep, CI, release automation, dependency/build work, refactors, or other operational changes
-- `## Documentation` for a documentation-update release whose meaningful outcome is public user documentation, even when no runtime behavior changed
-- `## Internal` for an internal release containing changes intentionally limited to maintainers, contributors, or internal tooling
+- `**Maintenance**` for a maintenance release containing internal upkeep, CI, release automation, dependency/build work, refactors, or other operational changes
+- `**Documentation**` for a documentation-update release whose meaningful outcome is public user documentation, even when no runtime behavior changed
+- `**Internal**` for an internal release containing changes intentionally limited to maintainers, contributors, or internal tooling
 
-Choose the most accurate fallback; do not list the underlying files or tasks. A maintenance release may say only that it contains maintenance updates. An internal release may say only that it contains internal updates. Do not manufacture examples or links for either.
+Choose the most accurate fallback; do not list the underlying files or tasks. Follow the label with one short paragraph that says what was maintained or documented and whether core product functionality changed. Do not manufacture examples or links for either.
 
 ```markdown
 ## New Features
@@ -209,11 +214,12 @@ Choose the most accurate fallback; do not list the underlying files or tasks. A 
 - [Upgrade instructions](https://docs.example.com/upgrade#database)
 ```
 
-For a release with no runtime product impact, use a short note such as:
+For a release with no runtime product impact, use this consistent shape:
 
 ```markdown
-## Maintenance
-- Maintenance release with no user-facing behavior changes.
+**Maintenance**
+
+This release primarily includes updates to the knowledge base documentation and internal repository structure. No changes to the core product functionality or user-facing features.
 ```
 
 **Key Rules:**
@@ -227,7 +233,7 @@ For a release with no runtime product impact, use a short note such as:
 - Add a **Documentation** section only when public user documentation changed in a way users need or benefit from; never report internal guidelines or maintainer documentation
 - Multiple links OK if they point to different topics
 - Omit any section that has no bullets
-- If no user-facing change qualifies, emit exactly one concise `Maintenance`, `Documentation`, or `Internal` section
+- If no user-facing change qualifies, emit exactly one concise bold `Maintenance`, `Documentation`, or `Internal` block followed by one explanatory paragraph
 - Never include file counts, changed-file lists, commit metadata, CI/workflow summaries, or a closing separator
 - Do not add a "Notes", "Miscellaneous", or "Other" catch-all section
 
@@ -240,6 +246,7 @@ When this skill is invoked by a CI job with an explicit request for machine-read
 - Honor the requested tag range and repository path exactly.
 - Do not modify, commit, or push repository files unless the caller explicitly requests it.
 - Return only the final release-note Markdown, without an explanation, title heading, or code fence.
+- If the caller uses Copilot CLI JSONL output, place the final Markdown in one `assistant.message` response; reasoning and tool events are metadata, not release content.
 - Preserve the user-impact categories, examples, breaking-change detection, and public documentation links described above.
 
 ## How to Use This Skill in a Session
