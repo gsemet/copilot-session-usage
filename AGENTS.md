@@ -77,6 +77,16 @@ to understand the rules of the knowledge base in `knowledge/`.
 - **Detail levels**: `minimal` < `compact` < `full`
 - **Output formats**: `json`, `table`, `detailed` (alias for table + full detail)
 
+## Git History and Pull Requests
+
+This repository must maintain a linear history. **Never create a merge commit.**
+
+- Rebase a feature branch onto the current target branch before opening or updating a pull request: `git fetch origin main && git rebase origin/main`.
+- When the target branch advances, rebase again; do not merge `main` into the feature branch.
+- Resolve conflicts during the rebase, run the relevant checks, and update the remote branch with `git push --force-with-lease` when required.
+- Merge pull requests only with a squash merge or a rebase/fast-forward merge. Never use a merge commit or `--no-ff`.
+- Do not force-push protected branches; `--force-with-lease` is permitted only for the contributor's feature branch.
+
 ## Before You Commit
 
 ```bash
