@@ -48,9 +48,10 @@ just docs-serve
 2. Run it from the default branch, choosing `auto` to derive the major, minor, or
 	patch bump from conventional commits, or choose an explicit bump. Enable
 	`force` to create a patch release when `auto` finds no eligible commit.
-3. The workflow runs Commitizen, commits the version/changelog update, creates and
-	pushes the `vX.Y.Z` tag, and invokes the `gh-release-notes` skill through
-	`gh copilot`.
+3. The workflow uses Commitizen to calculate the next version, creates and pushes
+	the `vX.Y.Z` tag on the existing default-branch commit, and invokes the
+	`gh-release-notes` skill through `gh copilot`. It does not create a
+	version/changelog commit.
 4. The generated notes are uploaded as an artifact and used to create the GitHub
 	Release. Enable the `draft` option if the release needs review before publishing.
 5. Publishing the GitHub Release triggers CI and publishes the package to PyPI via
