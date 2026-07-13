@@ -20,9 +20,10 @@ The normal flow is:
    eligible conventional commit.
 5. Choose whether the GitHub Release should be published immediately or created
    as a draft.
-6. Commitizen updates the changelog, creates a release commit, and creates a
-   `vX.Y.Z` tag.
-7. The workflow pushes the release commit and tag.
+6. Commitizen calculates the next version without modifying files or creating a
+   release commit.
+7. The workflow creates and pushes a `vX.Y.Z` tag on the existing default-branch
+   commit.
 8. GitHub Copilot CLI, invoked through `gh copilot`, runs the repository skill
    `gh-release-notes` against the actual tag-to-tag diff.
 9. The generated Markdown is uploaded as an artifact and used to create the
@@ -69,19 +70,19 @@ A maintainer must verify the following before attempting the first release.
 ### Actions write permission
 
 The normal release workflow uses the built-in `GITHUB_TOKEN` to push the release
-commit and tag and to create the GitHub Release. The repository must allow
-workflows to write repository contents:
+tag and to create the GitHub Release. The repository must allow workflows to
+write repository contents:
 
 1. Open the repository's **Settings**.
 2. Go to **Actions → General**.
 3. Under **Workflow permissions**, select **Read and write permissions**.
 4. Save the setting.
 
-If branch protection prevents the Actions bot from pushing to the default branch,
-the release workflow will stop at the push step. Either allow the configured
-release bot to update the branch or use a release branch policy that permits this
-workflow. Do not work around branch protection with an unnecessarily broad
-personal token without reviewing the security implications.
+Branch protection may allow tag pushes while prohibiting branch updates. The
+workflow deliberately does not update the default branch, so the protected
+branch's pull-request requirement does not block a release tag. Do not work
+around branch protection with an unnecessarily broad personal token without
+reviewing the security implications.
 
 The workflow itself declares:
 
@@ -175,8 +176,9 @@ A useful local preview of the pending conventional-commit decision is:
 uv run --no-sync cz bump --get-next --yes
 ```
 
-This command only calculates the next version. It does not create a commit or
-tag. Run the repository's normal validation before starting a production release:
+This command only calculates the next version. It does not modify files, create a
+commit, or create a tag. Run the repository's normal validation before starting a
+production release:
 
 ```text
 just preflight
@@ -233,7 +235,7 @@ The exact result is controlled by the installed Commitizen version and its
 configuration. Use the dry-run command above instead of guessing.
 
 If automatic detection reports no eligible commits and `force` is disabled, the
-workflow stops before creating a release commit or tag. This is expected for
+workflow stops before creating a tag. This is expected for
 changes such as a standalone `ci:` or `chore:` commit.
 
 If `force` is enabled, the workflow intentionally falls back to a patch bump:
@@ -253,10 +255,11 @@ maintainer to make an intentional release even when no eligible conventional
 commit is present. Use that option carefully; it can create a release containing
 no user-visible change.
 
-The bump updates the Commitizen-managed `CHANGELOG.md`, creates a release commit,
-and creates a lightweight `vX.Y.Z` tag. The workflow pushes the commit and tag as
-separate operations because lightweight tags are not covered by Git's
-`--follow-tags` behavior.
+The release workflow does not update `CHANGELOG.md` or create a release commit.
+It creates a lightweight `vX.Y.Z` tag on the current default-branch commit and
+pushes only that tag. This is required because the default branch is protected
+and requires changes to be made through a pull request. Release notes are
+generated from the actual previous-tag-to-new-tag diff by `gh-release-notes`.
 
 ## What the normal workflow does internally
 
@@ -267,16 +270,15 @@ The steps occur in this order:
 2. **Install tooling** — installs the pinned `uv.lock` environment, including
    Commitizen.
 3. **Clean-tree guard** — refuses to proceed if the checked-out tree is dirty.
-4. **Branch setup** — switches to the remote default branch and configures the
-   GitHub Actions bot identity for the release commit.
+4. **Branch setup** — switches to the remote default branch without changing it.
 5. **Previous tag resolution** — finds the nearest reachable tag with
    `git describe --tags --abbrev=0`.
-6. **Version bump** — calculates and applies the selected version increment; in
-   forced `auto` mode, falls back to an explicit patch bump.
+6. **Version calculation** — calculates the selected next version without
+   modifying files; in forced `auto` mode, allows the patch fallback.
 7. **Tag validation** — verifies that the new tag matches the semantic-version
    pattern `vX.Y.Z`, with optional prerelease/build suffixes.
-8. **Push** — pushes the release commit to the default branch, then pushes the
-   new tag.
+8. **Push** — pushes only the new tag; the default branch is never modified by
+   the release workflow.
 9. **Skill verification** — checks that `gh-release-notes` is discoverable with
    `gh copilot -- skill list` and that `COPILOT_GITHUB_TOKEN` is present.
 10. **Note generation** — invokes `gh copilot` with `/gh-release-notes` and the
@@ -359,35 +361,30 @@ mode with `force` disabled, or an invalid Commitizen result.
 
 Expected state:
 
-- No release commit was pushed.
 - No new tag was pushed.
 - No GitHub Release was created.
 
 Fix the underlying issue, merge the required changes if necessary, and run the
 workflow again.
 
-### Branch push succeeds but tag push fails
+### Tag push fails
 
-The release commit may already be on the default branch while the tag is absent.
-Do not immediately run another automatic release; it may calculate a different
-version from the partially completed state.
+The default branch is not modified by this workflow, so a failed tag push leaves
+the branch unchanged. Do not immediately run another release if the target tag
+may have been created remotely; first inspect the remote tag and release state.
 
 First inspect GitHub for:
 
-- the release commit and its version/changelog change;
 - whether the target tag exists remotely; and
 - whether a GitHub Release exists.
 
-If the release commit is correct and the tag is missing, push the intended tag
-from a trusted local clone after verifying that it points at the release commit.
-Then use the manual notes fallback for that tag. If the commit is wrong, stop and
-repair it through a normal reviewed Git change rather than force-pushing the
-release branch.
+If the tag is missing, rerun the release workflow after verifying the calculated
+version. If the tag exists, use the manual notes fallback for that tag.
 
 ### Tag exists but Copilot note generation fails
 
-This is the most important recovery case. The bump commit and tag have already
-been pushed, but no GitHub Release may exist.
+This is the most important recovery case. The tag has already been pushed, but no
+GitHub Release may exist.
 
 1. Read the failed job logs and identify whether the problem is the token,
    Copilot allowance, CLI availability, skill discovery, or the prompt itself.

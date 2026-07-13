@@ -54,7 +54,7 @@ jobs:
       - name: Install release tooling
         run: uv sync --locked --all-groups
 
-      - name: Bump version and create tag
+      - name: Calculate version and create tag
         id: version
         shell: bash
         run: |
@@ -67,8 +67,6 @@ jobs:
           fi
 
           git switch --force-create "$RELEASE_BRANCH" "origin/$RELEASE_BRANCH"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           previous_tag="$(git describe --tags --abbrev=0 HEAD 2>/dev/null || true)"
           if [[ -z "$previous_tag" ]]; then
@@ -77,41 +75,44 @@ jobs:
           fi
 
           if [[ "$INCREMENT" == "auto" ]]; then
-            if ! next_version_output="$(uv run --no-sync cz bump --get-next --yes 2>&1)"; then
-              if [[ "$FORCE_RELEASE" != "true" || "$next_version_output" != *"[NO_COMMITS_TO_BUMP]"* ]]; then
-                echo "::error::No eligible conventional commits were found for an automatic release."
-                printf '%s\n' "$next_version_output"
-                exit 1
-              fi
-
-              echo "No eligible conventional commits found; forcing a PATCH release."
-              uv run --no-sync cz bump --increment PATCH --yes --allow-no-commit
-            else
-              next_version="$(printf '%s\n' "$next_version_output" | tail -n 1)"
-              if [[ ! "$next_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                echo "::error::Commitizen returned an invalid next version: '$next_version'."
-                exit 1
-              fi
-              echo "Using automatic conventional-commit bump: $next_version"
-              uv run --no-sync cz bump --yes
+            bump_args=(--get-next --yes)
+            if [[ "$FORCE_RELEASE" == "true" ]]; then
+              bump_args+=(--allow-no-commit)
+            fi
+            if ! next_version_output="$(uv run --no-sync cz bump "${bump_args[@]}" 2>&1)"; then
+              echo "::error::No eligible conventional commits were found for an automatic release."
+              printf '%s\n' "$next_version_output"
+              exit 1
             fi
           else
             echo "Using explicit $INCREMENT bump."
-            uv run --no-sync cz bump --increment "${INCREMENT^^}" --yes --allow-no-commit
+            next_version_output="$(uv run --no-sync cz bump --get-next \
+              --increment "${INCREMENT^^}" --yes --allow-no-commit)"
           fi
 
-          target_tag="$(git describe --tags --exact-match HEAD 2>/dev/null || true)"
-          if [[ ! "$target_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
-            echo "::error::The version bump did not create a semantic-version tag."
+          next_version="$(printf '%s\n' "$next_version_output" | tail -n 1)"
+          if [[ ! "$next_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Commitizen returned an invalid next version: '$next_version'."
+            printf '%s\n' "$next_version_output"
             exit 1
           fi
 
-          git push origin "HEAD:$RELEASE_BRANCH"
+          target_tag="v$next_version"
+          if [[ ! "$target_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
+            echo "::error::The calculated version did not create a semantic-version tag."
+            exit 1
+          fi
+          if git rev-parse "$target_tag" >/dev/null 2>&1; then
+            echo "::error::The tag $target_tag already exists."
+            exit 1
+          fi
+
+          git tag "$target_tag"
           git push origin "$target_tag"
 
           echo "previous_tag=$previous_tag" >> "$GITHUB_OUTPUT"
           echo "target_tag=$target_tag" >> "$GITHUB_OUTPUT"
-          echo "Generated $target_tag from $previous_tag."
+          echo "Generated $target_tag from $previous_tag without modifying the default branch."
 
       - name: Verify release-note skill
         env:
