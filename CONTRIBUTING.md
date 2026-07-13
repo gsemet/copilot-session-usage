@@ -46,7 +46,8 @@ just docs-serve
 
 1. Open the **Release** workflow under the repository's Actions tab.
 2. Run it from the default branch, choosing `auto` to derive the major, minor, or
-	patch bump from conventional commits, or choose an explicit bump.
+	patch bump from conventional commits, or choose an explicit bump. Enable
+	`force` to create a patch release when `auto` finds no eligible commit.
 3. The workflow runs Commitizen, commits the version/changelog update, creates and
 	pushes the `vX.Y.Z` tag, and invokes the `gh-release-notes` skill through
 	`gh copilot`.

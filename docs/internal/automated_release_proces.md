@@ -16,16 +16,18 @@ The normal flow is:
 1. Merge the changes intended for release into the repository's default branch.
 2. Start the **Release** workflow from the default branch.
 3. Choose `auto`, `major`, `minor`, or `patch` for the version increment.
-4. Choose whether the GitHub Release should be published immediately or created
+4. Optionally enable `force` to create a patch release when `auto` finds no
+   eligible conventional commit.
+5. Choose whether the GitHub Release should be published immediately or created
    as a draft.
-5. Commitizen updates the changelog, creates a release commit, and creates a
+6. Commitizen updates the changelog, creates a release commit, and creates a
    `vX.Y.Z` tag.
-6. The workflow pushes the release commit and tag.
-7. GitHub Copilot CLI, invoked through `gh copilot`, runs the repository skill
+7. The workflow pushes the release commit and tag.
+8. GitHub Copilot CLI, invoked through `gh copilot`, runs the repository skill
    `gh-release-notes` against the actual tag-to-tag diff.
-8. The generated Markdown is uploaded as an artifact and used to create the
+9. The generated Markdown is uploaded as an artifact and used to create the
    GitHub Release.
-9. Publishing the GitHub Release triggers CI and the PyPI publication workflow.
+10. Publishing the GitHub Release triggers CI and the PyPI publication workflow.
 
 The normal workflow is defined in
 [`.github/workflows/release.yml`](../../.github/workflows/release.yml).
@@ -191,10 +193,14 @@ just preflight
    - `major` — explicitly request a major bump.
    - `minor` — explicitly request a minor bump.
    - `patch` — explicitly request a patch bump.
-6. Choose the `draft` input:
+6. Choose the `force` input:
+   - `false` — stop if `auto` finds no eligible conventional commit.
+   - `true` — in `auto` mode, force a patch bump with
+     `--allow-no-commit`. This does not override other errors.
+7. Choose the `draft` input:
    - `false` — create a published GitHub Release after notes are generated.
    - `true` — create a draft GitHub Release for review.
-7. Start the workflow and monitor the run.
+8. Start the workflow and monitor the run.
 
 The workflow serializes all releases using the `release` concurrency group. A
 second release run will not run concurrently with the first one.
@@ -226,9 +232,20 @@ Commitizen normally interprets conventional commits approximately as follows:
 The exact result is controlled by the installed Commitizen version and its
 configuration. Use the dry-run command above instead of guessing.
 
-If automatic detection reports no eligible commits, the workflow stops before
-creating a release commit or tag. This is expected for changes such as a
-standalone `ci:` or `chore:` commit.
+If automatic detection reports no eligible commits and `force` is disabled, the
+workflow stops before creating a release commit or tag. This is expected for
+changes such as a standalone `ci:` or `chore:` commit.
+
+If `force` is enabled, the workflow intentionally falls back to a patch bump:
+
+```text
+uv run --no-sync cz bump --increment PATCH --yes --allow-no-commit
+```
+
+This is useful for an intentional maintenance or data-only release, but it can
+create a release with no conventional-commit change that Commitizen would
+normally consider user-visible. The force checkbox does not hide unrelated
+Commitizen errors or invalid version output.
 
 For an explicit `major`, `minor`, or `patch` input, the workflow runs the
 corresponding Commitizen increment with `--allow-no-commit`. This permits a
@@ -254,7 +271,8 @@ The steps occur in this order:
    GitHub Actions bot identity for the release commit.
 5. **Previous tag resolution** — finds the nearest reachable tag with
    `git describe --tags --abbrev=0`.
-6. **Version bump** — calculates and applies the selected version increment.
+6. **Version bump** — calculates and applies the selected version increment; in
+   forced `auto` mode, falls back to an explicit patch bump.
 7. **Tag validation** — verifies that the new tag matches the semantic-version
    pattern `vX.Y.Z`, with optional prerelease/build suffixes.
 8. **Push** — pushes the release commit to the default branch, then pushes the
@@ -337,7 +355,7 @@ separate reviewed administrative procedure rather than creating a second release
 ### Failure before the bump
 
 Examples include a dirty tree, no previous tag, no eligible commits in `auto`
-mode, or an invalid Commitizen result.
+mode with `force` disabled, or an invalid Commitizen result.
 
 Expected state:
 
@@ -456,6 +474,8 @@ version instead.
 - [ ] CI is green.
 - [ ] Conventional commit messages support the desired automatic bump, or an
       explicit bump has been selected intentionally.
+- [ ] If `force` is enabled, the resulting patch release is intentional even if
+   no eligible conventional commit exists.
 - [ ] No Release already exists for the version that will be produced.
 - [ ] `COPILOT_GITHUB_TOKEN` is present and not expired.
 - [ ] Generated notes and the release state have been reviewed.
