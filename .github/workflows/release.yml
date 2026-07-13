@@ -18,6 +18,11 @@ on:
         required: true
         type: boolean
         default: false
+      force:
+        description: "Force a patch release when auto finds no eligible commit"
+        required: true
+        type: boolean
+        default: false
 
 concurrency:
   group: release
@@ -34,6 +39,7 @@ jobs:
       RELEASE_BRANCH: ${{ github.event.repository.default_branch }}
       INCREMENT: ${{ inputs.increment }}
       DRAFT_RELEASE: ${{ inputs.draft }}
+      FORCE_RELEASE: ${{ inputs.force }}
 
     steps:
       - name: Check out the default branch
@@ -72,17 +78,23 @@ jobs:
 
           if [[ "$INCREMENT" == "auto" ]]; then
             if ! next_version_output="$(uv run --no-sync cz bump --get-next --yes 2>&1)"; then
-              echo "::error::No eligible conventional commits were found for an automatic release."
-              printf '%s\n' "$next_version_output"
-              exit 1
+              if [[ "$FORCE_RELEASE" != "true" || "$next_version_output" != *"[NO_COMMITS_TO_BUMP]"* ]]; then
+                echo "::error::No eligible conventional commits were found for an automatic release."
+                printf '%s\n' "$next_version_output"
+                exit 1
+              fi
+
+              echo "No eligible conventional commits found; forcing a PATCH release."
+              uv run --no-sync cz bump --increment PATCH --yes --allow-no-commit
+            else
+              next_version="$(printf '%s\n' "$next_version_output" | tail -n 1)"
+              if [[ ! "$next_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "::error::Commitizen returned an invalid next version: '$next_version'."
+                exit 1
+              fi
+              echo "Using automatic conventional-commit bump: $next_version"
+              uv run --no-sync cz bump --yes
             fi
-            next_version="$(printf '%s\n' "$next_version_output" | tail -n 1)"
-            if [[ ! "$next_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "::error::Commitizen returned an invalid next version: '$next_version'."
-              exit 1
-            fi
-            echo "Using automatic conventional-commit bump: $next_version"
-            uv run --no-sync cz bump --yes
           else
             echo "Using explicit $INCREMENT bump."
             uv run --no-sync cz bump --increment "${INCREMENT^^}" --yes --allow-no-commit
