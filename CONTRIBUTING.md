@@ -50,8 +50,9 @@ just docs-serve
 	`force` to create a patch release when `auto` finds no eligible commit.
 3. The workflow uses Commitizen to calculate the next version, prepares a local
 	`vX.Y.Z` tag on the existing default-branch commit, generates notes with the
-	`gh-release-notes` skill through `gh copilot`, and pushes the tag only after
-	note generation succeeds. It does not create a version/changelog commit.
+	`gh-release-notes` skill through `gh copilot`, writes the final Markdown to
+	`release-notes.md`, validates that file, and pushes the tag only after note
+	generation succeeds. It does not create a version/changelog commit.
 4. The generated notes are uploaded as an artifact and used to create the GitHub
 	Release. Enable the `draft` option if the release needs review before publishing.
 5. Publishing the GitHub Release triggers CI and publishes the package to PyPI via

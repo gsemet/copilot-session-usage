@@ -33,18 +33,13 @@ What changed since the last release tag?
 ## What It Does
 
 1. **Reads actual diffs** — examines code changes, not just commit messages
-2. **Applies a user-impact gate** — includes a change only when a user-visible behavior, supported interface, user workflow, output, compatibility guarantee, or public documentation experience changed
+3. **Applies a user-impact gate** — includes a change only when a user-visible behavior, supported interface, user workflow, output, compatibility guarantee, or public documentation experience changed
 4. **Interprets for end-users** — no technical jargon, functions, variable names, file paths, or implementation summaries
 5. **Categorizes intelligently** — Features, Enhancements, Bug Fixes, Breaking Changes, or a no-product-impact classification
 6. **Adds concrete examples** — shows what users see or can do after a qualifying change
 7. **Links to public docs** — points to published documentation, not repo paths
 8. **Consolidates related changes** — groups related diffs and eliminates back-and-forth noise
 9. **Outputs clean markdown** — ready to paste into a GitHub Release note
-
-When invoked through Copilot CLI JSON output, the copyable release body is the
-`data.content` value of the final `assistant.message` event. Never copy
-`assistant.reasoning_delta`, tool calls, system notifications, or any other
-session events into the release body.
 
 ---
 
@@ -138,6 +133,9 @@ If there are no qualifying product changes, use exactly one concise fallback blo
 - `**Internal**` for an internal release containing changes intentionally limited to maintainers, contributors, or internal tooling
 
 Choose the most accurate fallback; do not list the underlying files or tasks. Follow the label with one short paragraph that says what was maintained or documented and whether core product functionality changed. Do not manufacture examples or links for either.
+For a no-product-impact fallback, do not name CI, workflows, release automation,
+internal guidelines, tests, commits, pull requests, or individual files. Keep the
+paragraph generic and focused on the absence of user-facing behavior changes.
 
 ```markdown
 ## New Features
@@ -241,12 +239,13 @@ This release primarily includes updates to the knowledge base documentation and 
 
 ## Non-interactive automation mode
 
-When this skill is invoked by a CI job with an explicit request for machine-readable output:
+When this skill is invoked by a CI job with an explicit output-file request:
 
 - Honor the requested tag range and repository path exactly.
-- Do not modify, commit, or push repository files unless the caller explicitly requests it.
-- Return only the final release-note Markdown, without an explanation, title heading, or code fence.
-- If the caller uses Copilot CLI JSONL output, place the final Markdown in one `assistant.message` response; reasoning and tool events are metadata, not release content.
+- Write the final Markdown directly to the requested output file using the file-writing tool.
+- Do not modify, commit, or push any other repository files.
+- The output file must contain only the final release-note Markdown, without an explanation, title heading, or code fence.
+- The caller may discard the Copilot response stream after the file is written; never use that stream as the release body.
 - Preserve the user-impact categories, examples, breaking-change detection, and public documentation links described above.
 
 ## How to Use This Skill in a Session
@@ -264,7 +263,7 @@ Generate release notes from v2.1.0 to v2.2.0 for /path/to/my-app
 5. Categorize: Feature? Bug fix? Breaking change?
 6. Consolidate: Merge similar items
 7. Format: Clean markdown with categories
-8. Output: Save to RELEASE_NOTES.md
+8. Output: Save to the requested output file, such as `release-notes.md`
 
 ---
 
