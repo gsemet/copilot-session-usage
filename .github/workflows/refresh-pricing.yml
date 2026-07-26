@@ -59,8 +59,8 @@ jobs:
           base: main
           branch: automation/refresh-pricing
           delete-branch: true
-          commit-message: "chore(pricing): refresh GitHub model pricing"
-          title: "chore(pricing): refresh GitHub model pricing"
+          commit-message: "fix(pricing): refresh GitHub model pricing"
+          title: "fix(pricing): refresh GitHub model pricing"
           body: |
             This automated pull request updates the bundled GitHub Copilot model pricing data.
 
