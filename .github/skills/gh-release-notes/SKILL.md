@@ -242,10 +242,15 @@ This release primarily includes updates to the knowledge base documentation and 
 When this skill is invoked by a CI job with an explicit output-file request:
 
 - Honor the requested tag range and repository path exactly.
-- Write the final Markdown directly to the requested output file using the file-writing tool.
+- Treat the requested output file as mandatory. Writing it is the only successful completion condition.
+- Use the `create` file tool when the requested file does not exist, or the `edit` file tool when it already exists.
+- After writing, use the `read` file tool to verify that the requested file exists and contains the final release-note Markdown.
 - Do not modify, commit, or push any other repository files.
 - The output file must contain only the final release-note Markdown, without an explanation, title heading, or code fence.
-- The caller may discard the Copilot response stream after the file is written; never use that stream as the release body.
+- The first line must be exactly one of: `## New Features`, `## Enhancements`, `## Bug Fixes`, `## Breaking Changes`, `## Examples`, `## Documentation`, `**Maintenance**`, `**Documentation**`, or `**Internal**`.
+- Do not write a preamble, title, code fence, or explanatory text before the first release-note section or fallback label.
+- Never use the Copilot response stream as output. The caller may discard it after the file is written.
+- Do not report the release notes only in the response. If the file cannot be written or verified, the task has failed.
 - Preserve the user-impact categories, examples, breaking-change detection, and public documentation links described above.
 
 ## How to Use This Skill in a Session

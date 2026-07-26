@@ -145,7 +145,7 @@ jobs:
 
           Generate the final release notes for ${TARGET_TAG}, covering the actual changes from ${PREVIOUS_TAG} to ${TARGET_TAG} in ${GITHUB_WORKSPACE}.
 
-          Follow the skill's diff-based analysis process. Include only changes with a proven user-facing consequence; exclude CI, workflows, release automation, internal skills, guidelines, tests, file lists, and other repository housekeeping unless the diff proves direct product impact. If there is no product impact, write exactly this fallback block and no other wording: **Maintenance** followed by a blank line and This release primarily includes updates to the knowledge base documentation and internal repository structure. No changes to the core product functionality or user-facing features. Write the final release-note Markdown directly to ${output_file} in the current workspace using the file-writing tool. Do not put the release notes in your response because the response stream is discarded. Do not modify, commit, or push any other repository files."
+          Follow the skill's diff-based analysis process. Include only changes with a proven user-facing consequence; exclude CI, workflows, release automation, internal skills, guidelines, tests, file lists, and other repository housekeeping unless the diff proves direct product impact. If there is no product impact, write exactly this fallback block and no other wording: **Maintenance** followed by a blank line and This release primarily includes updates to the knowledge base documentation and internal repository structure. No changes to the core product functionality or user-facing features. Writing the final release-note Markdown to ${output_file} is mandatory: use the create or edit file tool, then read the file to verify that it exists and contains the final notes. The first line of the file must be exactly one of `## New Features`, `## Enhancements`, `## Bug Fixes`, `## Breaking Changes`, `## Examples`, `## Documentation`, `**Maintenance**`, `**Documentation**`, or `**Internal**`; do not write a preamble, title, or code fence. Do not return the release notes in your response; the response is discarded. Do not modify, commit, or push any other repository files."
 
           gh copilot -- \
             --prompt "$prompt" \
@@ -164,7 +164,7 @@ jobs:
             > /dev/null
 
           if [[ ! -s "$output_file" ]]; then
-            echo "::error::The gh-release-notes skill did not create $output_file."
+            echo "::error::The gh-release-notes skill did not create the mandatory $output_file."
             exit 1
           fi
 
