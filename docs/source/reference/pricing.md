@@ -10,6 +10,16 @@ Prices are synced from the GitHub Copilot official rate card:
 
 The bundled copy is updated with each release.
 
+## Utility models
+
+GitHub Copilot utility models power background features and are not billed as
+premium usage. They can still appear in local VS Code debug logs, so
+`copilot-session-usage` recognizes the current utility families — GPT-4o,
+GPT-4.1, and GPT-5.4 nano, including versioned variants — and excludes their
+requests from token totals, cost estimates, breakdowns, and commit-usage
+trailers. See GitHub's [utility-model documentation](https://docs.github.com/en/copilot/concepts/models/utility-models)
+for the authoritative list and billing behavior.
+
 ## Runtime refresh and fallback
 
 When pricing is loaded through the default Python API or a normal analysis

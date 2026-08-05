@@ -83,6 +83,25 @@ def test_normalize_model_name_fast_mode_preserved():
     )
 
 
+@pytest.mark.parametrize(
+    "model",
+    [
+        "GPT-4o",
+        "gpt-4o-mini-2024-07-18",
+        "GPT-4.1",
+        "gpt-5.4-nano",
+        "gpt-5.4-nano-2025-01-01",
+    ],
+)
+def test_is_utility_model(model):
+    assert core.is_utility_model(model)
+
+
+@pytest.mark.parametrize("model", ["gpt-5.6-luna", "gpt-5.4", "claude-sonnet-4.6"])
+def test_is_utility_model_rejects_billed_models(model):
+    assert not core.is_utility_model(model)
+
+
 # ─── Threshold-aware pricing ──────────────────────────────────────────────────
 
 
@@ -399,10 +418,31 @@ def test_parse_jsonl_file_multi_model(tmp_path):
     assert stats["last_llm_ts"] == 3000
 
 
+def test_parse_jsonl_file_excludes_utility_models(tmp_path):
+    f = tmp_path / "main.jsonl"
+    f.write_text(
+        _make_llm_event("gpt-4o-mini-2024-07-18", 900, 90, ts=1000)
+        + "\n"
+        + _make_llm_event("claude-sonnet-4.6", 100, 10, ts=2000)
+        + "\n",
+        encoding="utf-8",
+    )
+    stats = core.parse_jsonl_file(f)
+
+    assert stats["llm_calls"] == 1
+    assert stats["input_tokens"] == 100
+    assert stats["output_tokens"] == 10
+    assert stats["models"] == ["claude-sonnet-4.6"]
+    assert "gpt-4o-mini-2024-07-18" not in stats["per_model"]
+
+
 def test_parse_jsonl_file_skips_non_llm_events(tmp_path):
     f = tmp_path / "main.jsonl"
     f.write_text(
-        _make_non_llm_event(ts=500) + "\n" + _make_llm_event("gpt-4o", 100, 20, ts=1000) + "\n",
+        _make_non_llm_event(ts=500)
+        + "\n"
+        + _make_llm_event("claude-sonnet-4.6", 100, 20, ts=1000)
+        + "\n",
         encoding="utf-8",
     )
     stats = core.parse_jsonl_file(f)
@@ -422,7 +462,7 @@ def test_parse_jsonl_file_empty(tmp_path):
 def test_parse_jsonl_file_bad_json_lines_skipped(tmp_path):
     f = tmp_path / "main.jsonl"
     f.write_text(
-        "NOT JSON\n" + _make_llm_event("gpt-4o", 50, 10, ts=1000) + "\n" + "{broken\n",
+        "NOT JSON\n" + _make_llm_event("claude-sonnet-4.6", 50, 10, ts=1000) + "\n" + "{broken\n",
         encoding="utf-8",
     )
     stats = core.parse_jsonl_file(f)
@@ -625,6 +665,25 @@ def test_analyze_session_empty_dir(tmp_path):
     assert result["total"]["estimated_usd"] == 0.0
     assert result["model_breakdown"] == []
     assert result["active_duration_seconds"] is None
+
+
+def test_analyze_session_excludes_utility_models(tmp_path):
+    session_dir = _write_session(
+        tmp_path,
+        {
+            "main.jsonl": [
+                _make_llm_event("gpt-4o-mini-2024-07-18", 900, 90, ts=1_000_000),
+                _make_llm_event("claude-sonnet-4.6", 100, 10, ts=2_000_000),
+            ]
+        },
+    )
+    result = core.analyze_session(session_dir, PRICING)
+
+    assert result["total"]["llm_calls"] == 1
+    assert result["total"]["input_tokens"] == 100
+    assert result["models"] == ["claude-sonnet-4.6"]
+    assert [model["model"] for model in result["model_breakdown"]] == ["claude-sonnet-4.6"]
+    assert result["fallback_pricing_models"] == []
 
 
 # ─── Detail-level shaping ─────────────────────────────────────────────────────
@@ -900,6 +959,33 @@ def test_build_session_usage_acc_trailers_unknown_provider_fallback():
     trailers = core.build_session_usage_acc_trailers(result, PRICING_WITH_PROVIDERS)
     expected = "Copilot-Session-Usage-Acc: unknown:brand-new-model,in:1,out:0,cache:0,aic:0"
     assert trailers == [expected]
+
+
+def test_build_session_usage_acc_trailers_excludes_utility_models():
+    result = {
+        "model_breakdown": [
+            {
+                "model": "gpt-4o-mini-2024-07-18",
+                "input_tokens": 1_000_000,
+                "output_tokens": 100,
+                "cached_tokens": 0,
+                "estimated_usd": 0.1,
+            },
+            {
+                "model": "claude-sonnet-4.6",
+                "input_tokens": 1_000_000,
+                "output_tokens": 100,
+                "cached_tokens": 0,
+                "estimated_usd": 0.1,
+            },
+        ]
+    }
+
+    trailers = core.build_session_usage_acc_trailers(result, PRICING_WITH_PROVIDERS)
+
+    assert len(trailers) == 1
+    assert "gpt-4o-mini-2024-07-18" not in trailers[0]
+    assert "Claude Sonnet 4.6" in trailers[0]
 
 
 def test_build_session_usage_acc_trailers_empty():

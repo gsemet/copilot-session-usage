@@ -35,7 +35,7 @@ def sample_session_dir(tmp_path):
                 "ts": 1_000_000,
                 "type": "llm_request",
                 "attrs": {
-                    "model": "gpt-4o",
+                    "model": "claude-sonnet-4.6",
                     "inputTokens": 1000,
                     "outputTokens": 100,
                     "cachedTokens": 0,
@@ -159,7 +159,7 @@ def test_cli_agent_cli_raises(runner):
 def test_analyze_command(runner, sample_session_dir):
     result = runner.invoke(cli, ["analyze", str(sample_session_dir)])
     assert result.exit_code == 0
-    assert "gpt-4o" in result.output or "JSON" in result.output
+    assert "claude-sonnet-4.6" in result.output or "JSON" in result.output
 
 
 def test_analyze_command_not_found(runner):

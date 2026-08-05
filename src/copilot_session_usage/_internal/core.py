@@ -112,6 +112,26 @@ def _normalize_model_name(name: str) -> str:
     return re.sub(r"\s+", "-", cleaned.lower())
 
 
+# GitHub Copilot utility models power background features and are not billed as
+# premium usage. Keep this list separate from pricing: these requests can still
+# appear in local debug logs, but must not contribute to usage analytics.
+# Source: https://docs.github.com/en/copilot/concepts/models/utility-models
+_UTILITY_MODEL_PREFIXES: tuple[str, ...] = (
+    "gpt-4o",
+    "gpt-4.1",
+    "gpt-5.4-nano",
+)
+
+
+def is_utility_model(model: str) -> bool:
+    """Return whether a model belongs to GitHub Copilot's utility families."""
+    normalized = _normalize_model_name(model)
+    return any(
+        normalized == prefix or normalized.startswith(f"{prefix}-")
+        for prefix in _UTILITY_MODEL_PREFIXES
+    )
+
+
 def _clean_model_display_name(name: str) -> str:
     """Return a presentable model name preserving original casing.
 
@@ -867,6 +887,8 @@ def build_session_usage_acc_trailers(result: dict[str, Any], pricing: dict[str, 
     trailers: list[str] = []
     for entry in result.get("model_breakdown", []):
         model = entry.get("model", "unknown")
+        if is_utility_model(model):
+            continue
         provider = _model_provider(model, pricing)
         if provider == "unknown":
             provider = _model_provider(_normalize_model_name(model), pricing)
@@ -1005,6 +1027,9 @@ def parse_jsonl_file(path: Path, skill_timeline: list[tuple[int, str]] | None = 
                         stats["last_ts"] = ts
                 if obj.get("type") == "llm_request":
                     attrs = obj.get("attrs", {})
+                    model: str = attrs.get("model", "") or "unknown"
+                    if is_utility_model(model):
+                        continue
                     inp = attrs.get("inputTokens", 0)
                     out = attrs.get("outputTokens", 0)
                     cch = attrs.get("cachedTokens", 0)
@@ -1012,7 +1037,6 @@ def parse_jsonl_file(path: Path, skill_timeline: list[tuple[int, str]] | None = 
                     stats["output_tokens"] += out
                     stats["cached_tokens"] += cch
                     stats["llm_calls"] += 1
-                    model: str = attrs.get("model", "") or "unknown"
                     stats["models"].add(model)
                     bucket = stats["per_model"].setdefault(
                         model, {"input": 0, "output": 0, "cached": 0, "calls": 0, "nano_aiu": 0}
