@@ -17,6 +17,8 @@ The output is meant to be **copy-pasted into a GitHub Release**. It must contain
 The skill includes `scripts/generate_release_notes.py`, a standalone Python script that:
 
 - verifies the requested Git range and Copilot skill availability;
+- precomputes the commit log and user-facing diff locally so generation also works
+	when the Copilot CLI cannot inspect Git history inside its tool environment;
 - invokes the Copilot CLI with `/gh-release-notes`;
 - writes the requested output file; and
 - normalizes and validates the generated Markdown in place.

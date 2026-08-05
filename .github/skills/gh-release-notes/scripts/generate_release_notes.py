@@ -14,6 +14,7 @@ from pathlib import Path
 
 SKILL_NAME = "gh-release-notes"
 DEFAULT_OUTPUT = Path("release-notes.md")
+MAX_GIT_CONTEXT_LENGTH = 60_000
 TRACE_MARKERS = (
     "<function_call",
     "<thinking>",
@@ -76,11 +77,96 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_prompt(from_ref: str, to_ref: str, repo: Path, output: Path) -> str:
+def build_git_context(repo: Path, from_ref: str, to_ref: str) -> str:
+    """Collect Git evidence locally for Copilot environments without Git access."""
+    log = run_git(repo, "log", "--format=%h %s", "--no-merges", f"{from_ref}..{to_ref}")
+    diff_stat = run_git(
+        repo,
+        "diff",
+        "--stat",
+        "--no-ext-diff",
+        f"{from_ref}..{to_ref}",
+        "--",
+        ".",
+        ":(exclude).gitignore",
+        ":(exclude)AGENTS.md",
+        ":(exclude)CONSTITUTION.md",
+        ":(exclude)justfile",
+        ":(exclude).github",
+        ":(exclude)skills",
+        ":(exclude).agents",
+        ":(exclude)knowledge",
+        ":(exclude)docs/internal",
+        ":(exclude)tests",
+        ":(exclude)CHANGELOG.md",
+        ":(exclude)scripts/validate_release_notes.py",
+        ":(exclude)uv.lock",
+    )
+    diff = run_git(
+        repo,
+        "diff",
+        "--no-ext-diff",
+        "--unified=3",
+        f"{from_ref}..{to_ref}",
+        "--",
+        ".",
+        ":(exclude).gitignore",
+        ":(exclude)AGENTS.md",
+        ":(exclude)CONSTITUTION.md",
+        ":(exclude)justfile",
+        ":(exclude).github",
+        ":(exclude)skills",
+        ":(exclude).agents",
+        ":(exclude)knowledge",
+        ":(exclude)docs/internal",
+        ":(exclude)tests",
+        ":(exclude)CHANGELOG.md",
+        ":(exclude)uv.lock",
+    )
+    for result, description in (
+        (log, "commit log"),
+        (diff_stat, "diff summary"),
+        (diff, "diff"),
+    ):
+        if result.returncode != 0:
+            detail = result.stderr.strip() or "unknown Git error"
+            raise ValueError(f"Unable to collect the release {description}: {detail}")
+
+    context = textwrap.dedent(
+        f"""
+        Precomputed Git evidence for {from_ref}..{to_ref}:
+
+        Commit log (the starting ref is excluded):
+        {log.stdout.strip() or "(no commits)"}
+
+        User-facing diff summary (repository-internal paths excluded):
+        {diff_stat.stdout.strip() or "(no user-facing files changed)"}
+
+        User-facing diff (repository-internal paths excluded):
+        {diff.stdout.strip() or "(empty)"}
+        """
+    ).strip()
+    if len(context) <= MAX_GIT_CONTEXT_LENGTH:
+        return context
+
+    truncated = context[:MAX_GIT_CONTEXT_LENGTH]
+    return (
+        f"{truncated}\n\n[Git evidence truncated at {MAX_GIT_CONTEXT_LENGTH} characters; "
+        "use the included summary and inspect the checked-out files when needed.]"
+    )
+
+
+def build_prompt(
+    from_ref: str,
+    to_ref: str,
+    repo: Path,
+    output: Path,
+    git_context: str | None = None,
+) -> str:
     """Build the concise execution prompt sent to the release-note skill."""
     repo_text = repo.as_posix()
     output_text = output.as_posix()
-    return textwrap.dedent(
+    prompt = textwrap.dedent(
         f"""
         Use the /{SKILL_NAME} skill.
 
@@ -94,6 +180,21 @@ def build_prompt(from_ref: str, to_ref: str, repo: Path, output: Path) -> str:
         explanation, code fence, or response-only summary.
         """
     ).strip()
+    if git_context:
+        prompt += textwrap.dedent(
+            f"""
+
+            The automation collected the following Git evidence locally. Treat it as
+            authoritative input data and do not claim that the repository, tags, or
+            commits are unavailable. Do not include repository-internal paths or
+            implementation-only changes in the release notes.
+
+            <git-evidence>
+            {git_context}
+            </git-evidence>
+            """
+        )
+    return prompt
 
 
 def build_copilot_command(prompt: str, model: str | None) -> list[str]:
@@ -274,7 +375,8 @@ def generate_release_notes(
     print(f"Copilot model: {model or 'CLI default'}")
     require_copilot_token()
     run_skill_check(repo)
-    run_copilot(repo, build_prompt(from_ref, to_ref, repo, output), model)
+    git_context = build_git_context(repo, from_ref, to_ref)
+    run_copilot(repo, build_prompt(from_ref, to_ref, repo, output, git_context), model)
 
     if not output.is_file() or not output.read_text(encoding="utf-8").strip():
         raise RuntimeError(f"Copilot did not create a non-empty release-note file: {output}")

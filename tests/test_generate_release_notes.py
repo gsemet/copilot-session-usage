@@ -1,6 +1,7 @@
 """Tests for the release-note generation command."""
 
 import runpy
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ SCRIPT = (
 MODULE: dict[str, Any] = runpy.run_path(str(SCRIPT))
 build_copilot_command = MODULE["build_copilot_command"]
 build_parser = MODULE["build_parser"]
+build_git_context = MODULE["build_git_context"]
 build_prompt = MODULE["build_prompt"]
 resolve_path = MODULE["resolve_path"]
 require_copilot_token = MODULE["require_copilot_token"]
@@ -66,12 +68,61 @@ def test_build_prompt_contains_generic_execution_contract() -> None:
     assert "model catalog" not in prompt.lower()
 
 
+def test_build_prompt_includes_precomputed_git_evidence() -> None:
+    """Give sandboxed Copilot execution the local range evidence it cannot discover."""
+    prompt = build_prompt(
+        "v0.6.8",
+        "v0.7.0",
+        Path("/tmp/project"),
+        Path("/tmp/notes.md"),
+        "Commit log\nabc123 feat: useful change\n\nUser-facing diff\n+new behavior",
+    )
+
+    assert "<git-evidence>" in prompt
+    assert "abc123 feat: useful change" in prompt
+    assert "do not claim that the repository, tags, or" in prompt
+    assert "commits are unavailable" in prompt
+
+
 def test_resolve_path_keeps_absolute_paths_and_resolves_relative_paths() -> None:
     """Resolve output files relative to the selected repository."""
     repo = Path("/tmp/project")
 
     assert resolve_path(Path("notes.md"), repo) == repo / "notes.md"
     assert resolve_path(Path("/tmp/notes.md"), repo) == Path("/tmp/notes.md")
+
+
+def test_build_git_context_collects_log_and_user_facing_diff(monkeypatch: MonkeyPatch) -> None:
+    """Build the Copilot context from the exact requested range and exclusions."""
+    calls: list[tuple[str, ...]] = []
+
+    def fake_subprocess_run(
+        command: list[str],
+        *,
+        cwd: Path,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, check, capture_output, text
+        arguments = tuple(command[1:])
+        calls.append(arguments)
+        if arguments[0] == "log":
+            stdout = "abc123 feat: useful change\n"
+        elif arguments[1] == "--stat":
+            stdout = "src/example.py | 1 +\n"
+        else:
+            stdout = "diff --git a/src/example.py b/src/example.py\n+new behavior\n"
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+
+    monkeypatch.setattr(MODULE["subprocess"], "run", fake_subprocess_run)
+
+    context = build_git_context(Path("/tmp/project"), "v0.6.8", "v0.7.0")
+
+    assert "abc123 feat: useful change" in context
+    assert "+new behavior" in context
+    assert calls[0][:3] == ("log", "--format=%h %s", "--no-merges")
+    assert all(any(".github" in argument for argument in call) for call in calls[1:])
 
 
 def test_require_copilot_token_accepts_either_supported_environment_variable(
