@@ -5,37 +5,14 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import subprocess
 import sys
-import textwrap
 from collections.abc import Sequence
 from pathlib import Path
 
 SKILL_NAME = "gh-release-notes"
 DEFAULT_OUTPUT = Path("release-notes.md")
 MAX_GIT_CONTEXT_LENGTH = 60_000
-TRACE_MARKERS = (
-    "<function_call",
-    "<thinking>",
-    "<system_notification>",
-    "assistant.reasoning",
-    "function_calls",
-)
-FIRST_LINE = re.compile(
-    r"^(?:## (?:New Features|Enhancements|Bug Fixes|Breaking Changes|Examples|Documentation)"
-    r"|\*\*(?:Maintenance|Documentation|Internal)\*\*|## (?:Maintenance|Internal))$"
-)
-INTERNAL_DETAIL = re.compile(
-    r"\b(?:ci|ci/cd|workflow(?:s)?|release automation|internal guidelines?|tests?|"
-    r"commits?|pull requests?|individual files?)\b",
-    re.IGNORECASE,
-)
-FALLBACK_TEXT = (
-    "This release primarily includes updates to the knowledge base documentation "
-    "and internal repository structure. No changes to the core product functionality "
-    "or user-facing features."
-)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -72,80 +49,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--validate",
         type=Path,
         metavar="FILE",
-        help="Normalize and validate an existing release-note Markdown file.",
+        help="Verify that an existing release-note file is readable and non-empty.",
     )
     return parser
 
 
 def build_git_context(repo: Path, from_ref: str, to_ref: str) -> str:
-    """Collect Git evidence locally for Copilot environments without Git access."""
-    log = run_git(repo, "log", "--format=%h %s", "--no-merges", f"{from_ref}..{to_ref}")
-    diff_stat = run_git(
-        repo,
-        "diff",
-        "--stat",
-        "--no-ext-diff",
-        f"{from_ref}..{to_ref}",
-        "--",
-        ".",
-        ":(exclude).gitignore",
-        ":(exclude)AGENTS.md",
-        ":(exclude)CONSTITUTION.md",
-        ":(exclude)justfile",
-        ":(exclude).github",
-        ":(exclude)skills",
-        ":(exclude).agents",
-        ":(exclude)knowledge",
-        ":(exclude)docs/internal",
-        ":(exclude)tests",
-        ":(exclude)CHANGELOG.md",
-        ":(exclude)scripts/validate_release_notes.py",
-        ":(exclude)uv.lock",
+    """Collect generic Git evidence for Copilot environments without Git access."""
+    log = git_output(
+        repo, "commit log", "log", "--format=%h %s", "--no-merges", f"{from_ref}..{to_ref}"
     )
-    diff = run_git(
-        repo,
-        "diff",
-        "--no-ext-diff",
-        "--unified=3",
-        f"{from_ref}..{to_ref}",
-        "--",
-        ".",
-        ":(exclude).gitignore",
-        ":(exclude)AGENTS.md",
-        ":(exclude)CONSTITUTION.md",
-        ":(exclude)justfile",
-        ":(exclude).github",
-        ":(exclude)skills",
-        ":(exclude).agents",
-        ":(exclude)knowledge",
-        ":(exclude)docs/internal",
-        ":(exclude)tests",
-        ":(exclude)CHANGELOG.md",
-        ":(exclude)uv.lock",
+    diff_stat = git_output(
+        repo, "diff summary", "diff", "--stat", "--no-ext-diff", f"{from_ref}..{to_ref}"
     )
-    for result, description in (
-        (log, "commit log"),
-        (diff_stat, "diff summary"),
-        (diff, "diff"),
-    ):
-        if result.returncode != 0:
-            detail = result.stderr.strip() or "unknown Git error"
-            raise ValueError(f"Unable to collect the release {description}: {detail}")
-
-    context = textwrap.dedent(
-        f"""
-        Precomputed Git evidence for {from_ref}..{to_ref}:
-
-        Commit log (the starting ref is excluded):
-        {log.stdout.strip() or "(no commits)"}
-
-        User-facing diff summary (repository-internal paths excluded):
-        {diff_stat.stdout.strip() or "(no user-facing files changed)"}
-
-        User-facing diff (repository-internal paths excluded):
-        {diff.stdout.strip() or "(empty)"}
-        """
-    ).strip()
+    diff = git_output(repo, "diff", "diff", "--no-ext-diff", "--unified=3", f"{from_ref}..{to_ref}")
+    context = (
+        f"Precomputed Git evidence for {from_ref}..{to_ref}:\n\n"
+        f"Commit log:\n{log or '(no commits)'}\n\n"
+        f"Diff summary:\n{diff_stat or '(empty)'}\n\n"
+        f"Diff:\n{diff or '(empty)'}"
+    )
     if len(context) <= MAX_GIT_CONTEXT_LENGTH:
         return context
 
@@ -163,41 +86,32 @@ def build_prompt(
     output: Path,
     git_context: str | None = None,
 ) -> str:
-    """Build the concise execution prompt sent to the release-note skill."""
-    repo_text = repo.as_posix()
-    output_text = output.as_posix()
-    prompt = textwrap.dedent(
-        f"""
-        Use the /{SKILL_NAME} skill.
-
-        Generate release notes for the exact Git range {from_ref}..{to_ref} in {repo_text}.
-        Exclude {from_ref} and include {to_ref}. Inspect the diff and relevant
-        project documentation, then follow the skill's user-impact, categorization,
-        documentation-linking, and output-format rules.
-
-        Write only the final release-note Markdown to {output_text}. Follow the skill's
-        required section or fallback format; do not add a title, preamble,
-        explanation, code fence, or response-only summary.
-        """
-    ).strip()
+    """Build the small orchestration prompt; the skill owns release-note policy."""
+    prompt = (
+        f"Use the /{SKILL_NAME} skill. Generate release notes for the exact Git range "
+        f"{from_ref}..{to_ref} in {repo}. The skill is authoritative for analysis, "
+        f"classification, wording, documentation, and Markdown format. Write only "
+        f"the final release-note Markdown to {output}; do not summarize it in your response. "
+        "Before writing, enforce the skill's final output contract: render every "
+        "documentation URL as concise inline Markdown such as "
+        "See the [pricing reference for details](https://example.com/pricing), never as a "
+        "bare URL; exclude all internal CI, release automation, governance, "
+        "contributor, agent, generator, Git-evidence, and maintainer content; and "
+        "omit Maintenance whenever any user-facing section remains."
+    )
     if git_context:
-        prompt += textwrap.dedent(
-            f"""
-
-            The automation collected the following Git evidence locally. Treat it as
-            authoritative input data and do not claim that the repository, tags, or
-            commits are unavailable. Do not include repository-internal paths or
-            implementation-only changes in the release notes.
-
-            <git-evidence>
-            {git_context}
-            </git-evidence>
-            """
+        prompt += (
+            " Treat the following locally collected Git evidence as authoritative input; "
+            "the starting ref is excluded and the ending ref is included.\n\n"
+            f"<git-evidence>\n{git_context}\n</git-evidence>"
         )
     return prompt
 
 
-def build_copilot_command(prompt: str, model: str | None) -> list[str]:
+def build_copilot_command(
+    prompt: str,
+    model: str | None,
+) -> list[str]:
     """Build the non-interactive Copilot CLI command."""
     command = [
         "gh",
@@ -216,8 +130,6 @@ def build_copilot_command(prompt: str, model: str | None) -> list[str]:
         "--allow-tool=read",
         "--allow-tool=write",
         "--allow-tool=shell(git:*)",
-        "--allow-url=https://github.com",
-        "--allow-url=https://copilot-session-usage.readthedocs.io",
     ]
     if model:
         command.extend(["--model", model])
@@ -238,6 +150,15 @@ def run_git(repo: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
     )
+
+
+def git_output(repo: Path, description: str, *arguments: str) -> str:
+    """Run Git and return its output, raising one consistent error on failure."""
+    result = run_git(repo, *arguments)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "unknown Git error"
+        raise ValueError(f"Unable to collect the release {description}: {detail}")
+    return result.stdout.strip()
 
 
 def validate_range(repo: Path, from_ref: str, to_ref: str) -> None:
@@ -278,7 +199,11 @@ def require_copilot_token() -> None:
         raise RuntimeError("Set COPILOT_GITHUB_TOKEN or GH_TOKEN before running Copilot CLI.")
 
 
-def run_copilot(repo: Path, prompt: str, model: str | None) -> None:
+def run_copilot(
+    repo: Path,
+    prompt: str,
+    model: str | None,
+) -> None:
     """Run Copilot CLI and fail with its captured diagnostics when needed."""
     result = subprocess.run(
         build_copilot_command(prompt, model),
@@ -292,69 +217,15 @@ def run_copilot(repo: Path, prompt: str, model: str | None) -> None:
         raise RuntimeError(f"Copilot CLI failed with exit code {result.returncode}:\n{output}")
 
 
-def _release_start(notes: str) -> int | None:
-    """Find the first valid release section after optional model preamble text."""
-    heading_pattern = r"(?m)^(?:## .+|\*\*(?:Maintenance|Documentation|Internal)\*\*)\s*$"
-    for match in re.finditer(heading_pattern, notes):
-        if FIRST_LINE.fullmatch(match.group(0).strip()):
-            return match.start()
-    return None
-
-
-def normalize_release_notes(content: str) -> str:
-    """Normalize harmless model formatting drift into the release-note contract."""
-    notes = content.strip()
-    if not notes:
-        raise ValueError("Release notes are empty.")
-
-    lowered = notes.lower()
-    leaked_markers = [marker for marker in TRACE_MARKERS if marker.lower() in lowered]
-    if leaked_markers:
-        markers = ", ".join(leaked_markers)
-        raise ValueError(f"Release notes contain Copilot trace markers: {markers}")
-    if "```" in notes:
-        raise ValueError("Release notes must not contain a code fence.")
-
-    start = _release_start(notes)
-    if start is None:
-        raise ValueError("Release notes do not contain a recognized release section.")
-    notes = notes[start:].strip()
-    first_line, separator, remainder = notes.partition("\n")
-
-    if first_line.startswith("## ") and first_line[3:] in {"Maintenance", "Internal"}:
-        first_line = f"**{first_line[3:]}**"
-        notes = f"{first_line}{separator}{remainder}".strip()
-
-    if notes.startswith("**"):
-        if INTERNAL_DETAIL.search(notes) or "\n## " in notes:
-            return f"**Maintenance**\n\n{FALLBACK_TEXT}\n"
-        paragraphs = [paragraph for paragraph in notes.split("\n\n") if paragraph.strip()]
-        if len(paragraphs) != 2:
-            raise ValueError("Fallback release notes must contain one label and one paragraph.")
-
-    return f"{notes}\n"
-
-
-def validate_release_notes(content: str) -> None:
-    """Raise ``ValueError`` when release-note content violates the output contract."""
-    normalize_release_notes(content)
-
-
 def validate_output(output: Path) -> None:
-    """Normalize and validate release-note Markdown in place."""
+    """Verify that Copilot created a readable, non-empty output file."""
     try:
         content = output.read_text(encoding="utf-8")
-        normalized = normalize_release_notes(content)
-        validate_release_notes(normalized)
-        output.write_text(normalized, encoding="utf-8")
-    except (OSError, ValueError) as error:
-        preview = ""
-        if "content" in locals():
-            first_lines = "\n".join(content.strip().splitlines()[:5])[:500]
-            preview = f" First lines (up to 500 characters): {first_lines!r}."
-        message = str(error).rstrip(".")
-        raise RuntimeError(f"Release-note validation failed: {message}.{preview}") from error
-    print("Release-note Markdown validation passed.")
+    except OSError as error:
+        raise RuntimeError(f"Unable to read release-note output {output}: {error}") from error
+    if not content.strip():
+        raise RuntimeError(f"Copilot created an empty release-note file: {output}")
+    print("Release-note output file verified.")
 
 
 def generate_release_notes(
@@ -376,10 +247,12 @@ def generate_release_notes(
     require_copilot_token()
     run_skill_check(repo)
     git_context = build_git_context(repo, from_ref, to_ref)
-    run_copilot(repo, build_prompt(from_ref, to_ref, repo, output, git_context), model)
+    run_copilot(
+        repo,
+        build_prompt(from_ref, to_ref, repo, output, git_context),
+        model,
+    )
 
-    if not output.is_file() or not output.read_text(encoding="utf-8").strip():
-        raise RuntimeError(f"Copilot did not create a non-empty release-note file: {output}")
     validate_output(output)
     print(f"Release notes written to {output}")
 
@@ -390,10 +263,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.validate is not None:
-        if args.from_ref is not None or args.to_ref is not None:
-            parser.error("--validate cannot be combined with --from-ref or --to-ref")
+        if (args.from_ref is None) != (args.to_ref is None):
+            parser.error("--validate requires both --from-ref and --to-ref for range validation")
         try:
-            validate_output(args.validate)
+            repo = args.repo.resolve()
+            if args.from_ref is not None and args.to_ref is not None:
+                validate_range(repo, args.from_ref, args.to_ref)
+            validate_output(resolve_path(args.validate, repo))
         except (OSError, RuntimeError, ValueError) as error:
             print(f"error: {error}", file=sys.stderr)
             return 1
