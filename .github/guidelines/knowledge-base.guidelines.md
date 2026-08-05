@@ -80,7 +80,9 @@ Pre-commit checklist:
 - [ ] Correct `type` and folder for the information recorded.
 - [ ] Required frontmatter present and valid.
 - [ ] No Finding body was reworded or deleted.
-- [ ] All three commands above pass (also covered by `just preflight`).
+- [ ] Run `just knowledge-lint` when knowledge documents changed, then ensure
+  `just knowledge-lint-check` and `just knowledge-validate` pass. Both checks are
+  covered by `just preflight`.
 
 Add a dated entry to `knowledge/log.md` for significant changes. Use plain
 ISO-8601 date headings; avoid parenthetical annotations (they trigger warnings).

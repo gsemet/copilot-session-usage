@@ -25,7 +25,7 @@ The normal flow is:
 7. The workflow creates a local `vX.Y.Z` tag on the existing default-branch
    commit.
 8. GitHub Copilot CLI, invoked through `gh copilot`, runs the repository skill
-   `gh-release-notes` against the actual tag-to-tag diff.
+   `gh-release-notes` against the actual `from_ref..to_ref` diff.
 9. After clean notes are generated, the workflow pushes the tag and creates the
    GitHub Release.
 10. Publishing the GitHub Release triggers CI and the PyPI publication workflow.
@@ -210,16 +210,18 @@ second release run will not run concurrently with the first one.
 ## Version bump behavior
 
 The project uses Commitizen's Conventional Commits adapter. In automatic mode,
-the workflow first runs:
+the workflow calculates the next version with:
 
 ```text
 uv run --no-sync cz bump --get-next --yes
 ```
 
-It then performs the actual bump with:
+This command is used to derive the tag version; it does not modify files or create
+a release commit. For an explicit `major`, `minor`, or `patch` input, the workflow
+calculates the requested version with:
 
 ```text
-uv run --no-sync cz bump --yes
+uv run --no-sync cz bump --get-next --increment MAJOR|MINOR|PATCH --yes --allow-no-commit
 ```
 
 Commitizen normally interprets conventional commits approximately as follows:
@@ -279,24 +281,26 @@ The steps occur in this order:
    modifying files; in forced `auto` mode, allows the patch fallback.
 7. **Tag validation** — verifies that the new tag matches the semantic-version
    pattern `vX.Y.Z`, with optional prerelease/build suffixes.
-8. **Skill verification** — checks that `gh-release-notes` is discoverable with
-   `gh copilot -- skill list` and that `COPILOT_GITHUB_TOKEN` is present.
-9. **Note generation** — invokes `gh copilot` with `/gh-release-notes` and the
-    exact previous-to-target tag range.
+8. **Note generation** — invokes the bundled
+   `.github/skills/gh-release-notes/scripts/generate_release_notes.py` script,
+   which checks `COPILOT_GITHUB_TOKEN`, verifies that `gh-release-notes` is
+   discoverable, and invokes `gh copilot` with the exact previous-ref-to-target-ref
+   range. The previous ref is excluded and the target ref is included.
 10. **Artifact upload** — stores `release-notes.md` as a workflow artifact named
     `release-notes-vX.Y.Z`.
 11. **Push and release creation** — verifies that the remote tag does not already
    exist, pushes only the new tag, refuses to overwrite an existing release, and
    calls `gh release create` with the generated Markdown.
 
-The Copilot invocation disables the built-in GitHub MCP server and exposes only
+The bundled script disables the built-in GitHub MCP server and exposes only
 reading, Git inspection, and the file tools needed to create `release-notes.md`.
 It explicitly instructs the skill not to modify, commit, or push any other
 repository files. The workflow discards the Copilot response stream and uses the
-skill-written file directly, after normalizing harmless titles and preambles and
-rejecting traces, code fences, or unusable content. Polluted no-product fallbacks
-are replaced with the canonical maintenance wording. The allowed documentation
-hosts are the project repository and the published Read the Docs site.
+skill-written file directly, after the script normalizes harmless titles and
+preambles and rejects traces, code fences, or unusable content. Polluted
+no-product fallbacks are replaced with the canonical maintenance wording. The
+allowed documentation hosts are the project repository and the published Read
+the Docs site.
 
 ## Release-note generation
 
@@ -310,7 +314,9 @@ It is expected to:
   examples, and documentation;
 - omit empty sections;
 - include concrete user examples when the diff supports them;
-- use public documentation links with fragments where appropriate; and
+- link each qualifying user-facing change to the closest relevant published
+   documentation page when one exists, even when that page was not changed in the
+   release; and
 - write only release-note Markdown to the requested output file in CI mode.
 
 Do not replace this step with GitHub's generic `--generate-notes` behavior unless
@@ -347,8 +353,10 @@ It requires a tag such as `v0.7.0` and then:
 
 1. Checks out that tag with complete history.
 2. Finds the previous merged version tag.
-3. Verifies `COPILOT_GITHUB_TOKEN` and skill discovery.
-4. Runs the same `gh-release-notes` skill with the exact tag range.
+3. Installs the pinned tooling environment.
+4. Runs the bundled release-note script, which verifies `COPILOT_GITHUB_TOKEN`
+   and skill discovery before invoking `gh-release-notes` with the exact tag
+   range.
 5. Uploads the generated notes artifact.
 6. Creates a **draft** GitHub Release.
 

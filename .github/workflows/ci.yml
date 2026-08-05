@@ -23,20 +23,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install just
+        uses: extractions/setup-just@v2
+
       - name: Install dependencies
         run: uv sync --all-groups
 
-      - name: Run style check
-        run: uv run -- ruff format --check src tests
-
-      - name: Run linter
-        run: uv run -- ruff check src tests
-
-      - name: Run type checker
-        run: uv run -- mypy src
-
-      - name: Run tests with coverage
-        run: uv run -- pytest tests/ --cov=copilot_session_usage --cov-report=xml --cov-fail-under=85
+      - name: Run CI quality gate
+        run: just ci-check
 
       - name: Upload coverage
         uses: codecov/codecov-action@v5
@@ -68,4 +62,4 @@ jobs:
         run: uv sync --all-groups
 
       - name: Run preflight
-        run: just preflight
+        run: just ci-check

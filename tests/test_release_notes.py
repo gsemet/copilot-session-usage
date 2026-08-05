@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).parents[1] / "scripts" / "validate_release_notes.py"
+SCRIPT = (
+    Path(__file__).parents[1]
+    / ".github"
+    / "skills"
+    / "gh-release-notes"
+    / "scripts"
+    / "generate_release_notes.py"
+)
 
 
 def run_validator(tmp_path: Path, content: str) -> subprocess.CompletedProcess[str]:
@@ -14,7 +21,7 @@ def run_validator(tmp_path: Path, content: str) -> subprocess.CompletedProcess[s
     notes_path = tmp_path / "release-notes.md"
     notes_path.write_text(content, encoding="utf-8")
     return subprocess.run(
-        [sys.executable, str(SCRIPT), str(notes_path)],
+        [sys.executable, str(SCRIPT), "--validate", str(notes_path)],
         capture_output=True,
         text=True,
         check=False,
