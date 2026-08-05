@@ -16,7 +16,7 @@ from copilot_session_usage import api
 def mock_pricing():
     return {
         "models": {
-            "gpt-4o": [
+            "claude-sonnet-4.6": [
                 {"input_per_m": 0.25, "output_per_m": 1.00, "cache_per_m": 0.025, "tier": "Default"}
             ],
             "default": [
@@ -37,7 +37,7 @@ def sample_session_dir(tmp_path, mock_pricing):
                 "ts": 1_000_000,
                 "type": "llm_request",
                 "attrs": {
-                    "model": "gpt-4o",
+                    "model": "claude-sonnet-4.6",
                     "inputTokens": 1000,
                     "outputTokens": 100,
                     "cachedTokens": 0,

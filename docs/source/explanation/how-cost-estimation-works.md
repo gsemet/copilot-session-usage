@@ -58,6 +58,17 @@ A single session may call multiple models (e.g., Claude Sonnet for the main
 request and Claude Haiku for a subagent). Each model's tokens are summed
 separately, then costs are computed per model and aggregated.
 
+### Utility models
+
+GitHub Copilot may log background requests made by utility models such as GPT-4o
+mini, GPT-4o, GPT-4.1, and GPT-5.4 nano. GitHub documents that these models do
+not consume premium request units or usage-based billing tokens. They are
+therefore excluded from token totals, cost estimates, model and skill
+breakdowns, subagent summaries, and commit-usage trailers even when their
+requests appear in the local debug logs. See GitHub's
+[utility-model documentation](https://docs.github.com/en/copilot/concepts/models/utility-models)
+for the current list.
+
 ---
 
 ## Cost calculation

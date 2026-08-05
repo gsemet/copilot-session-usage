@@ -44,7 +44,7 @@ def test_batch_command_skips_missing_debug_logs(runner, tmp_path, mocker):
                 "ts": 1_000_000,
                 "type": "llm_request",
                 "attrs": {
-                    "model": "gpt-4o",
+                    "model": "claude-sonnet-4.6",
                     "inputTokens": 100,
                     "outputTokens": 10,
                     "cachedTokens": 0,

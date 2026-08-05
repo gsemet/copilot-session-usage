@@ -131,7 +131,11 @@ def test_parse_jsonl_file_no_ts_events(tmp_path):
         json.dumps(
             {
                 "type": "llm_request",
-                "attrs": {"model": "gpt-4o", "inputTokens": 10, "outputTokens": 5},
+                "attrs": {
+                    "model": "claude-sonnet-4.6",
+                    "inputTokens": 10,
+                    "outputTokens": 5,
+                },
             }
         )
         + "\n",
