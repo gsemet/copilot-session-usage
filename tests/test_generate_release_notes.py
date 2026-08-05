@@ -52,20 +52,17 @@ def test_parser_uses_generic_git_ref_arguments() -> None:
 
 
 def test_build_prompt_contains_generic_execution_contract() -> None:
-    """Provide the skill with only generic execution and output requirements."""
+    """Keep the prompt as orchestration and leave release-note policy to the skill."""
     prompt = build_prompt("v0.6.7", "v0.6.8", Path("/tmp/project"), Path("/tmp/notes.md"))
 
     assert "v0.6.7..v0.6.8" in prompt
-    assert "Exclude v0.6.7" in prompt
-    assert "include v0.6.8" in prompt
-    assert "project documentation" in prompt
-    assert "user-impact, categorization" in prompt
-    assert "required section or fallback format" in prompt
+    assert "Use the /gh-release-notes skill" in prompt
+    assert "skill is authoritative" in prompt
     assert "/tmp/notes.md" in prompt
-
+    assert "See the [pricing reference for details]" in prompt
+    assert "never as a bare URL" in prompt
+    assert "omit Maintenance" in prompt
     assert len(prompt) < 1_000
-    assert "pricing" not in prompt.lower()
-    assert "model catalog" not in prompt.lower()
 
 
 def test_build_prompt_includes_precomputed_git_evidence() -> None:
@@ -80,8 +77,8 @@ def test_build_prompt_includes_precomputed_git_evidence() -> None:
 
     assert "<git-evidence>" in prompt
     assert "abc123 feat: useful change" in prompt
-    assert "do not claim that the repository, tags, or" in prompt
-    assert "commits are unavailable" in prompt
+    assert "authoritative input" in prompt
+    assert "starting ref is excluded" in prompt
 
 
 def test_resolve_path_keeps_absolute_paths_and_resolves_relative_paths() -> None:
@@ -122,7 +119,8 @@ def test_build_git_context_collects_log_and_user_facing_diff(monkeypatch: Monkey
     assert "abc123 feat: useful change" in context
     assert "+new behavior" in context
     assert calls[0][:3] == ("log", "--format=%h %s", "--no-merges")
-    assert all(any(".github" in argument for argument in call) for call in calls[1:])
+    assert calls[1] == ("diff", "--stat", "--no-ext-diff", "v0.6.8..v0.7.0")
+    assert calls[2] == ("diff", "--no-ext-diff", "--unified=3", "v0.6.8..v0.7.0")
 
 
 def test_require_copilot_token_accepts_either_supported_environment_variable(
@@ -144,22 +142,35 @@ def test_require_copilot_token_fails_without_authentication(monkeypatch: MonkeyP
         require_copilot_token()
 
 
-def test_validate_output_normalizes_generated_markdown(tmp_path: Path) -> None:
-    """Reuse the release-note validator to normalize valid model output in place."""
+def test_validate_output_preserves_skill_authored_markdown(tmp_path: Path) -> None:
+    """Verify the output file without rewriting the skill's Markdown."""
     output = tmp_path / "release-notes.md"
-    output.write_text("preamble\n## Enhancements\n\nA useful change.", encoding="utf-8")
+    content = "preamble\n\n## Enhancements\n\nA useful change.\n"
+    output.write_text(content, encoding="utf-8")
 
     validate_output(output)
 
-    assert output.read_text(encoding="utf-8") == "## Enhancements\n\nA useful change.\n"
+    assert output.read_text(encoding="utf-8") == content
 
 
-def test_validate_output_reports_a_bounded_preview_for_malformed_markdown(
-    tmp_path: Path,
-) -> None:
-    """Include enough rejected content to diagnose formatting drift safely."""
+def test_validate_output_accepts_markdown_without_interpreting_it(tmp_path: Path) -> None:
+    """Leave content decisions to the skill rather than rejecting unfamiliar headings."""
     output = tmp_path / "release-notes.md"
     output.write_text("Generated title\n\nNo release section.", encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match=r"First lines.*Generated title"):
-        validate_output(output)
+    validate_output(output)
+
+
+def test_validate_output_accepts_maintenance_release_notes(tmp_path: Path) -> None:
+    """Verify maintenance output without special-casing it in the generator."""
+    output = tmp_path / "release-notes.md"
+    output.write_text(
+        """## Maintenance
+This release contains maintenance and internal improvements. No user-facing behavior changed.
+""",
+        encoding="utf-8",
+    )
+
+    validate_output(output)
+
+    assert output.read_text(encoding="utf-8").startswith("## Maintenance\n")
