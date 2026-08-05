@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -79,6 +80,81 @@ def _apply_query(payload: object, query: str | None) -> object:
     if isinstance(payload, dict):
         return core.query_json_path(payload, query)
     return None
+
+
+def _format_refresh_timestamp(value: datetime) -> str:
+    """Format a refresh timestamp for concise human-readable CLI output."""
+    timestamp = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return timestamp.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _format_display_path(path: Path) -> str:
+    """Replace the user's home directory with ``~`` when displaying a path."""
+    try:
+        return f"~/{path.relative_to(Path.home())}"
+    except ValueError:
+        return str(path)
+
+
+def _format_refresh_source(source: str) -> str:
+    """Use a short name for the known upstream pricing source."""
+    if source.startswith("https://raw.githubusercontent.com/github/docs/"):
+        return "GitHub Copilot rate card"
+    return _format_display_path(Path(source))
+
+
+def _emit_refresh_result(result: core.PricingRefreshResult) -> None:
+    """Print a human-readable refresh report and convert failures to Click errors."""
+    status_labels = {
+        "updated": "Updated",
+        "unchanged": "Already current",
+        "skipped": "Skipped (attempted within 24 hours)",
+        "failed": "Failed",
+    }
+
+    click.echo("Pricing refresh")
+    click.echo(f"Result           {status_labels.get(result.status, result.status)}")
+    click.echo(f"Attempted        {_format_refresh_timestamp(result.attempted_at)}")
+    if result.captured_at:
+        click.echo(f"Latest refresh   {_format_refresh_timestamp(result.captured_at)}")
+    if result.model_count is not None:
+        click.echo(f"Models           {result.model_count}")
+    click.echo(f"Source           {_format_refresh_source(result.source)}")
+    if result.path:
+        click.echo(f"Cache file       {_format_display_path(result.path)}")
+    if result.lock_path:
+        click.echo(f"Metadata file    {_format_display_path(result.lock_path)}")
+    if result.checksum:
+        click.echo(f"Checksum         {result.checksum}")
+    if result.error:
+        raise click.ClickException(result.error)
+
+
+@cli.group(name="pricing")
+def pricing_group() -> None:
+    """Inspect and refresh the runtime GitHub Copilot pricing snapshot."""
+
+
+@pricing_group.command(name="refresh")
+@click.option("--force", is_flag=True, help="Refresh even if an attempt occurred within 24 hours.")
+def refresh_pricing_command(force: bool) -> None:
+    """Refresh the user pricing snapshot from GitHub."""
+    _emit_refresh_result(core.refresh_pricing(force=force))
+
+
+@pricing_group.command(name="status")
+def pricing_status_command() -> None:
+    """Show the runtime pricing cache location and refresh metadata."""
+    status = core.pricing_status()
+    for key, value in status.items():
+        click.echo(f"{key}: {value}")
+
+
+@cli.command(name="refresh-pricing")
+@click.option("--force", is_flag=True, help="Refresh even if an attempt occurred within 24 hours.")
+def refresh_pricing_alias(force: bool) -> None:
+    """Compatibility alias for ``pricing refresh``."""
+    _emit_refresh_result(core.refresh_pricing(force=force))
 
 
 def _shape_analysis_result(

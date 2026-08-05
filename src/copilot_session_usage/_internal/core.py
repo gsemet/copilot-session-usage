@@ -18,15 +18,20 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 import re
+import tempfile
 import urllib.error
 import urllib.request
-from collections.abc import Sequence
-from datetime import datetime, timezone
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import click
+from platformdirs import user_config_dir
 
 # ─── Bundled data file access (works in wheels and editable installs) ───────
 
@@ -47,6 +52,47 @@ def _read_data_file(name: str) -> str | None:
 
 
 # ─── Pricing helpers ──────────────────────────────────────────────────────────
+
+_PRICING_FILENAME = "models-and-pricing.yml"
+_PRICING_LOCK_FILENAME = "models-and-pricing.lock"
+_PRICING_REFRESH_LOCK_FILENAME = "models-and-pricing.refresh.lock"
+_PRICING_APP_NAME = "copilot-session-usage"
+_PRICING_REFRESH_INTERVAL = timedelta(days=1)
+
+
+@dataclass(frozen=True)
+class PricingRefreshResult:
+    """Describe a runtime pricing refresh attempt."""
+
+    status: Literal["updated", "unchanged", "skipped", "failed"]
+    updated: bool
+    forced: bool
+    source: str
+    path: Path | None
+    lock_path: Path | None
+    model_count: int | None
+    previous_count: int | None
+    checksum: str | None
+    attempted_at: datetime
+    captured_at: datetime | None = None
+    error: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly representation of the result."""
+        return {
+            "status": self.status,
+            "updated": self.updated,
+            "forced": self.forced,
+            "source": self.source,
+            "path": str(self.path) if self.path else None,
+            "lock_path": str(self.lock_path) if self.lock_path else None,
+            "model_count": self.model_count,
+            "previous_count": self.previous_count,
+            "checksum": self.checksum,
+            "attempted_at": self.attempted_at.isoformat(),
+            "captured_at": self.captured_at.isoformat() if self.captured_at else None,
+            "error": self.error,
+        }
 
 
 def _normalize_model_name(name: str) -> str:
@@ -161,34 +207,8 @@ def _load_custom_pricing(ref_dir: Path | None = None) -> dict[str, list[dict]] |
         return None
 
 
-def load_pricing(ref_dir: Path | None = None) -> dict:
-    """Load pricing from models-and-pricing.yml, merge custom-models-pricing.yml.
-
-    Raises:
-        FileNotFoundError: If ``models-and-pricing.yml`` is missing or unreadable.
-        ValueError: If the YAML cannot be parsed or has an unexpected shape.
-
-    Args:
-        ref_dir: Directory containing models-and-pricing.yml and
-            custom-models-pricing.yml. If None, reads from the bundled data
-            shipped with the package via importlib.resources.
-    """
-    text: str | None = None
-    source = "bundled models-and-pricing.yml"
-    if ref_dir is not None:
-        yaml_path = ref_dir / "models-and-pricing.yml"
-        if yaml_path.exists():
-            text = yaml_path.read_text(encoding="utf-8")
-            source = str(yaml_path)
-        else:
-            msg = f"pricing file not found: {yaml_path}"
-            raise FileNotFoundError(msg)
-    else:
-        text = _read_data_file("models-and-pricing.yml")
-        if text is None:
-            msg = "bundled models-and-pricing.yml not found"
-            raise FileNotFoundError(msg)
-
+def _parse_pricing_entries(text: str, source: str) -> list[dict]:
+    """Parse and validate a pricing YAML document."""
     try:
         from ruamel.yaml import YAML
 
@@ -201,14 +221,134 @@ def load_pricing(ref_dir: Path | None = None) -> dict:
     if not isinstance(entries, list):
         msg = f"unexpected YAML structure in {source}: expected list, got {type(entries).__name__}"
         raise ValueError(msg)
+    return entries
 
-    pricing = _build_pricing_from_yaml(entries, source)
 
-    custom_models = _load_custom_pricing(ref_dir)
+def _read_lock_metadata(lock_path: Path) -> dict[str, Any]:
+    """Read pricing lock metadata, returning an empty dict when unavailable."""
+    try:
+        data = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    """Parse an ISO timestamp stored in pricing metadata."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _file_timestamp(path: Path) -> datetime:
+    """Return a file modification timestamp as UTC, or the minimum timestamp."""
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _candidate_timestamp(path: Path, metadata: dict[str, Any]) -> datetime:
+    """Return the capture timestamp for a pricing candidate."""
+    return _parse_timestamp(metadata.get("_captured")) or _file_timestamp(path)
+
+
+def _load_pricing_candidate(
+    yaml_path: Path, metadata: dict[str, Any], custom_ref_dir: Path | None
+) -> tuple[dict, datetime] | None:
+    """Load one pricing candidate, ignoring invalid optional candidates."""
+    try:
+        text = yaml_path.read_text(encoding="utf-8")
+        entries = _parse_pricing_entries(text, str(yaml_path))
+    except (OSError, ValueError):
+        return None
+
+    pricing = _build_pricing_from_yaml(entries, str(yaml_path))
+    custom_models = _load_custom_pricing(custom_ref_dir)
     if custom_models:
         pricing.setdefault("models", {}).update(custom_models)
+    return pricing, _candidate_timestamp(yaml_path, metadata)
 
-    return pricing
+
+def pricing_config_dir() -> Path:
+    """Return the platform-specific user configuration directory for pricing."""
+    return Path(user_config_dir(_PRICING_APP_NAME))
+
+
+def load_pricing(ref_dir: Path | None = None, *, auto_refresh: bool = True) -> dict:
+    """Load pricing from models-and-pricing.yml, merge custom-models-pricing.yml.
+
+    Raises:
+        FileNotFoundError: If ``models-and-pricing.yml`` is missing or unreadable.
+        ValueError: If the YAML cannot be parsed or has an unexpected shape.
+
+    Args:
+        ref_dir: Directory containing models-and-pricing.yml and
+            custom-models-pricing.yml. If None, uses the newest valid user
+            snapshot or the bundled data shipped with the package.
+        auto_refresh: If true and ``ref_dir`` is None, attempt at most one
+            runtime refresh every 24 hours. Failed refreshes use local data.
+    """
+    source = "bundled models-and-pricing.yml"
+    if ref_dir is not None:
+        yaml_path = ref_dir / _PRICING_FILENAME
+        if yaml_path.exists():
+            source = str(yaml_path)
+        else:
+            msg = f"pricing file not found: {yaml_path}"
+            raise FileNotFoundError(msg)
+        text = yaml_path.read_text(encoding="utf-8")
+        entries = _parse_pricing_entries(text, source)
+        pricing = _build_pricing_from_yaml(entries, source)
+        custom_models = _load_custom_pricing(ref_dir)
+        if custom_models:
+            pricing.setdefault("models", {}).update(custom_models)
+        return pricing
+
+    if auto_refresh:
+        _refresh_runtime_pricing()
+
+    candidates: list[tuple[dict, datetime]] = []
+    cache_dir = pricing_config_dir()
+    user_candidate = _load_pricing_candidate(
+        cache_dir / _PRICING_FILENAME,
+        _read_lock_metadata(cache_dir / _PRICING_LOCK_FILENAME),
+        None,
+    )
+    if user_candidate:
+        candidates.append(user_candidate)
+
+    bundled_text = _read_data_file(_PRICING_FILENAME)
+    if bundled_text is not None:
+        bundled_path = Path(f"bundled:{_PRICING_FILENAME}")
+        try:
+            bundled_entries = _parse_pricing_entries(bundled_text, source)
+        except ValueError:
+            bundled_entries = []
+        if bundled_entries:
+            bundled_pricing = _build_pricing_from_yaml(bundled_entries, source)
+            custom_models = _load_custom_pricing()
+            if custom_models:
+                bundled_pricing.setdefault("models", {}).update(custom_models)
+            bundled_metadata_text = _read_data_file(_PRICING_LOCK_FILENAME)
+            bundled_metadata: dict[str, Any] = {}
+            if bundled_metadata_text:
+                with contextlib.suppress(ValueError):
+                    parsed_metadata = json.loads(bundled_metadata_text)
+                    if isinstance(parsed_metadata, dict):
+                        bundled_metadata = parsed_metadata
+            candidates.append(
+                (bundled_pricing, _candidate_timestamp(bundled_path, bundled_metadata))
+            )
+
+    if not candidates:
+        msg = "bundled models-and-pricing.yml not found or invalid"
+        raise FileNotFoundError(msg)
+    return max(candidates, key=lambda candidate: candidate[1])[0]
 
 
 def _build_pricing_from_yaml(entries: list[dict], source: str) -> dict:
@@ -285,29 +425,93 @@ def _write_data_file(name: str, content: str) -> Path:
         if not path.parent.exists():
             msg = f"Data directory not found: {path.parent}"
             raise RuntimeError(msg)
-        path.write_text(content, encoding="utf-8")
+        _atomic_write_text(path, content)
         return path
     except Exception as exc:
         msg = f"Cannot write bundled data file {name}: {exc}"
         raise RuntimeError(msg) from exc
 
 
-def refresh_pricing() -> dict[str, Any]:
-    """Fetch the latest pricing YAML from GitHub and update the bundled copy.
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write text through a temporary file and atomically replace the target."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", dir=path.parent, text=True
+        )
+        temporary_path = Path(temporary_name)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+    except OSError as exc:
+        msg = f"Cannot atomically write {path}: {exc}"
+        raise RuntimeError(msg) from exc
+    finally:
+        if temporary_path is not None:
+            with contextlib.suppress(OSError):
+                temporary_path.unlink()
 
-    Writes ``models-and-pricing.yml`` and ``models-and-pricing.lock``
-    under ``src/copilot_session_usage/data/``.  Returns a dict with
-    ``updated`` (bool), ``path`` (Path), ``model_count`` (int), and
-    ``previous_count`` (int).
 
-    Raises RuntimeError on network or write failures so callers can
-    surface a clear message.
-    """
-    # Fetch upstream YAML
+@contextmanager
+def _pricing_refresh_lock(lock_path: Path) -> Iterator[None]:
+    """Serialize refresh writers across processes on Unix and Windows."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.touch(exist_ok=True)
+    with lock_path.open("r+b") as stream:
+        if os.name == "nt":
+            msvcrt = __import__("msvcrt")
+
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                stream.write(b"0")
+                stream.flush()
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl = __import__("fcntl")
+
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _refresh_due(cache_dir: Path, metadata: dict[str, Any], now: datetime) -> bool:
+    """Return whether a runtime refresh attempt is due."""
+    last_attempt = _parse_timestamp(metadata.get("_last_attempt"))
+    if last_attempt is None:
+        last_attempt = _parse_timestamp(metadata.get("_captured"))
+    if last_attempt is None:
+        yaml_path = cache_dir / _PRICING_FILENAME
+        if yaml_path.exists():
+            last_attempt = _file_timestamp(yaml_path)
+    return last_attempt is None or now - last_attempt >= _PRICING_REFRESH_INTERVAL
+
+
+def _model_count(text: str) -> int:
+    """Count named model entries in a validated pricing YAML document."""
+    try:
+        entries = _parse_pricing_entries(text, "pricing")
+    except ValueError:
+        return 0
+    return sum(1 for entry in entries if isinstance(entry, dict) and entry.get("model"))
+
+
+def _fetch_upstream_pricing() -> tuple[str, int]:
+    """Fetch, parse, and validate the upstream pricing YAML."""
     try:
         with urllib.request.urlopen(_PRICING_URL, timeout=30) as response:  # noqa: S310
             yaml_text: str = response.read().decode("utf-8")
-    except urllib.error.URLError as exc:
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
         msg = f"Failed to fetch pricing from {_PRICING_URL}: {exc}"
         raise RuntimeError(msg) from exc
 
@@ -315,55 +519,204 @@ def refresh_pricing() -> dict[str, Any]:
         msg = "No YAML input received from upstream. Check connectivity and re-run."
         raise RuntimeError(msg)
 
-    # Parse to validate and count models
     try:
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe")
-        entries = yaml.load(yaml_text)
-    except Exception as exc:
+        model_count = _model_count(yaml_text)
+        if model_count == 0:
+            raise ValueError("no named models found")
+    except ValueError as exc:
         msg = f"Failed to parse upstream YAML: {exc}"
         raise RuntimeError(msg) from exc
+    return yaml_text, model_count
 
-    if not isinstance(entries, list):
-        msg = f"Unexpected YAML structure: expected list, got {type(entries).__name__}"
-        raise RuntimeError(msg)
 
-    model_count = sum(1 for e in entries if isinstance(e, dict) and e.get("model"))
-
-    # Read current bundled file for comparison
-    current_text = _read_data_file("models-and-pricing.yml")
-    previous_count = 0
-    if current_text:
-        try:
-            current_entries = yaml.load(current_text)
-            if isinstance(current_entries, list):
-                previous_count = sum(
-                    1 for e in current_entries if isinstance(e, dict) and e.get("model")
-                )
-        except Exception:
-            pass
-
-    # Write the new YAML
-    yaml_path = _write_data_file("models-and-pricing.yml", yaml_text)
-
-    # Write lock file
-    checksum = hashlib.sha256(yaml_text.encode("utf-8")).hexdigest()[:16]
+def _write_pricing_lock(
+    lock_path: Path,
+    *,
+    captured_at: datetime,
+    attempted_at: datetime,
+    checksum: str,
+    model_count: int,
+    source: str,
+    error: str | None = None,
+) -> None:
+    """Write pricing provenance and refresh-attempt metadata."""
     lock = {
-        "_captured": datetime.now(timezone.utc).isoformat(),
-        "_source": _PRICING_URL,
-        "_yaml_path": str(yaml_path),
+        "_captured": captured_at.isoformat(),
+        "_last_attempt": attempted_at.isoformat(),
+        "_source": source,
+        "_yaml_path": str(lock_path.with_name(_PRICING_FILENAME)),
         "model_count": model_count,
         "checksum": checksum,
     }
-    lock_path = _write_data_file("models-and-pricing.lock", json.dumps(lock, indent=2) + "\n")
+    if error:
+        lock["_last_error"] = error
+    _atomic_write_text(lock_path, json.dumps(lock, indent=2) + "\n")
 
+
+def refresh_pricing(force: bool = False) -> PricingRefreshResult:
+    """Refresh the user pricing snapshot from GitHub.
+
+    The normal refresh is throttled to one attempt per rolling 24-hour period.
+    Pass ``force=True`` to bypass that limit. Network and validation failures
+    are returned as a failed result so automatic callers can keep using local
+    pricing data.
+    """
+    cache_dir = pricing_config_dir()
+    yaml_path = cache_dir / _PRICING_FILENAME
+    lock_path = cache_dir / _PRICING_LOCK_FILENAME
+    refresh_lock_path = cache_dir / _PRICING_REFRESH_LOCK_FILENAME
+    attempted_at = datetime.now(timezone.utc)
+
+    try:
+        with _pricing_refresh_lock(refresh_lock_path):
+            metadata = _read_lock_metadata(lock_path)
+            if not force and not _refresh_due(cache_dir, metadata, attempted_at):
+                return PricingRefreshResult(
+                    status="skipped",
+                    updated=False,
+                    forced=False,
+                    source=str(yaml_path),
+                    path=yaml_path if yaml_path.exists() else None,
+                    lock_path=lock_path if lock_path.exists() else None,
+                    model_count=metadata.get("model_count"),
+                    previous_count=metadata.get("model_count"),
+                    checksum=metadata.get("checksum"),
+                    attempted_at=attempted_at,
+                    captured_at=_parse_timestamp(metadata.get("_captured")),
+                )
+
+            previous_text = None
+            with contextlib.suppress(OSError):
+                previous_text = yaml_path.read_text(encoding="utf-8")
+            previous_count = _model_count(previous_text) if previous_text else None
+            attempt_metadata = dict(metadata)
+            attempt_metadata["_last_attempt"] = attempted_at.isoformat()
+            attempt_metadata.pop("_last_error", None)
+            _atomic_write_text(lock_path, json.dumps(attempt_metadata, indent=2) + "\n")
+
+            try:
+                yaml_text, model_count = _fetch_upstream_pricing()
+                checksum = hashlib.sha256(yaml_text.encode("utf-8")).hexdigest()[:16]
+                old_checksum = metadata.get("checksum")
+                updated = not yaml_path.exists() or old_checksum != checksum
+                _atomic_write_text(yaml_path, yaml_text)
+                captured_at = datetime.now(timezone.utc)
+                _write_pricing_lock(
+                    lock_path,
+                    captured_at=captured_at,
+                    attempted_at=attempted_at,
+                    checksum=checksum,
+                    model_count=model_count,
+                    source=_PRICING_URL,
+                )
+                return PricingRefreshResult(
+                    status="updated" if updated else "unchanged",
+                    updated=updated,
+                    forced=force,
+                    source=_PRICING_URL,
+                    path=yaml_path,
+                    lock_path=lock_path,
+                    model_count=model_count,
+                    previous_count=previous_count,
+                    checksum=checksum,
+                    attempted_at=attempted_at,
+                    captured_at=captured_at,
+                )
+            except RuntimeError as exc:
+                error = str(exc)
+                failed_metadata = dict(metadata)
+                failed_metadata["_last_attempt"] = attempted_at.isoformat()
+                failed_metadata["_last_error"] = error
+                with contextlib.suppress(RuntimeError):
+                    _atomic_write_text(lock_path, json.dumps(failed_metadata, indent=2) + "\n")
+                return PricingRefreshResult(
+                    status="failed",
+                    updated=False,
+                    forced=force,
+                    source=_PRICING_URL,
+                    path=yaml_path if yaml_path.exists() else None,
+                    lock_path=lock_path if lock_path.exists() else None,
+                    model_count=metadata.get("model_count"),
+                    previous_count=previous_count,
+                    checksum=metadata.get("checksum"),
+                    attempted_at=attempted_at,
+                    captured_at=_parse_timestamp(metadata.get("_captured")),
+                    error=error,
+                )
+    except (OSError, RuntimeError) as exc:
+        return PricingRefreshResult(
+            status="failed",
+            updated=False,
+            forced=force,
+            source=_PRICING_URL,
+            path=yaml_path if yaml_path.exists() else None,
+            lock_path=lock_path if lock_path.exists() else None,
+            model_count=None,
+            previous_count=None,
+            checksum=None,
+            attempted_at=attempted_at,
+            error=str(exc),
+        )
+
+
+def _refresh_runtime_pricing() -> PricingRefreshResult:
+    """Attempt a throttled runtime refresh and leave failures to the fallback."""
+    return refresh_pricing(force=False)
+
+
+def refresh_bundled_pricing() -> PricingRefreshResult:
+    """Refresh the package-owned fallback pricing used by release automation."""
+    attempted_at = datetime.now(timezone.utc)
+    yaml_text, model_count = _fetch_upstream_pricing()
+    current_text = _read_data_file(_PRICING_FILENAME)
+    previous_count = _model_count(current_text) if current_text else None
+    checksum = hashlib.sha256(yaml_text.encode("utf-8")).hexdigest()[:16]
+    yaml_path = _write_data_file(_PRICING_FILENAME, yaml_text)
+    lock_path = _write_data_file(
+        _PRICING_LOCK_FILENAME,
+        json.dumps(
+            {
+                "_captured": attempted_at.isoformat(),
+                "_source": _PRICING_URL,
+                "_yaml_path": str(yaml_path),
+                "model_count": model_count,
+                "checksum": checksum,
+            },
+            indent=2,
+        )
+        + "\n",
+    )
+
+    return PricingRefreshResult(
+        status="updated",
+        updated=True,
+        forced=True,
+        source=_PRICING_URL,
+        path=yaml_path,
+        lock_path=lock_path,
+        model_count=model_count,
+        previous_count=previous_count,
+        checksum=checksum,
+        attempted_at=attempted_at,
+        captured_at=attempted_at,
+    )
+
+
+def pricing_status() -> dict[str, Any]:
+    """Return local runtime pricing cache and fallback metadata."""
+    cache_dir = pricing_config_dir()
+    metadata = _read_lock_metadata(cache_dir / _PRICING_LOCK_FILENAME)
     return {
-        "updated": True,
-        "path": yaml_path,
-        "lock_path": lock_path,
-        "model_count": model_count,
-        "previous_count": previous_count,
+        "cache_dir": str(cache_dir),
+        "yaml_path": str(cache_dir / _PRICING_FILENAME),
+        "lock_path": str(cache_dir / _PRICING_LOCK_FILENAME),
+        "refresh_lock_path": str(cache_dir / _PRICING_REFRESH_LOCK_FILENAME),
+        "cached": (cache_dir / _PRICING_FILENAME).is_file(),
+        "last_attempt": metadata.get("_last_attempt"),
+        "captured": metadata.get("_captured"),
+        "checksum": metadata.get("checksum"),
+        "model_count": metadata.get("model_count"),
+        "last_error": metadata.get("_last_error"),
     }
 
 

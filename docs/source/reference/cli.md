@@ -9,3 +9,15 @@ into Git commits, see [How to add a session cost trailer](../how-to/add-commit-t
    :prog: copilot-session-usage
    :nested: full
 ```
+
+## Pricing commands
+
+Use `pricing refresh` to explicitly update the user-level pricing snapshot.
+The command respects the rolling 24-hour limit unless `--force` is supplied.
+Its output includes the attempt timestamp and, after a successful refresh, the
+latest captured pricing timestamp.
+Use `pricing status` to inspect the cache location, timestamps, checksum, and
+the most recent refresh error.
+
+The legacy top-level `refresh-pricing` command remains available as an alias
+for `pricing refresh`.

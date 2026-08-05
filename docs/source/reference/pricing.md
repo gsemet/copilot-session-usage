@@ -10,6 +10,51 @@ Prices are synced from the GitHub Copilot official rate card:
 
 The bundled copy is updated with each release.
 
+## Runtime refresh and fallback
+
+When pricing is loaded through the default Python API or a normal analysis
+command, the tool attempts one refresh per rolling 24-hour period. The refresh
+downloads and validates the upstream YAML, then stores it in the user
+configuration directory returned by `platformdirs`:
+
+| Platform | Cache directory |
+|---|---|
+| macOS | `~/Library/Application Support/copilot-session-usage/` |
+| Linux | `${XDG_CONFIG_HOME:-~/.config}/copilot-session-usage/` |
+| Windows | `%LOCALAPPDATA%\\copilot-session-usage\\` |
+
+The cache contains `models-and-pricing.yml`, provenance metadata in
+`models-and-pricing.lock`, and a separate `models-and-pricing.refresh.lock`
+used to serialize concurrent writers. YAML and metadata are written through
+temporary files and atomically replaced, so a failed refresh does not destroy
+the previous valid snapshot.
+
+If the network is unavailable or the upstream document is invalid, analysis
+silently falls back to the newest valid local source: the user cache or the
+bundled release copy. Failed automatic attempts are still throttled for the
+same 24-hour window. A direct refresh reports the failure instead of hiding it.
+
+Automatic refresh can be disabled for an individual Python call with
+`load_pricing(auto_refresh=False)`. Explicit refresh is available through the
+Python API and `copilot-session-usage pricing refresh`; use `--force` to ignore
+the rolling window. `copilot-session-usage pricing status` shows cache paths,
+timestamps, checksums, and the last refresh error.
+
+The refresh command prints a concise report with the result, UTC timestamps,
+model count, source, cache files, and checksum. For example:
+
+```text
+Pricing refresh
+Result           Already current
+Attempted        2026-08-05 12:14:08 UTC
+Latest refresh   2026-08-05 12:14:08 UTC
+Models           35
+Source           GitHub Copilot rate card
+Cache file       ~/Library/Application Support/copilot-session-usage/models-and-pricing.yml
+Metadata file    ~/Library/Application Support/copilot-session-usage/models-and-pricing.lock
+Checksum         4d0edb1c05af21c5
+```
+
 ## Cost formula
 
 The VS Code debug log reports three token counts per LLM call:
@@ -119,4 +164,5 @@ the session's total input tokens per model.
 
 Override any model's price by editing
 `src/copilot_session_usage/data/custom-models-pricing.yml`. Entries in
-this file take precedence over the main table.
+this file take precedence over the main table. Custom pricing is intentionally
+bundled-only and is not downloaded into the user runtime cache.

@@ -10,14 +10,24 @@ from pathlib import Path
 
 from copilot_session_usage._internal import core, vscode
 
+PricingRefreshResult = core.PricingRefreshResult
 
-def analyze_session(path: Path, detail: str = "compact", agent: str = "vscode") -> dict:
+
+def analyze_session(
+    path: Path,
+    detail: str = "compact",
+    agent: str = "vscode",
+    *,
+    auto_refresh: bool = True,
+) -> dict:
     """Analyze one session by its debug-log directory path.
 
     Args:
         path: Path to the session's debug-log directory.
         detail: ``minimal``, ``compact`` (default), or ``full``.
         agent: Provider to use (``vscode`` or ``cli``).
+        auto_refresh: Attempt the daily runtime pricing refresh before loading
+            pricing. Set to false for offline or tightly controlled callers.
 
     Returns:
         Session analysis dict shaped to the requested detail level.
@@ -27,7 +37,7 @@ def analyze_session(path: Path, detail: str = "compact", agent: str = "vscode") 
     """
     if agent == "cli":
         raise NotImplementedError("Copilot-CLI support is not yet implemented.")
-    pricing = core.load_pricing()
+    pricing = core.load_pricing(auto_refresh=auto_refresh)
     result = core.analyze_session(Path(path), pricing)
     return core.shape_session(result, detail)
 
@@ -103,7 +113,11 @@ def find_sessions_by_title(
 
 
 def find_session_by_id(
-    session_id: str, workspace_roots: list[Path] | None = None, agent: str = "vscode"
+    session_id: str,
+    workspace_roots: list[Path] | None = None,
+    agent: str = "vscode",
+    *,
+    auto_refresh: bool = True,
 ) -> dict | None:
     """Analyze a session by its exact UUID.
 
@@ -111,6 +125,8 @@ def find_session_by_id(
         session_id: The session UUID.
         workspace_roots: Override workspaceStorage directories.
         agent: Provider to use (``vscode`` or ``cli``).
+        auto_refresh: Attempt the daily runtime pricing refresh before loading
+            pricing. Set to false for offline or tightly controlled callers.
 
     Returns:
         Session analysis dict, or None if not found.
@@ -124,7 +140,7 @@ def find_session_by_id(
     session_dir = vscode.find_session_dir_by_id(session_id, workspace_roots)
     if session_dir is None:
         return None
-    pricing = core.load_pricing()
+    pricing = core.load_pricing(auto_refresh=auto_refresh)
     result = core.analyze_session(session_dir, pricing)
     meta = vscode.find_session_metadata_by_id(session_id, workspace_roots)
     result["title"] = meta.get("title") if meta else result.get("title")
@@ -136,6 +152,8 @@ def analyze_latest(
     detail: str = "compact",
     workspace_filter: str | None = None,
     agent: str = "vscode",
+    *,
+    auto_refresh: bool = True,
 ) -> dict:
     """Analyze the most recently modified session.
 
@@ -144,6 +162,8 @@ def analyze_latest(
         detail: ``minimal``, ``compact`` (default), or ``full``.
         workspace_filter: Only sessions from this workspace folder.
         agent: Provider to use (``vscode`` or ``cli``).
+        auto_refresh: Attempt the daily runtime pricing refresh before loading
+            pricing. Set to false for offline or tightly controlled callers.
 
     Returns:
         Session analysis dict shaped to the requested detail level.
@@ -160,7 +180,7 @@ def analyze_latest(
     session_dir = vscode.find_latest_session_dir(workspace_roots, workspace_filter=workspace_filter)
     if session_dir is None:
         raise ValueError("No session debug logs found in workspace storage.")
-    pricing = core.load_pricing()
+    pricing = core.load_pricing(auto_refresh=auto_refresh)
     result = core.analyze_session(session_dir, pricing)
     session_id = session_dir.name
     meta = vscode.find_session_metadata_by_id(session_id, workspace_roots)
@@ -175,6 +195,8 @@ def batch_analyze(
     since: str | None = None,
     workspace_filter: str | None = None,
     agent: str = "vscode",
+    *,
+    auto_refresh: bool = True,
 ) -> dict:
     """Analyze the N most recent sessions.
 
@@ -185,6 +207,8 @@ def batch_analyze(
         since: Only sessions created after this date.
         workspace_filter: Only sessions from this workspace folder.
         agent: Provider to use (``vscode`` or ``cli``).
+        auto_refresh: Attempt the daily runtime pricing refresh before loading
+            pricing. Set to false for offline or tightly controlled callers.
 
     Returns:
         Dict with ``summary`` (aggregate) and ``sessions`` (per-session list).
@@ -203,7 +227,7 @@ def batch_analyze(
         workspace_filter=workspace_filter,
         require_logs=True,
     )
-    pricing = core.load_pricing()
+    pricing = core.load_pricing(auto_refresh=auto_refresh)
     results: list[dict] = []
     for session in sessions:
         session_dir = Path(session["debug_log_dir"])
@@ -228,14 +252,35 @@ def aggregate_sessions(results: list[dict]) -> dict:
     return core.aggregate_sessions(results)
 
 
-def load_pricing(ref_dir: Path | None = None) -> dict:
+def load_pricing(ref_dir: Path | None = None, *, auto_refresh: bool = True) -> dict:
     """Load pricing data.
 
     Args:
         ref_dir: Directory containing pricing YAML files. If None, uses
-            the bundled data directory shipped with the package.
+            the newest valid user snapshot or the bundled data directory
+            shipped with the package.
+        auto_refresh: Attempt the daily runtime pricing refresh when ``ref_dir``
+            is None. Set to false for offline or tightly controlled callers.
 
     Returns:
         Pricing dict with model rates.
     """
-    return core.load_pricing(ref_dir)
+    return core.load_pricing(ref_dir, auto_refresh=auto_refresh)
+
+
+def refresh_pricing(force: bool = False) -> PricingRefreshResult:
+    """Refresh the user pricing snapshot from GitHub.
+
+    Args:
+        force: Bypass the normal rolling 24-hour refresh limit.
+
+    Returns:
+        A typed result describing whether pricing was updated, unchanged,
+        skipped, or unavailable.
+    """
+    return core.refresh_pricing(force=force)
+
+
+def pricing_status() -> dict:
+    """Return the runtime pricing cache location and refresh metadata."""
+    return core.pricing_status()

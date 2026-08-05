@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 from click.testing import CliRunner
 
-from copilot_session_usage.cli import cli
+from copilot_session_usage._internal.core import PricingRefreshResult
+from copilot_session_usage.cli import _format_display_path, cli
 
 
 @pytest.fixture
@@ -66,6 +68,83 @@ def test_cli_help(runner):
     assert "list" in result.output
     assert "batch" in result.output
     assert "amend-commit" in result.output
+    assert "pricing" in result.output
+    assert "refresh-pricing" in result.output
+
+
+def test_pricing_refresh_command(runner, mocker, tmp_path):
+    attempted_at = datetime(2026, 8, 5, 12, 14, 8, 393302, tzinfo=timezone.utc)
+    captured_at = datetime(2026, 8, 5, 12, 14, 8, 555570, tzinfo=timezone.utc)
+    mocker.patch(
+        "copilot_session_usage._internal.core.refresh_pricing",
+        return_value=PricingRefreshResult(
+            status="updated",
+            updated=True,
+            forced=True,
+            source="upstream",
+            path=tmp_path / "models-and-pricing.yml",
+            lock_path=tmp_path / "models-and-pricing.lock",
+            model_count=3,
+            previous_count=2,
+            checksum="abc123",
+            attempted_at=attempted_at,
+            captured_at=captured_at,
+        ),
+    )
+
+    result = runner.invoke(cli, ["pricing", "refresh", "--force"])
+
+    assert result.exit_code == 0
+    assert "Pricing refresh" in result.output
+    assert "Result           Updated" in result.output
+    assert "Attempted        2026-08-05 12:14:08 UTC" in result.output
+    assert "Latest refresh   2026-08-05 12:14:08 UTC" in result.output
+    assert "Models           3" in result.output
+    assert (
+        f"Cache file       {_format_display_path(tmp_path / 'models-and-pricing.yml')}"
+        in result.output
+    )
+    assert (
+        f"Metadata file    {_format_display_path(tmp_path / 'models-and-pricing.lock')}"
+        in result.output
+    )
+
+
+def test_pricing_status_command(runner, mocker, tmp_path):
+    mocker.patch(
+        "copilot_session_usage._internal.core.pricing_status",
+        return_value={"cache_dir": str(tmp_path), "cached": False},
+    )
+
+    result = runner.invoke(cli, ["pricing", "status"])
+
+    assert result.exit_code == 0
+    assert str(tmp_path) in result.output
+    assert "cached: False" in result.output
+
+
+def test_refresh_pricing_compatibility_alias(runner, mocker):
+    refresh = mocker.patch(
+        "copilot_session_usage._internal.core.refresh_pricing",
+        return_value=PricingRefreshResult(
+            status="skipped",
+            updated=False,
+            forced=False,
+            source="cache",
+            path=None,
+            lock_path=None,
+            model_count=3,
+            previous_count=3,
+            checksum="abc123",
+            attempted_at=datetime.now(timezone.utc),
+        ),
+    )
+
+    result = runner.invoke(cli, ["refresh-pricing"])
+
+    assert result.exit_code == 0
+    assert "Result           Skipped (attempted within 24 hours)" in result.output
+    refresh.assert_called_once_with(force=False)
 
 
 def test_cli_agent_cli_raises(runner):
