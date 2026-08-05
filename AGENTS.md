@@ -1,96 +1,82 @@
 # AGENTS.md — copilot-session-usage
 
-**copilot-session-usage** is a PyPI-installable Python package that extracts VS Code Copilot session cost KPIs from local debug logs.
+`copilot-session-usage` is a PyPI-installable Python package that extracts usage and
+cost analytics from local VS Code Copilot and Copilot CLI session logs.
 
-## Quick Navigation
+Read [`CONSTITUTION.md`](CONSTITUTION.md) before changing code, tests, packaging,
+release automation, or knowledge. It contains the durable project rules. This file
+is the navigation guide; it should not duplicate those rules.
 
-- **[README](README.md)** — User-facing overview and quickstart
-- **[CONTRIBUTING](CONTRIBUTING.md)** — Developer setup and conventions
-- **[.github/guidelines/knowledge-base.guidelines.md](.github/guidelines/knowledge-base.guidelines.md)** - How to use, update and maintain the knowledge base
-- **[.github/guidelines/git-commit-message.guideline.md](.github/guidelines/git-commit-message.guideline.md)** — Commit message conventions
+## Authority order
 
-## Technology Stack
+When guidance conflicts, use this order:
 
-- **Language**: Python 3.10+
-- **CLI Framework**: Click
-- **YAML Processing**: ruamel.yaml
-- **Package Manager**: uv
-- **Build Tool**: hatchling + hatch-vcs
-- **Task Runner**: just
+1. [`CONSTITUTION.md`](CONSTITUTION.md)
+2. Scoped rules in `.github/guidelines/`
+3. This `AGENTS.md`
+4. Task-specific skills and prompts
 
-## Project Structure
+## Quick navigation
 
-```
-copilot-session-usage/
-├── src/copilot_session_usage/      # Main package
-│   ├── __init__.py                 # Version re-export
-│   ├── api.py                      # Public Python API
-│   ├── cli.py                      # Click CLI entry point
-│   ├── _internal/                  # Internal implementation
-│   │   ├── core.py                 # Cost analysis, JSONL parsing, shaping
-│   │   ├── vscode.py               # VS Code workspace discovery
-│   │   └── copilot_cli.py          # Stub for future CLI support
-│   └── data/                       # Bundled pricing data
-│       ├── models-and-pricing.yml
-│       ├── models-and-pricing.lock
-│       └── custom-models-pricing.yml
-├── tests/                          # pytest test suite
-├── docs/                           # Sphinx documentation
-├── knowledge/                      # OKF knowledge base
-├── skills/                         # Agent skill definition
-├── justfile                        # Task automation
-├── pyproject.toml                  # Project configuration
-└── uv.toml                         # uv configuration
-```
+- [`README.md`](README.md) — user-facing overview and quickstart
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — contributor workflow and release process
+- [`pyproject.toml`](pyproject.toml) — package metadata, dependencies, and tool config
+- [`justfile`](justfile) — authoritative development and quality commands
+- [`docs/source/`](docs/source/) — Sphinx documentation
+- [`knowledge/`](knowledge/) — OKF knowledge bundle
+- [Knowledge base guideline](.github/guidelines/knowledge-base.guidelines.md) — rules
+  for maintaining `knowledge/`
+- [Commit guideline](.github/guidelines/git-commit-message.guideline.md) — commit
+  format and user-impact wording
 
-## Main Commands
+## Repository map
 
-```bash
-just dev              # Install dev dependencies
-just test             # Run unit tests
-just tests-coverage   # Run tests with 85% coverage threshold
-just preflight        # Full validation (format → lint → typecheck → test → coverage)
-just docs             # Build Sphinx docs
-just docs-serve       # Serve docs with auto-reload
-just build            # Build wheel + sdist
+```text
+src/copilot_session_usage/
+├── api.py                    Public Python API
+├── cli.py                    Click CLI entry point
+├── _internal/core.py         Session parsing, cost analysis, and shaping
+├── _internal/vscode.py       VS Code workspace discovery
+├── _internal/copilot_cli.py  Future Copilot CLI provider stub
+└── data/                     Bundled model and pricing data
+tests/                        Pytest suite
+scripts/                      Maintenance scripts, including pricing refresh
+skills/                       Copilot skills maintained with the package
 ```
 
-## Knowledge Base operations
+## Main commands
 
-When user wants you to debug how VS Code, Copilot CLI, works, how their cost,
-billing, pricing works, when you discover important information that you might
-have to remember, you have to ask yourself this questions: Is this information
-worth remembering for me of for other coding agents, potentially run on
-a different developer's machine ?
+Run `just dev` when dependencies need to be installed or synchronized. From the
+repository root:
 
-If you think some discoveries are worth remembering, you have to update the
-knowledge base.
-You have to follow the guidelines in `.github/guidelines/knowledge-base.guidelines.md`
-to understand the rules of the knowledge base in `knowledge/`.
-
-## Key Conventions
-
-- **Public API**: `api.py` — all functions accept optional `agent` parameter for future routing
-- **Internal modules**: `_internal/` — not part of public API
-- **Pricing data**: Bundled in `src/copilot_session_usage/data/`; loaded via `load_pricing()`
-- **Provider routing**: `--agent {vscode,cli}` — `cli` raises `NotImplementedError`
-- **Detail levels**: `minimal` < `compact` < `full`
-- **Output formats**: `json`, `table`, `detailed` (alias for table + full detail)
-
-## Git History and Pull Requests
-
-This repository must maintain a linear history. **Never create a merge commit.**
-
-- Rebase a feature branch onto the current target branch before opening or updating a pull request: `git fetch origin main && git rebase origin/main`.
-- When the target branch advances, rebase again; do not merge `main` into the feature branch.
-- Resolve conflicts during the rebase, run the relevant checks, and update the remote branch with `git push --force-with-lease` when required.
-- Merge pull requests only with a squash merge or a rebase/fast-forward merge. Never use a merge commit or `--no-ff`.
-- Do not force-push protected branches; `--force-with-lease` is permitted only for the contributor's feature branch.
-
-## Before You Commit
-
-```bash
-just preflight
+```text
+just style             Format Python and bundled skill scripts
+just style-check       Check formatting without modifying files
+just lint              Run Ruff and mypy
+just typecheck         Run mypy only
+just test              Run the unit tests
+just test-fast         Run tests in parallel
+just tests-coverage    Run tests with the 85% coverage gate
+just docs              Build the Sphinx documentation
+just build             Build the wheel and source distribution
+just ci-check          Run the full CI-equivalent quality gate
+just preflight         Run the complete local quality gate
 ```
 
-All checks must pass. Coverage threshold is 85%.
+For focused release-note generation, use the `release-notes` recipe. Its range is
+`FROM_REF..TO_REF`: the starting ref is excluded and the ending ref is included. The
+canonical output filename is `release-notes.md`.
+
+## Change workflow
+
+- Put package code in `src/copilot_session_usage/` and matching tests in `tests/`.
+- Update `docs/source/` when public behavior or APIs change.
+- Load the knowledge-base guideline before modifying `knowledge/`; use the
+  knowledge-specific validation recipes rather than editing generated indexes by
+  hand.
+- Load the relevant skill under `.github/skills/` for specialized workflows.
+- Run targeted checks while iterating and `just preflight` before completion.
+- Preserve unrelated working-tree changes and inspect `git diff` before committing.
+
+If the development environment is incomplete, run `just dev` and retry. Never commit
+`.env`, tokens, coverage artifacts, caches, or other local-only files.

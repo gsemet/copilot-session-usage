@@ -1,16 +1,41 @@
 ---
 name: gh-release-notes
 description: Generate end-user-friendly GitHub release notes from the actual diff between releases, including user impact, examples, breaking changes, and public documentation links.
-argument-hint: "from_tag=... to_tag=... repo_path=..."
+argument-hint: "from_ref=... to_ref=... repo_path=..."
 user-invocable: true
 ---
 
 # Release Notes Generator (Git Diff Based)
 
 Generate **end-user-friendly, user-impact-only** release notes by analyzing the actual changes between releases.
-No scripts required — use git commands to understand what changed and why it matters to someone using the product.
+Interactive use requires no script; automated generation and validation use the bundled script described below.
 
 The output is meant to be **copy-pasted into a GitHub Release**. It must contain release-note sections only: never add a document title, preamble, file summary, commit summary, or closing separator.
+
+## Bundled automation script
+
+The skill includes `scripts/generate_release_notes.py`, a standalone Python script that:
+
+- verifies the requested Git range and Copilot skill availability;
+- invokes the Copilot CLI with `/gh-release-notes`;
+- writes the requested output file; and
+- normalizes and validates the generated Markdown in place.
+
+Generate notes for an exact range from the repository root:
+
+```bash
+python .github/skills/gh-release-notes/scripts/generate_release_notes.py \
+	--from-ref v1.0.0 \
+	--to-ref v1.1.0 \
+	--output release-notes.md
+```
+
+The range is Git's two-dot range, `from_ref..to_ref`: `from_ref` itself is excluded
+and `to_ref` is included. Both refs may be tags, branches, or commit IDs.
+
+Set `COPILOT_MODEL` or pass `--model` to make model selection explicit. The script also
+supports `--validate FILE` when an existing release-note file needs normalization and
+validation without invoking Copilot.
 
 ---
 
@@ -37,7 +62,7 @@ What changed since the last release tag?
 4. **Interprets for end-users** — no technical jargon, functions, variable names, file paths, or implementation summaries
 5. **Categorizes intelligently** — Features, Enhancements, Bug Fixes, Breaking Changes, or a no-product-impact classification
 6. **Adds concrete examples** — shows what users see or can do after a qualifying change
-7. **Links to public docs** — points to published documentation, not repo paths
+7. **Links to relevant public docs** — links each user-facing change to the closest published documentation page when one exists, even if that page was not changed in the release
 8. **Consolidates related changes** — groups related diffs and eliminates back-and-forth noise
 9. **Outputs clean markdown** — ready to paste into a GitHub Release note
 
@@ -48,12 +73,12 @@ What changed since the last release tag?
 Accept either:
 
 - **Natural language**: "Show release notes from v1.2.0 to v1.3.0"
-- **Range spec**: `from_tag=v1.2.0 to_tag=v1.3.0 repo_path=/path/to/repo`
+- **Range spec**: `from_ref=v1.2.0 to_ref=v1.3.0 repo_path=/path/to/repo`
 - **Last release**: `since_tag=v1.2.0` (everything from tag to HEAD)
 
 Required:
 - Repository path (optional: defaults to current directory)
-- Range: `from_tag` + `to_tag`, OR `since_tag`, OR `last_n_commits`
+- Range: `from_ref` + `to_ref`, OR `since_tag`, OR `last_n_commits`
 
 ---
 
@@ -68,6 +93,11 @@ Include a change only if it has at least one of these effects:
 - Adds, removes, fixes, or changes a user-facing feature, command, API, configuration option, output, error message, compatibility guarantee, or supported platform.
 - Changes runtime behavior in a way users can observe, such as performance, reliability, pricing data, security behavior, or data handling.
 - Changes public documentation that users actually consume to operate the product, including a new guide, changed instructions, or migration guidance.
+
+Documentation relevance is separate from documentation impact. A code, data, API,
+configuration, or runtime change can require a documentation link even when no
+documentation file changed in the range. Use the nearest existing user-facing
+reference page as the explanation and destination for that link.
 
 Do **not** infer user impact from a commit type, changed filename, test coverage, or the fact that a change is large. If the evidence does not show a user consequence, exclude it.
 
@@ -93,6 +123,12 @@ Treat these as non-release content by default:
 
 These exclusions can be overridden only when the diff proves a direct user impact, such as a packaging change that changes the installable artifact or a security fix that changes behavior for users.
 
+After identifying a qualifying change, inspect the repository's user-facing
+documentation sources for the impacted concept, command, option, model, data
+format, or workflow. Search `docs/`, `README` files, examples, CLI/API reference
+pages, and documentation indexes. Documentation does not need to appear in the
+Git range to be relevant.
+
 ### Step 3: Interpret qualifying changes
 
 Translate technical changes into user impact:
@@ -107,6 +143,14 @@ Translate technical changes into user impact:
 | Removed old CSV export code | "CSV export removed; use Excel or PDF instead" |
 
 **Key: Focus on the user's experience, not the code implementation.**
+
+For each qualifying change, select the closest documentation page that explains
+the changed behavior. Prefer a focused reference or how-to page over the
+documentation home page. When a relevant page exists, attach its public URL as a
+Markdown link in the corresponding release-note bullet or example. Do not wait
+for the documentation page itself to be modified. For example, a pricing or
+model-data change should link to the project's pricing/model reference page if
+that page explains the affected behavior.
 
 Never turn a repository change into a release note merely by paraphrasing it. For example, “added CI workflow,” “updated contributor guidelines,” “improved project metadata,” and “7 files changed” are not release notes.
 
@@ -167,7 +211,7 @@ paragraph generic and focused on the absence of user-facing behavior changes.
 
 ## Workflow for Agent
 
-1. **Parse input** — extract `from_tag`, `to_tag`, `repo_path`, and optional filters
+1. **Parse input** — extract `from_ref`, `to_ref`, `repo_path`, and optional filters
 2. **Discover public docs URL** — inspect `README.md`, `pyproject.toml`, `mkdocs.yml`, `docs/conf.py`, or `.readthedocs.yml` for the published documentation URL. Prefer ReadTheDocs, GitHub Pages, or the project's public docs site. If none is found, omit doc links.
 3. **Fetch commits** — run `git log` with range, collect hashes and messages
 4. **Read diffs per file** — use `git show <hash>` for each relevant commit and examine changed behavior, not just filenames
@@ -179,7 +223,7 @@ paragraph generic and focused on the absence of user-facing behavior changes.
 10. **Consolidate** — merge related items, remove duplicates and flip-flops
 11. **Use a fallback** — if no product change qualifies, emit exactly one of **Maintenance**, **Documentation**, or **Internal**
 12. **Format markdown** — generate clean section headings and bullets with no title, preamble, footer, file summary, or commit summary
-13. **Use public docs links** — every Documentation bullet and every feature/enhancement docs reference must use the public URL with a fragment identifier, not a repo-relative path
+13. **Use relevant public docs links** — every Documentation bullet and every qualifying feature, enhancement, bug-fix, breaking-change, or example bullet should link to the closest relevant published page when one exists, using a fragment identifier when the page has a matching section; do not require the page to have changed in the range
 
 ---
 
@@ -226,9 +270,10 @@ This release primarily includes updates to the knowledge base documentation and 
 - User impact only (not implementation details, changed-file summaries, CI, internal process, or contributor guidance)
 - Do not include a title heading; the GitHub Release supplies the title
 - Use public documentation URLs; never use repo-relative paths like `docs/...` or `README.md`
+- For each user-facing bullet, search existing documentation for the closest page about the impacted behavior and link it inline when available, even when the documentation file was unchanged
 - Use fragment identifiers (`#section-name`) to point to specific docs sections
 - Add an **Examples** section when the diff shows a CLI command, API call, config snippet, or before/after behavior
-- Add a **Documentation** section only when public user documentation changed in a way users need or benefit from; never report internal guidelines or maintainer documentation
+- Add a **Documentation** section only when public user documentation changed in a way users need or benefit from; otherwise put links to unchanged but relevant docs inline with the affected bullets
 - Multiple links OK if they point to different topics
 - Omit any section that has no bullets
 - If no user-facing change qualifies, emit exactly one concise bold `Maintenance`, `Documentation`, or `Internal` block followed by one explanatory paragraph
@@ -282,6 +327,7 @@ Generate release notes from v2.1.0 to v2.2.0 for /path/to/my-app
 - Group related changes
 - Add concrete examples drawn from README, docs, tests, or CLI help in the diff
 - Link to the project's public documentation site (ReadTheDocs, GitHub Pages, etc.)
+- Link each qualifying user-facing change to the closest relevant public documentation page when one exists, whether or not that page changed in the release
 - Omit empty sections
 
 ❌ **Don't:**

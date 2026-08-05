@@ -1,5 +1,51 @@
 ## Unreleased
 
+## v0.6.8 (2026-08-04)
+
+### Fix
+
+- **pricing**: refresh GitHub model pricing
+
+## v0.6.7 (2026-07-31)
+
+### Fix
+
+- **pricing**: refresh GitHub model pricing
+
+## v0.6.6 (2026-07-29)
+
+### Fix
+
+- **pricing**: refresh GitHub model pricing
+
+## v0.6.5 (2026-07-26)
+
+### Fix
+
+- **ci**: quote release note prompt safely
+
+## v0.6.4 (2026-07-26)
+
+## v0.6.3 (2026-07-13)
+
+### Fix
+
+- **release**: normalize generated notes
+- **release**: use skill-written note files
+- **release**: defer tag push until notes pass
+- **release**: recover notes from embedded traces
+- **release**: extract final copilot response
+
+## v0.6.2 (2026-07-13)
+
+### Fix
+
+- **release**: focus notes on user impact
+
+## v0.6.1 (2026-07-13)
+
+## v0.6.0 (2026-07-10)
+
 ### Feat
 
 - integrate GPT5.6 pricing

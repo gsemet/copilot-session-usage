@@ -113,62 +113,17 @@ jobs:
           echo "target_tag=$target_tag" >> "$GITHUB_OUTPUT"
           echo "Prepared local tag $target_tag from $previous_tag without modifying the default branch."
 
-      - name: Verify release-note skill
-        env:
-          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          if [[ -z "${COPILOT_GITHUB_TOKEN:-}" ]]; then
-            echo "::error::The COPILOT_GITHUB_TOKEN repository secret is not configured."
-            echo "Create a fine-grained PAT with the Copilot Requests permission and add it as a repository secret."
-            exit 1
-          fi
-
-          if ! gh copilot -- skill list | grep -Fq 'gh-release-notes'; then
-            echo "::error::The gh-release-notes skill was not discovered by GitHub CLI."
-            exit 1
-          fi
-
-      - name: Generate release notes with gh-release-notes
+      - name: Generate release notes
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           PREVIOUS_TAG: ${{ steps.version.outputs.previous_tag }}
           TARGET_TAG: ${{ steps.version.outputs.target_tag }}
         run: |
           set -euo pipefail
-
-          output_file="release-notes.md"
-          rm -f "$output_file"
-
-          prompt="Use the /gh-release-notes skill.
-
-          Generate the final release notes for ${TARGET_TAG}, covering the actual changes from ${PREVIOUS_TAG} to ${TARGET_TAG} in ${GITHUB_WORKSPACE}.
-
-          Follow the skill's diff-based analysis process. Include only changes with a proven user-facing consequence; exclude CI, workflows, release automation, internal skills, guidelines, tests, file lists, and other repository housekeeping unless the diff proves direct product impact. If there is no product impact, write exactly this fallback block and no other wording: **Maintenance** followed by a blank line and This release primarily includes updates to the knowledge base documentation and internal repository structure. No changes to the core product functionality or user-facing features. Writing the final release-note Markdown to ${output_file} is mandatory: use the create or edit file tool, then read the file to verify that it exists and contains the final notes. The first line of the file must be exactly one of: ## New Features, ## Enhancements, ## Bug Fixes, ## Breaking Changes, ## Examples, ## Documentation, **Maintenance**, **Documentation**, or **Internal**. Do not write a preamble, title, or code fence. Do not return the release notes in your response; the response is discarded. Do not modify, commit, or push any other repository files."
-
-          gh copilot -- \
-            --prompt "$prompt" \
-            --silent \
-            --no-ask-user \
-            --no-auto-update \
-            --no-color \
-            --output-format text \
-            --disable-builtin-mcps \
-            --available-tools='read,create,edit,bash' \
-            --allow-tool='read' \
-            --allow-tool='write' \
-            --allow-tool='shell(git:*)' \
-            --allow-url='https://github.com' \
-            --allow-url='https://copilot-session-usage.readthedocs.io' \
-            > /dev/null
-
-          if [[ ! -s "$output_file" ]]; then
-            echo "::error::The gh-release-notes skill did not create the mandatory $output_file."
-            exit 1
-          fi
-
-          python scripts/validate_release_notes.py "$output_file"
+          uv run -- python .github/skills/gh-release-notes/scripts/generate_release_notes.py \
+            --from-ref "$PREVIOUS_TAG" \
+            --to-ref "$TARGET_TAG" \
+            --output release-notes.md
 
       - name: Upload generated notes
         uses: actions/upload-artifact@v4
