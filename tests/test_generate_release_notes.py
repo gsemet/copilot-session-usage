@@ -58,7 +58,7 @@ def test_build_prompt_contains_generic_execution_contract() -> None:
     assert "v0.6.7..v0.6.8" in prompt
     assert "Use the /gh-release-notes skill" in prompt
     assert "skill is authoritative" in prompt
-    assert "/tmp/notes.md" in prompt
+    assert str(Path("/tmp/notes.md")) in prompt
     assert "See the [pricing reference for details]" in prompt
     assert "never as a bare URL" in prompt
     assert "omit Maintenance" in prompt
