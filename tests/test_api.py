@@ -231,6 +231,26 @@ def test_batch_analyze_agent_cli_raises():
 
 
 def test_load_pricing_returns_dict():
-    result = api.load_pricing()
+    result = api.load_pricing(auto_refresh=False)
     assert isinstance(result, dict)
     assert "models" in result
+
+
+def test_refresh_pricing_delegates_to_core(mocker):
+    expected = mocker.Mock()
+    refresh = mocker.patch.object(api.core, "refresh_pricing", return_value=expected)
+
+    result = api.refresh_pricing(force=True)
+
+    assert result is expected
+    refresh.assert_called_once_with(force=True)
+
+
+def test_pricing_status_delegates_to_core(mocker):
+    expected = {"cached": False}
+    status = mocker.patch.object(api.core, "pricing_status", return_value=expected)
+
+    result = api.pricing_status()
+
+    assert result == expected
+    status.assert_called_once_with()
