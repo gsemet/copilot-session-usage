@@ -21,6 +21,10 @@ include unstaged changes, amend or rewrite history, or push.
 - Derive the commit message from all staged changes.
   Ensure to strictly follow the project convention, then run `git commit` exactly once.
   Do not use `--all`, `--amend`, or `--no-verify`.
+- Construct the complete message before invoking Git: subject, body, and trailers.
+  Do not pass each wrapped body line as a separate `-m` argument. Each `-m`
+  argument creates a separate paragraph and introduces an unintended blank line.
+  Pass the complete body as one message or use a complete commit-message file.
 - For AI-assisted commits, use exactly one verified `Assisted-by` trailer as
   required by the guideline. Never guess the model or use the IDE name.
 - Verify the new commit and report any remaining staged or unstaged changes. Do
