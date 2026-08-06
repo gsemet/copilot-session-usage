@@ -293,7 +293,10 @@ directly observe a supported behavior that the mechanism enables.
 ## Workflow for Agent
 
 1. **Parse input** — extract `from_ref`, `to_ref`, `repo_path`, and optional filters
-2. **Discover public documentation** — inspect the repository's available user-facing documentation surfaces and any published links they expose. Do not assume a particular language, documentation generator, directory layout, metadata file, or URL naming scheme. Prefer the closest trustworthy public page for each qualifying change. Use absolute HTTPS URLs, and omit a documentation link when no public page can be established rather than inventing one.
+2. **Discover public documentation** — inspect the repository's available user-facing documentation surfaces and any published links they expose. Do not assume a particular language, documentation generator, directory layout, metadata file, or URL naming scheme. Prefer the closest trustworthy public page for each qualifying change.
+For hosting services like readthedocs that propose latest/stable URLs, prefer the stable version.
+Infere fragment identifiers to point to specific sections when available.
+Use absolute HTTPS URLs, and omit a documentation link when no public page can be established rather than inventing one.
 3. **Fetch commits** — run `git log` with range, collect hashes and messages
 4. **Read diffs per file** — use `git show <hash>` for each relevant commit and examine changed behavior, not just filenames
 5. **Apply the user-impact gate** — discard CI, internal, process, and implementation-only changes unless the diff proves direct user impact

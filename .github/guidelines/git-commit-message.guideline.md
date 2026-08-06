@@ -27,6 +27,23 @@ Note: scope is optional.
 
 **Types:** `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `ci`, `chore`, `build`, `revert`
 
+Choose the type from the category of change, not merely from whether the change
+improves reliability or is important:
+
+- `feat`: adds a new user-facing capability.
+- `fix`: corrects an existing user-facing behavior or defect.
+- `build`: changes packaging, release automation, build tooling, or distribution.
+- `ci`: changes validation, test, or pipeline execution without changing release
+  or packaging behavior.
+- `docs`: changes documentation only.
+- `refactor`: changes internal structure without changing behavior.
+- `test`: adds or changes tests without changing production behavior.
+- `chore`: maintenance that does not fit the other categories.
+
+Release workflows, package publication, versioning automation, and trusted
+publishing configuration use `build`, even when they improve reliability. Use
+`fix` only when correcting an already-observed user-facing defect.
+
 **Examples:**
 
 ```text
