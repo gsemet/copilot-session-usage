@@ -55,8 +55,10 @@ just docs-serve
 	generation succeeds. It does not create a version/changelog commit.
 4. The generated notes are uploaded as an artifact and used to create the GitHub
 	Release. Enable the `draft` option if the release needs review before publishing.
-5. Publishing the GitHub Release triggers CI and publishes the package to PyPI via
-	OIDC.
+5. The release workflow runs CI before creating the GitHub Release and, for a
+	non-draft release, publishes the tagged package to PyPI via OIDC in the same
+	workflow. Draft releases are not published to PyPI until the **Publish existing
+	tag to PyPI** workflow is run manually.
 
 The workflow requires a repository secret named `COPILOT_GITHUB_TOKEN`. It must be
 a fine-grained token with the **Copilot Requests** permission. The normal Actions

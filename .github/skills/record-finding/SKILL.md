@@ -5,16 +5,14 @@ description: 'Dump a single empirical Finding into the OKF knowledge base after 
 
 # record-finding
 
+You just finished an investigation, debugging session, or verification.
+You learned something non-trivial about how the external world (VS Code,
+Copilot, pricing, logs) behaves.
+
+You want to hand off "what I found and believed" for later consolidation.
 Record ONE Finding: a dated, empirical, falsifiable note of what you observed and
 believed right now. Findings can later be wrong — that is fine. Be truthful about
 the moment, not about eternal truth.
-
-## When to use
-
-- You just finished an investigation, debugging session, or verification.
-- You learned something non-trivial about how the external world (VS Code,
-  Copilot, pricing, logs) behaves.
-- You want to hand off "what I found and believed" for later consolidation.
 
 Do NOT use this to record standards/conventions (that is a Principle), how an
 object is composed (Structure), or a stable idea (Concept). Those are promoted
