@@ -10,7 +10,11 @@ user-invocable: true
 Generate **end-user-friendly, user-impact-only** release notes by analyzing the actual changes between releases.
 Interactive use requires no script; automated generation and validation use the bundled script described below.
 
-The output is meant to be **copy-pasted into a GitHub Release**. It must contain release-note sections only: never add a document title, preamble, file summary, commit summary, or closing separator.
+The output is meant to be **copy-pasted into a GitHub Release**. It must contain
+release-note sections only: never add a document title, version heading, preamble,
+file summary, commit summary, or closing separator. GitHub already displays the
+release title and version above the body, so do not repeat it in the generated
+Markdown.
 
 ## Non-negotiable output contract
 
@@ -24,6 +28,11 @@ The output is meant to be **copy-pasted into a GitHub Release**. It must contain
 - Never include `## Maintenance` together with any user-facing section. When a
 	user-facing change qualifies, omit Maintenance and discard all internal-only
 	candidates.
+- Start the output with a permitted `##` section heading. Never emit a `#` heading
+	for the version or release title, such as `# v0.7.2`, `# Release v0.7.2`, or
+	`# Release notes`.
+- For a maintenance-only release, emit exactly `## Maintenance` and its concise
+	maintenance statement. Do not add any title or version heading before it.
 - Before writing the file, inspect the final Markdown for these rules and remove
 	any violating bullet or section.
 
@@ -224,7 +233,7 @@ Breaking changes come from:
 
 ### Step 6: Categorize & Format
 
-Organize qualifying changes into buckets. **Only include sections that have content.** Omit empty sections entirely. Do not add a title heading.
+Organize qualifying changes into buckets. **Only include sections that have content.** Omit empty sections entirely. Do not add a title heading or version heading. The first line must be one of the permitted `##` section headings.
 
 The only permitted headings are `## New Features`, `## Enhancements`, `## Bug
 Fixes`, `## Breaking Changes`, `## Examples`, `## Documentation`, and
@@ -239,13 +248,13 @@ replace the missing URL with a repository path, an unlinked description, or a
 claim that documentation was updated.
 
 If no qualifying user-facing change exists, emit exactly one concise `## Maintenance`
-section. Explain generically that the release contains maintenance and internal
-improvements without naming CI, workflows, release automation, internal guidelines,
-tests, commits, pull requests, governance files, documentation files, or individual
-files. Do not invent a feature, user benefit, example, or documentation link. Never
-publish `Internal` or an empty maintenance section. If at least one user-facing
-change exists, omit Maintenance entirely; do not use it as a bucket for leftover
-internal changes.
+section as the first and only heading. Explain generically that the release contains
+maintenance and internal improvements without naming CI, workflows, release
+automation, internal guidelines, tests, commits, pull requests, governance files,
+documentation files, or individual files. Do not invent a feature, user benefit,
+example, or documentation link. Never publish `Internal` or an empty maintenance
+section. If at least one user-facing change exists, omit Maintenance entirely; do
+not use it as a bucket for leftover internal changes.
 
 `## Maintenance` and a user-facing section are mutually exclusive. If any
 Enhancements, New Features, Bug Fixes, Breaking Changes, Examples, or qualifying
@@ -317,6 +326,18 @@ Use absolute HTTPS URLs, and omit a documentation link when no public page can b
 
 **Clean markdown** for a GitHub Release body:
 
+The following is invalid because the GitHub Release page already supplies the
+version title:
+
+```markdown
+# v0.7.2
+
+## Bug Fixes
+- Fixed an issue with session discovery
+```
+
+Start directly with the release-note section instead:
+
 ```markdown
 ## New Features
 - Added dark mode toggle in settings
@@ -348,7 +369,9 @@ Use absolute HTTPS URLs, and omit a documentation link when no public page can b
 - User impact only (not implementation details, changed-file summaries, CI, internal process, or contributor guidance)
 - Every bullet must describe a benefit or changed capability for ordinary users of the published product
 - Do not include release tooling, Git evidence, validation behavior, governance files, contributor guidance, agent instructions, CI, workflows, or repository housekeeping
-- Do not include a title heading; the GitHub Release supplies the title
+- Do not include a title or version heading; the GitHub Release supplies the title
+- The first line must be a permitted `##` section heading, including `## Maintenance`
+	for maintenance-only releases
 - Use public documentation URLs; never use repo-relative paths like `docs/...` or `README.md`
 - For each user-facing bullet, search existing documentation for the closest page about the impacted behavior and link it inline with descriptive Markdown text when available, even when the documentation file was unchanged
 - Use fragment identifiers (`#section-name`) to point to specific docs sections
