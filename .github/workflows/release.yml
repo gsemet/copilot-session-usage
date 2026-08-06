@@ -32,7 +32,11 @@ permissions:
   contents: write
 
 jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: ci
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
@@ -161,3 +165,33 @@ jobs:
           fi
 
           gh release create "$TARGET_TAG" "${release_args[@]}"
+
+    outputs:
+      target_tag: ${{ steps.version.outputs.target_tag }}
+
+  publish:
+    if: ${{ !inputs.draft }}
+    needs: release
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/copilot-session-usage
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out the released tag
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.release.outputs.target_tag }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build package
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

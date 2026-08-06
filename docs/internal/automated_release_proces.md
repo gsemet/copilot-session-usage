@@ -28,7 +28,8 @@ The normal flow is:
    `gh-release-notes` against the actual `from_ref..to_ref` diff.
 9. After clean notes are generated, the workflow pushes the tag and creates the
    GitHub Release.
-10. Publishing the GitHub Release triggers CI and the PyPI publication workflow.
+10. The release workflow runs CI before creating the GitHub Release and, for a
+   non-draft release, builds and publishes the tagged package to PyPI directly.
 
 The normal workflow is defined in
 [`.github/workflows/release.yml`](../../.github/workflows/release.yml).
@@ -37,9 +38,9 @@ The normal workflow is defined in
 
 | File | Responsibility |
 | --- | --- |
-| `.github/workflows/release.yml` | Normal end-to-end release: bump, local tag, note generation, tag push, and GitHub Release creation. |
+| `.github/workflows/release.yml` | Normal end-to-end release: CI, bump, local tag, note generation, tag push, GitHub Release creation, and non-draft PyPI publication. |
 | `.github/workflows/release-notes.yml` | Manual fallback for generating notes and creating a draft release for an existing tag. It does not bump versions or create tags. |
-| `.github/workflows/publish.yml` | Runs when a GitHub Release is published, executes CI, builds the package, and publishes to PyPI using OIDC. |
+| `.github/workflows/publish.yml` | Manual recovery workflow that checks out an existing tag and publishes it to PyPI using OIDC. |
 | `.github/workflows/ci.yml` | Reusable CI workflow required before PyPI publication. |
 | `.github/skills/gh-release-notes/SKILL.md` | The custom Copilot skill that interprets the actual diff and writes user-facing release notes. |
 | `pyproject.toml` | Defines dynamic SCM versioning and Commitizen configuration. |
@@ -149,8 +150,10 @@ The publication workflow uses PyPI's OIDC action:
 
 The PyPI project must have a trusted publisher configured for this GitHub
 repository and the `pypi` environment used by
+[`.github/workflows/release.yml`](../../.github/workflows/release.yml). If the
+manual recovery workflow is also used, configure a second trusted publisher for
 [`.github/workflows/publish.yml`](../../.github/workflows/publish.yml). Verify
-this before the first production release. No PyPI API token is expected in the
+these before the first production release. No PyPI API token is expected in the
 repository secrets when trusted publishing is configured correctly.
 
 ## Running a normal release
@@ -325,10 +328,10 @@ to provide richer, project-specific notes.
 
 ## Draft versus published releases
 
-| `draft` input | GitHub Release state | Does `publish.yml` run? |
+| `draft` input | GitHub Release state | Is PyPI published automatically? |
 | --- | --- | --- |
-| `false` | Published | Yes, after the reusable CI job succeeds |
-| `true` | Draft | No; it runs only after a maintainer publishes the draft |
+| `false` | Published | Yes, after CI and release creation succeed |
+| `true` | Draft | No; use **Publish existing tag to PyPI** after review |
 
 For a draft release:
 
@@ -336,10 +339,12 @@ For a draft release:
    page.
 2. Edit the release notes on GitHub if necessary.
 3. Publish the draft when the version and notes are approved.
-4. Monitor the resulting **Publish to PyPI** workflow.
+4. Run **Publish existing tag to PyPI** with the release tag.
+5. Monitor the resulting workflow.
 
-Publishing is the gate that starts package publication. Creating a tag or draft
-release alone does not publish to PyPI.
+Creating a tag or draft release alone does not publish to PyPI. A non-draft
+release publishes in the same **Release** workflow; a reviewed draft requires
+the manual recovery workflow.
 
 ## Manual notes fallback
 
@@ -435,8 +440,8 @@ than bumping again.
 
 ### PyPI publication fails
 
-A published GitHub Release should trigger **Publish to PyPI**. If that workflow
-fails:
+A non-draft **Release** workflow or the manual **Publish existing tag to PyPI**
+workflow can fail during publication. If that happens:
 
 1. Open the failed workflow run and identify whether CI, package building, the
    `pypi` environment, or OIDC trusted publishing failed.
