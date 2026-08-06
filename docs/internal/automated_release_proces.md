@@ -243,6 +243,10 @@ If automatic detection reports no eligible commits and `force` is disabled, the
 workflow stops before creating a tag. This is expected for
 changes such as a standalone `ci:` or `chore:` commit.
 
+At that point, you can either wait for a user-impacting feature or bug fix and
+start a new release, or enable **Force a patch release when auto finds no
+eligible commit** when triggering the **Release** Action.
+
 If `force` is enabled, the workflow intentionally falls back to a patch bump:
 
 ```text

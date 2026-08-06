@@ -48,6 +48,9 @@ just docs-serve
 2. Run it from the default branch, choosing `auto` to derive the major, minor, or
 	patch bump from conventional commits, or choose an explicit bump. Enable
 	`force` to create a patch release when `auto` finds no eligible commit.
+	If `auto` finds no eligible commit, you can either wait for a user-impacting
+	feature or bug fix and start a new release, or enable **Force a patch release
+	when auto finds no eligible commit** when triggering the **Release** Action.
 3. The workflow uses Commitizen to calculate the next version, prepares a local
 	`vX.Y.Z` tag on the existing default-branch commit, generates notes with the
 	`gh-release-notes` skill through `gh copilot`, writes the final Markdown to
