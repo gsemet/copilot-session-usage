@@ -13,6 +13,59 @@ Extract VS Code Copilot session cost KPIs (tokens, estimated USD, model, duratio
 
 **Full documentation:** [copilot-session-usage.readthedocs.io](https://copilot-session-usage.readthedocs.io/en/stable/)
 
+## Chronicle and copilot-session-usage
+
+GitHub Copilot provides **Chronicle** session tools for conversational access to your
+Copilot history. Chronicle and this project are complementary, but they answer different
+questions.
+
+### What Chronicle is good at
+
+Use Chronicle when you want to:
+
+- Find a past session by its title or session ID.
+- Search or summarize what happened in a session.
+- Inspect conversational history, checkpoints, referenced files, and session metadata.
+- Get a quick, conversational summary of aggregate session KPIs when cost analysis is
+  available in the current Copilot environment.
+
+### What Chronicle is not designed to provide
+
+Chronicle's session store is not a token-accounting database. Its stored session records
+contain history and metadata, but do not expose a standard set of per-request pricing
+fields. A Chronicle cost answer may therefore provide an aggregate estimate and a list of
+models without providing a reproducible split of tokens and dollars by model or subagent.
+
+### What this project adds
+
+`copilot-session-usage` reads the original VS Code Copilot debug logs and turns them into
+repeatable reports. It provides:
+
+| Need | Chronicle | `copilot-session-usage` |
+| --- | --- | --- |
+| Conversational search and summaries | ✅ | ✅ CLI reports are interpreted by your agent |
+| Session discovery by title or ID | ✅ | ✅ |
+| Aggregate tokens | ✅  | ✅ |
+| Aggregate estimated cost | ⚠️ When available; aggregate only | ✅ |
+| Tokens **per model** | ⚠️ LLM digging each time; consumes tokens | ✅ |
+| Estimated cost (`$`) **per model** | ❌ No accurate cost per breakdown | ✅ |
+| Tokens **per subagent** | ⚠️ LLM digging each time; consumes tokens | ✅ |
+| Estimated cost (`$`) **per subagent** | ❌ No accurate cost per breakdown | ✅ |
+| Cost attribution to skills | ❌ Cannot provide cost per breakdown | ✅ |
+| Tool-call counts by skill and subagent | ⚠️ LLM digging each time | ✅ |
+| Batch analysis, filtering, and aggregation | Limited/conversational | ✅ |
+| Stable JSON, table, and detailed output | No stable contract | ✅ |
+| Python API for embedding in third-party tools | ❌ | ✅ |
+| Pricing provenance and custom model rates | ⚠️ Only for aggregated costs | ✅ |
+| Git commit cost trailers | ❌ | ✅ |
+
+In the table, `⚠️` means that Chronicle may answer the question in a particular
+environment or with additional analysis, but does not guarantee a stable, reproducible
+breakdown for it.
+
+Use Chronicle for **“What did I do?”** and use this project for **“How much did it cost,
+which model or subagent consumed it, and can I export the evidence?”**
+
 ## Installation
 
 ```bash
@@ -92,7 +145,7 @@ just knowledge-validate
 |---------|-------------|
 | `analyze [PATH]` | Analyze one session by PATH, or many by `--name` regex |
 | `latest` | Analyze the most recently modified session |
-| `find TITLE` | Find and analyze a session by title (fuzzy match) |
+| `find TITLE` | Find and analyze a session by title (case-insensitive substring match) |
 | `id SESSION_ID` | Analyze a session by exact UUID |
 | `list` | List recent sessions (metadata only by default) |
 | `batch N` | Analyze the N most recent sessions in one pass |
@@ -122,7 +175,7 @@ just knowledge-validate
 | `--workspace-storage PATH` | Override workspaceStorage directory (auto-detected by default) |
 | `--agent {vscode,cli}` | Provider to use (`cli` not yet implemented) |
 | `--detail {minimal,compact,full}` | Detail level (default: `compact`) |
-| `--format {json,table,detailed}` | Output format (default: `table`) |
+| `--format {json,table,detailed}` | Output format (default: `json`) |
 | `--output PATH` | Write output to file instead of stdout |
 
 ### Examples
@@ -139,8 +192,8 @@ $ copilot-session-usage latest --detail full
 # JSON output for a specific session
 $ copilot-session-usage analyze /path/to/debug-logs --format json --output report.json
 
-# Find sessions containing "refactor" in the title
-$ copilot-session-usage find "refactor"
+# Find sessions containing "implem" in the title
+$ copilot-session-usage find "implem"
 Multiple sessions match 'implem':
   2026-07-01T21:15:12Z  'Implement copilot-session-usage spec'  (id: c890dd60-43d6-44f0-b57c-ab505dfa003b)
   2026-06-26T18:21:21Z  'Resume PRD implementation'  (id: 9368ab3e-1c93-4125-8271-d5bd024b057a)
@@ -223,6 +276,8 @@ copilot-session-usage latest \
 ## Python API
 
 ```python
+from pathlib import Path
+
 from copilot_session_usage.api import (
     analyze_session,
     analyze_latest,
