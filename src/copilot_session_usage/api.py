@@ -1,16 +1,122 @@
 """Public Python API for copilot-session-usage.
 
-All functions accept an optional ``agent`` parameter for future routing
-between VS Code and Copilot-CLI providers.
+All functions accept an optional ``agent`` parameter for provider routing.
+Supported values are ``"vscode"`` (default), ``"cli"`` (Copilot CLI /
+Copilot App local sessions), and ``"all"`` — an explicit, opt-in combined
+mode that discovers and aggregates sessions from both providers without
+duplicate identities or silent mixing. Combined mode is never the default:
+callers must ask for it explicitly.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from copilot_session_usage._internal import core, vscode
+from copilot_session_usage._internal import copilot_cli, core, vscode
 
 PricingRefreshResult = core.PricingRefreshResult
+
+_AGENTS = ("vscode", "cli", "all")
+
+
+def _check_agent(agent: str, *, allow_all: bool = True) -> None:
+    """Validate an ``agent`` value, raising ``ValueError`` for unknown providers."""
+    allowed = _AGENTS if allow_all else ("vscode", "cli")
+    if agent not in allowed:
+        msg = f"unknown agent {agent!r}; expected one of {allowed!r}"
+        raise ValueError(msg)
+
+
+def _default_roots(agent: str) -> list[Path]:
+    """Return default discovery roots for a single provider (``vscode`` or ``cli``)."""
+    if agent == "cli":
+        return copilot_cli.default_session_state_roots()
+    return vscode.default_workspace_storage_roots()
+
+
+def _resolve_auto_refresh(agent: str, auto_refresh: bool | None) -> bool:
+    """Resolve the effective ``auto_refresh`` default from ``agent``.
+
+    An explicit ``auto_refresh`` always wins. Otherwise, the ``vscode``
+    provider keeps its historical default of attempting a daily runtime
+    pricing refresh; the ``cli`` provider and the combined ``all`` mode
+    default to local-only (no network) since Copilot CLI/App analysis is
+    documented as a purely local integration.
+    """
+    if auto_refresh is not None:
+        return auto_refresh
+    return agent == "vscode"
+
+
+def _analyze_provider_session(session: dict, pricing: dict) -> dict:
+    """Analyze a session-metadata record produced by either provider's discovery."""
+    session_dir = Path(session["debug_log_dir"])
+    if session.get("provider") == "cli":
+        result = copilot_cli.analyze_cli_session(session_dir, pricing)
+    else:
+        result = core.analyze_session(session_dir, pricing)
+    result["title"] = session.get("title") or result.get("title")
+    return result
+
+
+def _list_recent(
+    agent: str,
+    roots: list[Path] | None,
+    limit: int,
+    since_ms: int | None,
+    workspace_filter: str | None,
+    require_logs: bool = False,
+) -> list[dict]:
+    """Dispatch ``list_recent_sessions`` to one or both providers and merge results."""
+    if agent == "all":
+        if roots is not None:
+            msg = (
+                "workspace_roots override is not supported with agent='all'; "
+                "call list_sessions separately per provider, or omit workspace_roots."
+            )
+            raise ValueError(msg)
+        vscode_sessions = vscode.list_recent_sessions(
+            vscode.default_workspace_storage_roots(),
+            limit=limit,
+            since_ms=since_ms,
+            workspace_filter=workspace_filter,
+            require_logs=require_logs,
+        )
+        for s in vscode_sessions:
+            s.setdefault("provider", "vscode")
+        cli_sessions = copilot_cli.list_recent_sessions(
+            copilot_cli.default_session_state_roots(),
+            limit=limit,
+            since_ms=since_ms,
+            workspace_filter=workspace_filter,
+            require_logs=require_logs,
+        )
+        merged = core.merge_provider_sessions([vscode_sessions, cli_sessions])
+        return merged[:limit]
+
+    resolved_roots = roots if roots is not None else _default_roots(agent)
+    if agent == "cli":
+        sessions = copilot_cli.list_recent_sessions(
+            resolved_roots,
+            limit=limit,
+            since_ms=since_ms,
+            workspace_filter=workspace_filter,
+            require_logs=require_logs,
+        )
+        for s in sessions:
+            s.setdefault("provider", "cli")
+        return sessions
+
+    sessions = vscode.list_recent_sessions(
+        resolved_roots,
+        limit=limit,
+        since_ms=since_ms,
+        workspace_filter=workspace_filter,
+        require_logs=require_logs,
+    )
+    for s in sessions:
+        s.setdefault("provider", "vscode")
+    return sessions
 
 
 def analyze_session(
@@ -18,27 +124,33 @@ def analyze_session(
     detail: str = "compact",
     agent: str = "vscode",
     *,
-    auto_refresh: bool = True,
+    auto_refresh: bool | None = None,
 ) -> dict:
-    """Analyze one session by its debug-log directory path.
+    """Analyze one session by its session path.
 
     Args:
-        path: Path to the session's debug-log directory.
+        path: Path to the session's log directory (VS Code debug-log
+            directory, or a Copilot CLI/App session directory or exported
+            ``events.jsonl``).
         detail: ``minimal``, ``compact`` (default), or ``full``.
-        agent: Provider to use (``vscode`` or ``cli``).
+        agent: Provider to use, ``vscode`` (default) or ``cli``. ``all`` is
+            not applicable here since a path is inherently provider-specific.
         auto_refresh: Attempt the daily runtime pricing refresh before loading
-            pricing. Set to false for offline or tightly controlled callers.
+            pricing. Defaults to True for ``vscode`` (historical behavior)
+            and False (local-only) for ``cli``, unless explicitly set.
 
     Returns:
         Session analysis dict shaped to the requested detail level.
 
     Raises:
-        NotImplementedError: If ``agent`` is ``"cli"``.
+        ValueError: If ``agent`` is ``"all"`` or otherwise unrecognized.
     """
+    _check_agent(agent, allow_all=False)
+    pricing = core.load_pricing(auto_refresh=_resolve_auto_refresh(agent, auto_refresh))
     if agent == "cli":
-        raise NotImplementedError("Copilot-CLI support is not yet implemented.")
-    pricing = core.load_pricing(auto_refresh=auto_refresh)
-    result = core.analyze_session(Path(path), pricing)
+        result = copilot_cli.analyze_cli_session(Path(path), pricing)
+    else:
+        result = core.analyze_session(Path(path), pricing)
     return core.shape_session(result, detail)
 
 
@@ -51,34 +163,27 @@ def list_sessions(
     workspace_filter: str | None = None,
     agent: str = "vscode",
 ) -> list[dict]:
-    """List recent sessions (metadata only, no JSONL reads).
+    """List recent sessions (metadata only, no event-log reads).
 
     Args:
-        workspace_roots: Override workspaceStorage directories.
-            Auto-detected if None.
+        workspace_roots: Override discovery roots (workspaceStorage
+            directories for ``vscode``, session-state directories for
+            ``cli``). Auto-detected if None. Not supported with
+            ``agent="all"`` — omit it or call per provider instead.
         limit: Maximum sessions to return.
         since: Only sessions created after this date (ISO 8601 with timezone).
         until: Only sessions created before this date (ISO 8601 with timezone).
         name_pattern: Only sessions whose title or ID matches this regex.
         workspace_filter: Only sessions from this workspace folder.
-        agent: Provider to use (``vscode`` or ``cli``).
+        agent: Provider to use: ``vscode`` (default), ``cli``, or the
+            explicit opt-in combined mode ``all``.
 
     Returns:
         List of session metadata dicts, most-recent first.
     """
-    if agent == "cli":
-        raise NotImplementedError("Copilot-CLI support is not yet implemented.")
-
-    if workspace_roots is None:
-        workspace_roots = vscode.default_workspace_storage_roots()
-
+    _check_agent(agent)
     since_ms = core.parse_since_to_ms(since) if since else None
-    sessions = vscode.list_recent_sessions(
-        workspace_roots,
-        limit=limit,
-        since_ms=since_ms,
-        workspace_filter=workspace_filter,
-    )
+    sessions = _list_recent(agent, workspace_roots, limit, since_ms, workspace_filter)
     if until:
         until_ms = core.parse_since_to_ms(until)
         if until_ms is not None:
@@ -97,19 +202,38 @@ def find_sessions_by_title(
 
     Args:
         title: Substring to search for (case-insensitive).
-        workspace_roots: Override workspaceStorage directories.
-        agent: Provider to use (``vscode`` or ``cli``).
+        workspace_roots: Override discovery roots. Not supported with
+            ``agent="all"``.
+        agent: Provider to use: ``vscode`` (default), ``cli``, or ``all``.
 
     Returns:
         Matching session metadata dicts, most-recent first.
     """
+    _check_agent(agent)
+    if agent == "all":
+        if workspace_roots is not None:
+            msg = "workspace_roots override is not supported with agent='all'."
+            raise ValueError(msg)
+        vscode_matches = vscode.find_sessions_by_title(
+            title, vscode.default_workspace_storage_roots()
+        )
+        for s in vscode_matches:
+            s.setdefault("provider", "vscode")
+        cli_matches = copilot_cli.find_sessions_by_title(
+            title, copilot_cli.default_session_state_roots()
+        )
+        return core.merge_provider_sessions([vscode_matches, cli_matches])
+
+    roots = workspace_roots if workspace_roots is not None else _default_roots(agent)
     if agent == "cli":
-        raise NotImplementedError("Copilot-CLI support is not yet implemented.")
-
-    if workspace_roots is None:
-        workspace_roots = vscode.default_workspace_storage_roots()
-
-    return vscode.find_sessions_by_title(title, workspace_roots)
+        matches = copilot_cli.find_sessions_by_title(title, roots)
+        for s in matches:
+            s.setdefault("provider", "cli")
+        return matches
+    matches = vscode.find_sessions_by_title(title, roots)
+    for s in matches:
+        s.setdefault("provider", "vscode")
+    return matches
 
 
 def find_session_by_id(
@@ -117,32 +241,56 @@ def find_session_by_id(
     workspace_roots: list[Path] | None = None,
     agent: str = "vscode",
     *,
-    auto_refresh: bool = True,
+    auto_refresh: bool | None = None,
 ) -> dict | None:
     """Analyze a session by its exact UUID.
 
     Args:
         session_id: The session UUID.
-        workspace_roots: Override workspaceStorage directories.
-        agent: Provider to use (``vscode`` or ``cli``).
+        workspace_roots: Override discovery roots. Not supported with
+            ``agent="all"``.
+        agent: Provider to use: ``vscode`` (default), ``cli``, or ``all``
+            (searches ``vscode`` first, then ``cli``).
         auto_refresh: Attempt the daily runtime pricing refresh before loading
-            pricing. Set to false for offline or tightly controlled callers.
+            pricing. Defaults to True for ``vscode`` (historical behavior)
+            and             False (local-only) for ``cli``/``all``, unless explicitly set.
 
     Returns:
         Session analysis dict, or None if not found.
     """
+    _check_agent(agent)
+    pricing = core.load_pricing(auto_refresh=_resolve_auto_refresh(agent, auto_refresh))
+
+    if agent == "all":
+        if workspace_roots is not None:
+            msg = "workspace_roots override is not supported with agent='all'."
+            raise ValueError(msg)
+        vscode_roots = vscode.default_workspace_storage_roots()
+        session_dir = vscode.find_session_dir_by_id(session_id, vscode_roots)
+        if session_dir is not None:
+            result = core.analyze_session(session_dir, pricing)
+            meta = vscode.find_session_metadata_by_id(session_id, vscode_roots)
+            result["title"] = meta.get("title") if meta else result.get("title")
+            return result
+        cli_dir = copilot_cli.find_session_dir_by_id(
+            session_id, copilot_cli.default_session_state_roots()
+        )
+        if cli_dir is None:
+            return None
+        return copilot_cli.analyze_cli_session(cli_dir, pricing)
+
+    roots = workspace_roots if workspace_roots is not None else _default_roots(agent)
     if agent == "cli":
-        raise NotImplementedError("Copilot-CLI support is not yet implemented.")
+        session_dir = copilot_cli.find_session_dir_by_id(session_id, roots)
+        if session_dir is None:
+            return None
+        return copilot_cli.analyze_cli_session(session_dir, pricing)
 
-    if workspace_roots is None:
-        workspace_roots = vscode.default_workspace_storage_roots()
-
-    session_dir = vscode.find_session_dir_by_id(session_id, workspace_roots)
+    session_dir = vscode.find_session_dir_by_id(session_id, roots)
     if session_dir is None:
         return None
-    pricing = core.load_pricing(auto_refresh=auto_refresh)
     result = core.analyze_session(session_dir, pricing)
-    meta = vscode.find_session_metadata_by_id(session_id, workspace_roots)
+    meta = vscode.find_session_metadata_by_id(session_id, roots)
     result["title"] = meta.get("title") if meta else result.get("title")
     return result
 
@@ -153,37 +301,65 @@ def analyze_latest(
     workspace_filter: str | None = None,
     agent: str = "vscode",
     *,
-    auto_refresh: bool = True,
+    auto_refresh: bool | None = None,
 ) -> dict:
     """Analyze the most recently modified session.
 
     Args:
-        workspace_roots: Override workspaceStorage directories.
+        workspace_roots: Override discovery roots. Not supported with
+            ``agent="all"``.
         detail: ``minimal``, ``compact`` (default), or ``full``.
         workspace_filter: Only sessions from this workspace folder.
-        agent: Provider to use (``vscode`` or ``cli``).
+        agent: Provider to use: ``vscode`` (default), ``cli``, or ``all``
+            (picks whichever provider's latest session is most recent).
         auto_refresh: Attempt the daily runtime pricing refresh before loading
-            pricing. Set to false for offline or tightly controlled callers.
+            pricing. Defaults to True for ``vscode`` (historical behavior)
+            and False (local-only) for ``cli``/``all``, unless explicitly set.
 
     Returns:
         Session analysis dict shaped to the requested detail level.
 
     Raises:
-        ValueError: If no sessions are found.
+        ValueError: If no sessions are found, or an unsupported combination
+            of ``agent``/``workspace_roots`` is requested.
     """
+    _check_agent(agent)
+    pricing = core.load_pricing(auto_refresh=_resolve_auto_refresh(agent, auto_refresh))
+
+    if agent == "all":
+        if workspace_roots is not None:
+            msg = "workspace_roots override is not supported with agent='all'."
+            raise ValueError(msg)
+        vscode_roots = vscode.default_workspace_storage_roots()
+        cli_roots = copilot_cli.default_session_state_roots()
+        vscode_dir = vscode.find_latest_session_dir(vscode_roots, workspace_filter=workspace_filter)
+        cli_dir = copilot_cli.find_latest_session_dir(cli_roots, workspace_filter=workspace_filter)
+        vscode_mtime = vscode_dir.stat().st_mtime if vscode_dir else -1.0
+        cli_mtime = (cli_dir / copilot_cli.EVENTS_FILENAME).stat().st_mtime if cli_dir else -1.0
+        if vscode_dir is None and cli_dir is None:
+            raise ValueError("No session logs found for either provider.")
+        if cli_mtime > vscode_mtime:
+            result = copilot_cli.analyze_cli_session(cli_dir, pricing)  # type: ignore[arg-type]
+        else:
+            result = core.analyze_session(vscode_dir, pricing)  # type: ignore[arg-type]
+            meta = vscode.find_session_metadata_by_id(vscode_dir.name, vscode_roots)  # type: ignore[union-attr]
+            result["title"] = meta.get("title") if meta else result.get("title")
+        return core.shape_session(result, detail)
+
+    roots = workspace_roots if workspace_roots is not None else _default_roots(agent)
     if agent == "cli":
-        raise NotImplementedError("Copilot-CLI support is not yet implemented.")
+        session_dir = copilot_cli.find_latest_session_dir(roots, workspace_filter=workspace_filter)
+        if session_dir is None:
+            raise ValueError("No Copilot CLI/App sessions found in session-state root(s).")
+        result = copilot_cli.analyze_cli_session(session_dir, pricing)
+        return core.shape_session(result, detail)
 
-    if workspace_roots is None:
-        workspace_roots = vscode.default_workspace_storage_roots()
-
-    session_dir = vscode.find_latest_session_dir(workspace_roots, workspace_filter=workspace_filter)
+    session_dir = vscode.find_latest_session_dir(roots, workspace_filter=workspace_filter)
     if session_dir is None:
         raise ValueError("No session debug logs found in workspace storage.")
-    pricing = core.load_pricing(auto_refresh=auto_refresh)
     result = core.analyze_session(session_dir, pricing)
     session_id = session_dir.name
-    meta = vscode.find_session_metadata_by_id(session_id, workspace_roots)
+    meta = vscode.find_session_metadata_by_id(session_id, roots)
     result["title"] = meta.get("title") if meta else result.get("title")
     return core.shape_session(result, detail)
 
@@ -196,46 +372,38 @@ def batch_analyze(
     workspace_filter: str | None = None,
     agent: str = "vscode",
     *,
-    auto_refresh: bool = True,
+    auto_refresh: bool | None = None,
 ) -> dict:
     """Analyze the N most recent sessions.
 
     Args:
         n: Number of sessions to analyze.
-        workspace_roots: Override workspaceStorage directories.
+        workspace_roots: Override discovery roots. Not supported with
+            ``agent="all"``.
         detail: ``minimal``, ``compact`` (default), or ``full``.
         since: Only sessions created after this date.
         workspace_filter: Only sessions from this workspace folder.
-        agent: Provider to use (``vscode`` or ``cli``).
+        agent: Provider to use: ``vscode`` (default), ``cli``, or the
+            explicit opt-in combined mode ``all``.
         auto_refresh: Attempt the daily runtime pricing refresh before loading
-            pricing. Set to false for offline or tightly controlled callers.
+            pricing. Defaults to True for ``vscode`` (historical behavior)
+            and False (local-only) for ``cli``/``all``, unless explicitly set.
 
     Returns:
         Dict with ``summary`` (aggregate) and ``sessions`` (per-session list).
     """
-    if agent == "cli":
-        raise NotImplementedError("Copilot-CLI support is not yet implemented.")
-
-    if workspace_roots is None:
-        workspace_roots = vscode.default_workspace_storage_roots()
-
+    _check_agent(agent)
     since_ms = core.parse_since_to_ms(since) if since else None
-    sessions = vscode.list_recent_sessions(
-        workspace_roots,
-        limit=n,
-        since_ms=since_ms,
-        workspace_filter=workspace_filter,
-        require_logs=True,
+    sessions = _list_recent(
+        agent, workspace_roots, n, since_ms, workspace_filter, require_logs=True
     )
-    pricing = core.load_pricing(auto_refresh=auto_refresh)
+    pricing = core.load_pricing(auto_refresh=_resolve_auto_refresh(agent, auto_refresh))
     results: list[dict] = []
     for session in sessions:
         session_dir = Path(session["debug_log_dir"])
         if not session_dir.exists():
             continue
-        result = core.analyze_session(session_dir, pricing)
-        result["title"] = session.get("title") or result.get("title")
-        results.append(result)
+        results.append(_analyze_provider_session(session, pricing))
     return core.shape_batch(results, detail)
 
 
@@ -244,6 +412,9 @@ def aggregate_sessions(results: list[dict]) -> dict:
 
     Args:
         results: Full session analysis dicts (e.g. from ``analyze_session``).
+            Providers may be mixed here since aggregation is purely numeric
+            and the caller has already made an explicit choice to combine
+            them (e.g. via ``agent="all"``).
 
     Returns:
         Dict with session count, totals, average cache ratio, model split,

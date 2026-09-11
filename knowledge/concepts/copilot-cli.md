@@ -1,51 +1,51 @@
 ---
 type: Concept
-title: Copilot CLI Differences
-description: How session cost tracking differs when using copilot-cli instead of
-  the VS Code extension.
+title: Copilot CLI and App Differences
+description: How session cost tracking differs when using Copilot CLI or the
+  Copilot App instead of the VS Code extension.
 tags: [copilot-cli, cli, differences, limitations]
-timestamp: 2026-06-30T22:00:00Z
+timestamp: 2026-09-11T00:00:00Z
 links: [concepts/overview.md, reference/debug-log-format.md,
     structures/vscode-copilot-extension.md]
 backlinks: [structures/vscode-copilot-extension.md]
 ---
 
-# Copilot CLI Differences
+# Copilot CLI and App Differences
 
-## Known Unknowns
+The Copilot CLI and Copilot App share a local session format that differs from
+the VS Code extension's workspace debug logs. On macOS, sessions are stored
+under `~/.copilot/session-state/<session-uuid>/events.jsonl`; the root can be
+overridden with `--session-root`. A session directory may also contain a
+`workspace.yaml` sidecar with metadata such as title, working directory,
+branch, and timestamps.
 
-This knowledge base was built from the VS Code Copilot extension. The `copilot-cli` tool MAY differ in the following ways — agents should verify each point when working with CLI sessions:
+| Aspect | VS Code Extension | Copilot CLI/App |
+|--------|------------------|-----------------|
+| Log location | `~/Library/Application Support/Code/User/workspaceStorage/...` | `~/.copilot/session-state/<session-uuid>/events.jsonl` |
+| File format | JSONL with `llm_request` events | Structured JSONL event stream |
+| Subagent logs | Separate JSONL files | Subagent events in the session stream |
+| Session ID format | UUID directory | UUID directory and session events |
+| Debug panel | Built into VS Code | No equivalent cost panel |
+| Final shared totals | Per-request evidence | Final `session.shutdown` cumulative usage |
 
-## Potential Differences
+The provider uses the final `session.shutdown` event for shared token and
+estimated-cost totals. Active or interrupted sessions can expose only
+provider-native checkpoint counters, so shared totals remain unavailable
+instead of being represented as zero. Copilot-native counters such as
+`totalNanoAiu` and premium-request counts are preserved separately.
 
-| Aspect | VS Code Extension | Copilot CLI (To Verify) |
-|--------|------------------|------------------------|
-| Log location | `~/Library/Application Support/Code/User/workspaceStorage/...` | Unknown — possibly `~/.copilot/logs/` or similar |
-| File format | JSONL with `llm_request` events | Unknown — may use different event types or structured logging |
-| Subagent logs | Separate `.jsonl` per subagent | Unknown — may log to single file or different naming |
-| Session ID format | UUID | Unknown — may use different identifier |
-| Debug panel | Built into VS Code | No GUI — may require manual log parsing |
-| Real-time metrics | Available in panel | Unknown — may only be available post-hoc |
+Per-skill cost and validated per-subagent cost attribution require per-request
+token evidence. CLI/App logs may provide skill detection, tool-call
+attribution, and raw subagent counters without enough evidence to populate
+those shared cost breakdowns.
 
-## What Agents Should Do
-
-When asked to extract costs from a Copilot CLI session:
-
-1. **Search for log directories** in common locations:
-   - `~/.copilot/`
-   - `~/.config/copilot/`
-   - `~/.local/share/copilot/`
-   - The current working directory
-
-2. **Look for JSONL or structured log files** with timestamps and token counts
-
-3. **If no logs are found**, ask the user for:
-   - The CLI version (`copilot --version`)
-   - Any `--verbose` or `--debug` flags used
-   - Output from the session (stdout/stderr may contain metrics)
+Use `--agent cli` for CLI/App discovery, or `--agent all` for explicit
+combined discovery. Missing provider roots are ignored in combined mode.
+Exported or relocated `events.jsonl` files can be analyzed directly when they
+contain recognizable events and a canonical UUID.
 
 ## Related
 
 - [VS Code Copilot Extension](../structures/vscode-copilot-extension.md) — The reference implementation
-- [Overview](./overview.md) — General principles that likely apply to both
-- [Debug Log Format](../reference/debug-log-format.md) — Event structure reference
+- [Overview](./overview.md) — General principles that apply to both providers
+- [Debug Log Format](../reference/debug-log-format.md) — VS Code event structure reference

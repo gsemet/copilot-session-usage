@@ -1,12 +1,13 @@
 ## Title
 
-I built `copilot-session-usage`: inspect the token usage and estimated cost of VS Code Copilot sessions
+I built `copilot-session-usage`: inspect the token usage and estimated cost of VS Code, Copilot CLI, and Copilot App sessions
 
 ## Post
 
-I’ve released [`copilot-session-usage`](https://github.com/gsemet/copilot-session-usage), an open-source Python CLI for analyzing VS Code Copilot sessions.
+I’ve released [`copilot-session-usage`](https://github.com/gsemet/copilot-session-usage), an open-source Python CLI for analyzing VS Code Copilot, Copilot CLI, and Copilot App sessions.
 
-VS Code’s UI does not provide a detailed per-session cost report. This tool reads the local Copilot debug logs and reports:
+VS Code and Copilot CLI/App do not provide a detailed per-session cost report.
+This tool reads local Copilot logs and reports:
 
 - Input, output, and cached token counts
 - Models used during a session
@@ -17,13 +18,18 @@ VS Code’s UI does not provide a detailed per-session cost report. This tool re
 - JSON output for scripts and a Python API for integration
 - Optional Git commit trailers containing session usage
 
-It supports multi-model sessions, cache-aware pricing, long-context pricing tiers, macOS, Linux, Windows, and WSL2. For Copilot-plan models, it uses the usage value recorded by VS Code when available. For externally billed Azure-hosted models, it falls back to token-based pricing, so reports should be treated as estimates.
+It supports multi-model sessions, cache-aware pricing, long-context pricing tiers,
+macOS, Linux, Windows, and WSL2. The VS Code provider reads workspace debug
+logs; the Copilot CLI/App provider reads local `events.jsonl` session logs.
+For Copilot-plan models, it uses the usage value recorded by VS Code when
+available. For externally billed Azure-hosted models, it falls back to
+token-based pricing, so reports should be treated as estimates.
 
 
 ## What this project adds
 
-`copilot-session-usage` reads the original VS Code Copilot debug logs and turns them into
-repeatable reports. It provides:
+`copilot-session-usage` reads the original VS Code Copilot debug logs and local
+Copilot CLI/App event logs and turns them into repeatable reports. It provides:
 
 | Need | Chronicle | `copilot-session-usage` |
 | --- | --- | --- |
@@ -42,6 +48,11 @@ repeatable reports. It provides:
 | Python API for embedding in third-party tools | ❌ | ✅ |
 | Pricing provenance and custom model rates | ⚠️ Only for aggregated costs | ✅ |
 | Git commit cost trailers | ❌ | ✅ |
+
+For CLI/App sessions, provider-native counters are preserved separately from
+shared token-based cost totals. Per-skill cost and validated per-subagent cost
+breakdowns are available only when the source log contains the required
+per-request evidence.
 
 ## Example
 

@@ -295,6 +295,36 @@ def test_render_table_single_minimal():
     assert "active: 30s" in text
 
 
+def test_render_table_single_unavailable_evidence_shows_na():
+    """A session with unavailable evidence (CLI checkpoint-only) shows n/a, not 0."""
+    data = {
+        "session_id": "abc",
+        "provider": "cli",
+        "title": "Test",
+        "started_at": "2026-07-01T12:00:00Z",
+        "duration_seconds": None,
+        "active_duration_seconds": None,
+        "models": ["gpt-4o"],
+        "total": {
+            "input_tokens": None,
+            "output_tokens": None,
+            "cached_tokens": None,
+            "llm_calls": None,
+            "estimated_usd": None,
+            "cache_ratio": None,
+        },
+        "fallback_pricing_models": [],
+        "model_breakdown": [],
+        "subagents": [],
+    }
+    text = core.render_table_single(data)
+    assert "Input:     n/a" in text
+    assert "Output:    n/a" in text
+    assert "Cached:    n/a (n/a)" in text
+    assert "LLM calls: n/a" in text
+    assert "Est. cost: n/a" in text
+
+
 def test_render_table_single_no_active_duration():
     data = {
         "session_id": "abc",
@@ -366,6 +396,46 @@ def test_render_table_single_with_breakdown():
     assert "Per-Model Breakdown:" in text
     assert "Subagents:" in text
     assert "gpt-4o" in text
+
+
+def test_render_table_single_partial_model_breakdown_shows_na_without_crash():
+    """A model_breakdown row with None fields renders without crashing.
+
+    never crashes the ':,'/'.2f' formatting; unavailable fields render as "n/a".
+    """
+    data = {
+        "session_id": "abc",
+        "provider": "cli",
+        "title": "Test",
+        "started_at": "2026-07-01T12:00:00Z",
+        "duration_seconds": 60,
+        "active_duration_seconds": 60,
+        "models": ["gpt-partial"],
+        "total": {
+            "input_tokens": None,
+            "output_tokens": None,
+            "cached_tokens": None,
+            "llm_calls": 2,
+            "estimated_usd": None,
+            "cache_ratio": None,
+        },
+        "fallback_pricing_models": [],
+        "model_breakdown": [
+            {
+                "model": "gpt-partial",
+                "input_tokens": None,
+                "output_tokens": None,
+                "cached_tokens": None,
+                "llm_calls": 2,
+                "estimated_usd": None,
+            }
+        ],
+        "subagents": [],
+    }
+    text = core.render_table_single(data)
+    assert "Per-Model Breakdown:" in text
+    assert "gpt-partial" in text
+    assert "n/a" in text
 
 
 # ─── render_table_list ────────────────────────────────────────────────────────
@@ -630,6 +700,56 @@ def test_render_summary():
     assert "Model split:" in text
 
 
+def test_render_summary_unavailable_evidence_shows_na():
+    summary = {
+        "session_id": "s1",
+        "title": "Test",
+        "cache_ratio": None,
+        "total_tokens": None,
+        "total_input_tokens": None,
+        "total_output_tokens": None,
+        "total_cached_tokens": None,
+        "llm_calls": None,
+        "estimated_usd": None,
+        "cost_per_1m_tokens": None,
+        "model_split": [],
+    }
+    text = core.render(summary, "table")
+    assert "Cache ratio: n/a" in text
+    assert "Total tokens: n/a" in text
+    assert "Est. cost: n/a" in text
+    assert "Cost per 1M tokens: n/a" in text
+
+
+def test_render_summary_partial_model_split_shows_na_without_crash():
+    """A model_split row with partial evidence (None fields) never crashes rendering."""
+    summary = {
+        "session_id": "s1",
+        "title": "Test",
+        "cache_ratio": None,
+        "total_tokens": None,
+        "total_input_tokens": None,
+        "total_output_tokens": None,
+        "total_cached_tokens": None,
+        "llm_calls": 2,
+        "estimated_usd": None,
+        "cost_per_1m_tokens": None,
+        "model_split": [
+            {
+                "model": "gpt-partial",
+                "input_tokens": None,
+                "split_ratio": 0.0,
+                "estimated_usd": None,
+                "cost_per_1m_input_tokens": 0.0,
+            }
+        ],
+    }
+    text = core.render(summary, "table")
+    assert "Model split:" in text
+    assert "gpt-partial" in text
+    assert "n/a" in text
+
+
 def test_render_aggregate():
     aggregate = {
         "session_count": 2,
@@ -695,6 +815,43 @@ def test_render_costed_list():
 
 def test_render_costed_list_empty():
     assert core.render([], "table", costed_list=True) == "(no sessions found)"
+
+
+def test_render_costed_list_unavailable_session_shows_na_row():
+    """A session with unavailable evidence shows n/a in its row, not a crash."""
+    items = [
+        {
+            "session_id": "s1",
+            "title": "Available",
+            "started_at": "2026-07-01T12:00:00Z",
+            "models": ["gpt-4o"],
+            "total": {
+                "input_tokens": 1_000,
+                "output_tokens": 100,
+                "cached_tokens": 50,
+                "estimated_usd": 0.1,
+            },
+        },
+        {
+            "session_id": "s2",
+            "title": "Unavailable",
+            "started_at": "2026-07-02T12:00:00Z",
+            "models": ["gpt-4o"],
+            "total": {
+                "input_tokens": None,
+                "output_tokens": None,
+                "cached_tokens": None,
+                "estimated_usd": None,
+            },
+        },
+    ]
+    text = core.render(items, "table", costed_list=True)
+    assert "Available" in text
+    lines = text.splitlines()
+    unavailable_line = next(line for line in lines if "Unavailable" in line)
+    assert "n/a" in unavailable_line
+    total_line = next(line for line in lines if line.startswith("TOTAL"))
+    assert "1,150" in total_line  # only the available session's tokens counted (1000+100+50)
 
 
 def test_emit_costed_list_to_file(tmp_path):

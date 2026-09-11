@@ -1,19 +1,24 @@
 ---
 name: copilot-session-usage
-description: 'Extract VS Code Copilot session cost KPIs (tokens, estimated USD, model, duration, subagent attribution) from local debug logs. Supports per-model pricing with cache-hit discounts, threshold-aware tier switching, and multi-model session analysis.'
+description: 'Extract VS Code Copilot, Copilot CLI, and Copilot App session cost KPIs (tokens, estimated USD, model, duration, subagent attribution) from local logs. Supports per-model pricing with cache-hit discounts, threshold-aware tier switching, and multi-model session analysis.'
 ---
 
 # copilot-session-usage
 
-Extract VS Code Copilot session cost KPIs from local debug logs.
-If you do not have information about which session to use, use `VSCODE_TARGET_SESSION_LOG`
-to find the current session ID.
+Extract VS Code Copilot, Copilot CLI, or Copilot App session cost KPIs from
+local logs. VS Code sessions use debug logs; CLI/App sessions use structured
+`events.jsonl` files under the Copilot session-state root.
+
+If you are analyzing a VS Code session and do not have information about which
+session to use, use `VSCODE_TARGET_SESSION_LOG` to find the current session ID.
 
 `VSCODE_TARGET_SESSION_LOG` is provided by VS Code Copilot as a **context/template variable**,
 not as an environment variable. Extract the session UUID from the last path component and
 pass it to the CLI with `--session-id`.
 
 Beware of `latest` session ID when several sessions are running in parallel.
+The default provider is `vscode`; select Copilot CLI/App sessions explicitly
+with `--agent cli`.
 
 ## When to use
 
@@ -21,6 +26,7 @@ Beware of `latest` session ID when several sessions are running in parallel.
 - You want to compare costs across sessions, models, or time periods
 - You need to attribute costs to subagents (e.g. `runSubagent` calls)
 - You want batch analysis of multiple sessions
+- You need a compact total/per-model/per-session report for a date span
 
 ## Installation
 
@@ -41,6 +47,12 @@ copilot-session-usage analyze /path/to/session/debug-logs --format table
 
 # Or analyze by exact session ID (use VSCODE_TARGET_SESSION_LOG)
 copilot-session-usage id <session-id> --format table
+
+# Analyze the latest Copilot CLI/App session
+copilot-session-usage --agent cli latest --format table
+
+# Analyze an exported or relocated Copilot CLI/App event log
+copilot-session-usage --agent cli analyze /path/to/events.jsonl --format table
 ```
 
 ### Aggregate across matching sessions
@@ -58,11 +70,36 @@ copilot-session-usage analyze \
   --format table
 ```
 
+### Date-span breakdown
+
+For requests such as "today", "yesterday", or "last week", resolve the period
+to ISO 8601 bounds in the user's local timezone and make one compact call:
+
+```bash
+copilot-session-usage --agent all span \
+  --since 2026-09-11T00:00:00+02:00 \
+  --until 2026-09-11T20:19:00+02:00 \
+  --format json
+```
+
+Use `--last 7d` for a rolling window. The span report contains only period
+metadata, cross-session totals, per-model totals, and minimal per-session rows;
+it is the preferred path for token-efficient multi-session analysis. Missing
+provider roots in `--agent all` mode are ignored, and unavailable evidence is
+reported as `null` rather than fabricated as zero.
+
+Use the [date-span analysis reference](references/span-analysis-template.md)
+for the JSON contract and the response template. Do not call `list` and then
+analyze sessions one by one for this use case.
+
 ### Directory-level listing with costs
 
 ```bash
 # When you already know the debug-logs folder, skip workspace discovery
 copilot-session-usage list --dir /path/to/debug-logs --format table
+
+# Use an alternate Copilot CLI/App session root
+copilot-session-usage --agent cli --session-root /path/to/session-state list
 ```
 
 ### Extract a single field
@@ -103,6 +140,12 @@ copilot-session-usage list --dir /path/to/debug-logs --format table
 # Batch analyze the last 10 sessions
 copilot-session-usage batch 10
 
+# Compact total/model/session report for a date span
+copilot-session-usage --agent all span \
+  --since 2026-07-01T00:00:00Z \
+  --until 2026-07-08T00:00:00Z \
+  --format json
+
 # Full detail JSON output
 copilot-session-usage latest --detail full --format json
 
@@ -113,6 +156,31 @@ copilot-session-usage amend-commit --session-id <session-id>
 # Preview trailers without amending
 copilot-session-usage amend-commit --session-id <session-id> --dry-run
 ```
+
+### Copilot CLI/App provider
+
+Copilot CLI and the Copilot App persist sessions below
+`~/.copilot/session-state/` on macOS. Use `--agent cli` for this provider;
+`--session-root PATH` overrides the discovery root:
+
+```bash
+# List recent CLI/App sessions
+copilot-session-usage --agent cli list --format table
+
+# Analyze a specific CLI/App session by UUID
+copilot-session-usage --agent cli id <session-id> --format table
+
+# Analyze all available providers explicitly
+copilot-session-usage --agent all list --format table
+```
+
+The CLI/App provider uses the final `session.shutdown` event for shared token
+and estimated-cost totals. Active or interrupted sessions can expose only
+provider-native checkpoint counters; shared totals are then reported as
+unavailable rather than zero. Per-skill cost and validated per-subagent cost
+breakdowns are unavailable when the event log contains only cumulative session
+totals, although detected skills, tool calls, and raw provider evidence remain
+available.
 
 ## Skill-Aware Analysis
 
@@ -171,7 +239,7 @@ copilot-session-usage analyze --title "feature" --aggregate --skill-breakdown --
 - **Multi-model sessions** correctly handled
 - **Threshold-aware pricing** for long-context tiers
 - **Subagent cost attribution**
-- **Skill-aware cost attribution** — detect and attribute costs to skills used during session
+- **Provider-aware skill attribution** — detect skills and attribute costs/tool calls where the source evidence supports it
 - **Cross-platform** (macOS, Linux, Windows, WSL2)
 - **Three detail levels**: minimal, compact, full
 - **JSON, table and detailed output**
@@ -180,6 +248,7 @@ copilot-session-usage analyze --title "feature" --aggregate --skill-breakdown --
 - **Date-range filtering** (`--since`, `--until`, ISO 8601 with timezone)
 - **Relative date filtering** (`--last "7d"`, `--last "24h"`, `--last "30m"`)
 - **Aggregation** across many sessions in one command (`--aggregate`)
+- **Compact date-span reports** with total, per-model, and per-session sections (`span`)
 - **Efficiency summaries** with cache ratio, model split, and cost per 1M tokens (`--summary`)
 - **Skill-breakdown analysis** — per-skill cost breakdown with `--skill-breakdown`
 - **Tool-call tracking** — per-skill/per-subagent tool invocation counts with `--tool-breakdown`
@@ -243,8 +312,9 @@ Pricing data is bundled withing the copilot-session-usage package in `src/copilo
 
 | Provider | Status | Notes |
 |----------|--------|-------|
-| VS Code  | ✅ Supported | Auto-detects workspaceStorage |
-| CLI      | 🚧 Planned | Not yet implemented |
+| VS Code  | ✅ Supported | Auto-detects platform-specific `workspaceStorage` roots |
+| CLI/App  | ✅ Supported | Auto-detects `~/.copilot/session-state/` and accepts explicit session paths |
+| Both    | ✅ Supported | Explicit opt-in combined discovery and aggregation mode |
 
 ## Output Formats
 

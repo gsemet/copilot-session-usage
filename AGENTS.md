@@ -1,7 +1,7 @@
 # AGENTS.md — copilot-session-usage
 
 `copilot-session-usage` is a PyPI-installable Python package that extracts usage and
-cost analytics from local VS Code Copilot and Copilot CLI session logs.
+cost analytics from local VS Code Copilot, Copilot CLI, and Copilot App session logs.
 
 Read [`CONSTITUTION.md`](CONSTITUTION.md) before changing code, tests, packaging,
 release automation, or knowledge. It contains the durable project rules. This file
@@ -37,7 +37,7 @@ src/copilot_session_usage/
 ├── cli.py                    Click CLI entry point
 ├── _internal/core.py         Session parsing, cost analysis, and shaping
 ├── _internal/vscode.py       VS Code workspace discovery
-├── _internal/copilot_cli.py  Future Copilot CLI provider stub
+├── _internal/copilot_cli.py  Copilot CLI/App discovery and event parsing
 └── data/                     Bundled model and pricing data
 tests/                        Pytest suite
 scripts/                      Maintenance scripts, including pricing refresh

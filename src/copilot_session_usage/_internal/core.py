@@ -1525,6 +1525,8 @@ def analyze_session(session_dir: Path, pricing: dict) -> dict:
     return {
         "session_id": session_id,
         "session_dir": str(session_dir),
+        "provider": "vscode",
+        "source": str(session_dir),
         "title": None,
         "started_at": ts_to_iso(global_first_ts),
         "ended_at": ts_to_iso(global_last_ts),
@@ -1575,6 +1577,7 @@ def shape_session(data: dict, detail: str) -> dict:
 
     shaped = {
         "session_id": data.get("session_id"),
+        "provider": data.get("provider", "vscode"),
         "title": data.get("title"),
         "started_at": data.get("started_at"),
         "ended_at": data.get("ended_at"),
@@ -1589,6 +1592,8 @@ def shape_session(data: dict, detail: str) -> dict:
     shaped["fallback_pricing_models"] = data.get("fallback_pricing_models", [])
     shaped["pricing_note"] = data.get("pricing_note")
     shaped["skills"] = data.get("skills", {})
+    if data.get("diagnostics"):
+        shaped["diagnostics"] = data["diagnostics"]
     return shaped
 
 
@@ -1689,12 +1694,26 @@ def aggregate_skills(results: list[dict]) -> dict:
     return {"session_count": len(results), "skills": skills}
 
 
+def _measured(value: Any) -> Any:
+    """Return ``value`` unless it's ``None`` (unavailable evidence), else 0.
+
+    Used when summing per-session metrics into a cross-session total: a
+    session with unavailable evidence (e.g. a CLI session with no
+    ``session.shutdown``) contributes nothing to the sum, the same as if it
+    were excluded, rather than being silently treated as a measured zero.
+    """
+    return value if value is not None else 0
+
+
 def shape_batch(results: list[dict], detail: str) -> dict:
     """Aggregate multiple full session reports into {summary, sessions}.
 
     ``summary`` is always a pre-computed aggregate across every session so
     callers never need to iterate and sum themselves. ``sessions`` is the
-    per-session array, each shaped by ``detail``.
+    per-session array, each shaped by ``detail``. Sessions with unavailable
+    evidence (``total`` fields are ``None``) contribute nothing to the sums
+    and are excluded from ``avg_cache_ratio``; ``sessions_with_unavailable_cost``
+    reports how many were excluded from ``total_estimated_usd``.
     """
     total_input = total_output = total_cached = total_calls = 0
     total_usd = 0.0
@@ -1702,17 +1721,22 @@ def shape_batch(results: list[dict], detail: str) -> dict:
     cache_ratios: list[float] = []
     fallback_models: set[str] = set()
     sessions: list[dict] = []
+    sessions_with_unavailable_cost = 0
 
     for r in results:
         t = r.get("total", {})
-        total_input += t.get("input_tokens", 0)
-        total_output += t.get("output_tokens", 0)
-        total_cached += t.get("cached_tokens", 0)
-        total_calls += t.get("llm_calls", 0)
-        total_usd += t.get("estimated_usd", 0.0)
+        total_input += _measured(t.get("input_tokens"))
+        total_output += _measured(t.get("output_tokens"))
+        total_cached += _measured(t.get("cached_tokens"))
+        total_calls += _measured(t.get("llm_calls"))
+        if t.get("estimated_usd") is None:
+            sessions_with_unavailable_cost += 1
+        else:
+            total_usd += t["estimated_usd"]
         total_dur += r.get("duration_seconds") or 0
         total_active += r.get("active_duration_seconds") or 0
-        cache_ratios.append(t.get("cache_ratio", 0.0))
+        if t.get("cache_ratio") is not None:
+            cache_ratios.append(t["cache_ratio"])
         fallback_models.update(r.get("fallback_pricing_models") or [])
         sessions.append(shape_session(r, detail))
 
@@ -1730,18 +1754,86 @@ def shape_batch(results: list[dict], detail: str) -> dict:
             "total_duration_seconds": total_dur,
             "total_active_duration_seconds": total_active,
             "fallback_pricing_models": sorted(fallback_models),
+            "sessions_with_unavailable_cost": sessions_with_unavailable_cost,
         },
         "sessions": sessions,
     }
 
 
-def parse_since_to_ms(since: str) -> int | None:
+def shape_span_report(
+    results: list[dict],
+    *,
+    since: str | None = None,
+    until: str | None = None,
+    last: str | None = None,
+) -> dict:
+    """Shape a token-efficient date-span report.
+
+    Unlike a full batch report, this deliberately omits skills, subagents,
+    diagnostics, and pricing prose.  The result has a stable three-part
+    contract: ``total``, ``models``, and compact ``sessions`` rows.
+    """
+    aggregate = aggregate_sessions(results)
+    unavailable = sum(
+        1 for result in results if result.get("total", {}).get("estimated_usd") is None
+    )
+
+    model_session_counts: dict[str, int] = {}
+    for result in results:
+        seen: set[str] = set()
+        for model in result.get("model_breakdown", []):
+            name = model.get("model")
+            if isinstance(name, str):
+                seen.add(name)
+        for name in seen:
+            model_session_counts[name] = model_session_counts.get(name, 0) + 1
+
+    models = [
+        {
+            **model,
+            "session_count": model_session_counts.get(model["model"], 0),
+        }
+        for model in aggregate["model_split"]
+    ]
+    total = {
+        "session_count": aggregate["session_count"],
+        "total_input_tokens": aggregate["total_input_tokens"],
+        "total_output_tokens": aggregate["total_output_tokens"],
+        "total_cached_tokens": aggregate["total_cached_tokens"],
+        "total_tokens": aggregate["total_tokens"],
+        "total_llm_calls": aggregate["total_llm_calls"],
+        "total_estimated_usd": aggregate["total_estimated_usd"],
+        "avg_cache_ratio": aggregate["avg_cache_ratio"],
+        "cost_per_1m_tokens": aggregate["cost_per_1m_tokens"],
+        "total_duration_seconds": aggregate["total_duration_seconds"],
+        "total_active_duration_seconds": aggregate["total_active_duration_seconds"],
+        "fallback_pricing_models": aggregate["fallback_pricing_models"],
+        "sessions_with_unavailable_cost": unavailable,
+    }
+    return {
+        "report": "span",
+        "period": {"since": since, "until": until, "last": last},
+        "total": total,
+        "models": models,
+        "sessions": [shape_session(result, "minimal") for result in results],
+    }
+
+
+def parse_since_to_ms(since: Any) -> int | None:
     """Parse a date/datetime string to epoch milliseconds (UTC).
 
     Accepts ISO 8601 with timezone offsets (e.g. ``2026-07-01T00:00:00Z`` or
     ``2026-07-01T02:00:00+02:00``) as well as the legacy formats
     ``YYYY-MM-DDTHH:MM:SS`` and ``YYYY-MM-DD``.
+
+    ``since`` is typed loosely (``Any``) because callers include JSON-parsed
+    event evidence (e.g. Copilot CLI ``timestamp``/``startTime`` fields) whose
+    shape is not guaranteed. A non-string value (or an unparseable string) is
+    treated as an invalid/missing timestamp and returns ``None`` rather than
+    raising, so a single malformed evidence field never crashes parsing.
     """
+    if not isinstance(since, str):
+        return None
     since = since.strip()
     if since.endswith("Z"):
         since = since[:-1] + "+00:00"
@@ -1775,50 +1867,90 @@ def filter_sessions_by_name(sessions: list[dict], pattern: str) -> list[dict]:
     ]
 
 
+def merge_provider_sessions(session_lists: list[list[dict]]) -> list[dict]:
+    """Merge session-metadata lists from multiple providers, most-recent first.
+
+    Deduplicates by canonical session UUID (``session_id``): a session that
+    somehow appears in more than one list keeps the record from whichever
+    list is passed first. This only runs when a caller explicitly opts into
+    combined-provider discovery — it never mixes providers on its own.
+    """
+    merged: dict[str, dict] = {}
+    for sessions in session_lists:
+        for session in sessions:
+            session_id = session.get("session_id")
+            if not session_id or session_id in merged:
+                continue
+            merged[session_id] = session
+    return sorted(merged.values(), key=lambda s: s.get("created_ms") or 0, reverse=True)
+
+
 def compute_efficiency_summary(result: dict) -> dict:
-    """Compute a cost-efficiency summary for a single analyzed session."""
+    """Compute a cost-efficiency summary for a single analyzed session.
+
+    Fields derived from unavailable evidence (``result["total"]`` entries
+    that are ``None``) stay ``None`` here too, rather than being computed
+    from a fabricated zero.
+    """
     total = result.get("total", {})
-    input_tokens = total.get("input_tokens", 0)
-    output_tokens = total.get("output_tokens", 0)
-    cached_tokens = total.get("cached_tokens", 0)
-    total_tokens = input_tokens + output_tokens + cached_tokens
-    estimated_usd = total.get("estimated_usd", 0.0)
+    input_tokens = total.get("input_tokens")
+    output_tokens = total.get("output_tokens")
+    cached_tokens = total.get("cached_tokens")
+    estimated_usd = total.get("estimated_usd")
+    have_tokens = input_tokens is not None or output_tokens is not None or cached_tokens is not None
+    total_tokens = (
+        (input_tokens or 0) + (output_tokens or 0) + (cached_tokens or 0) if have_tokens else None
+    )
+
+    if total_tokens is None or estimated_usd is None:
+        cost_per_1m_tokens = None
+    elif total_tokens > 0:
+        cost_per_1m_tokens = round(estimated_usd / (total_tokens / 1_000_000), 4)
+    else:
+        cost_per_1m_tokens = 0.0
 
     summary: dict = {
         "session_id": result.get("session_id"),
         "title": result.get("title"),
-        "cache_ratio": total.get("cache_ratio", 0.0),
+        "cache_ratio": total.get("cache_ratio"),
         "total_input_tokens": input_tokens,
         "total_output_tokens": output_tokens,
         "total_cached_tokens": cached_tokens,
         "total_tokens": total_tokens,
-        "llm_calls": total.get("llm_calls", 0),
+        "llm_calls": total.get("llm_calls"),
         "estimated_usd": estimated_usd,
-        "cost_per_1m_tokens": (
-            round(estimated_usd / (total_tokens / 1_000_000), 4) if total_tokens > 0 else 0.0
-        ),
+        "cost_per_1m_tokens": cost_per_1m_tokens,
         "model_split": [],
     }
 
     model_breakdown = result.get("model_breakdown", [])
-    total_input_for_split = sum(m.get("input_tokens", 0) for m in model_breakdown)
-    for m in sorted(model_breakdown, key=lambda x: x.get("estimated_usd", 0.0), reverse=True):
-        model_input = m.get("input_tokens", 0)
+    total_input_for_split = sum(_measured(m.get("input_tokens")) for m in model_breakdown)
+    for m in sorted(model_breakdown, key=lambda x: _measured(x.get("estimated_usd")), reverse=True):
+        # The displayed fields below preserve whatever the source reported
+        # (including ``None`` for a model with partial/unavailable evidence,
+        # e.g. a Copilot CLI session missing a field in ``modelMetrics``).
+        # Only the local ``measured_input``/``measured_usd`` helpers coerce
+        # ``None`` to 0 for the ratio/division math, so a single model with
+        # unavailable evidence can never crash or skew the split for the
+        # others rather than being silently fabricated as a real 0 count.
+        model_input = m.get("input_tokens")
+        measured_input = _measured(model_input)
+        estimated_usd = m.get("estimated_usd")
         split_ratio = (
-            round(model_input / total_input_for_split, 3) if total_input_for_split > 0 else 0.0
+            round(measured_input / total_input_for_split, 3) if total_input_for_split > 0 else 0.0
         )
         summary["model_split"].append(
             {
                 "model": m["model"],
                 "input_tokens": model_input,
-                "output_tokens": m.get("output_tokens", 0),
-                "cached_tokens": m.get("cached_tokens", 0),
-                "llm_calls": m.get("llm_calls", 0),
-                "estimated_usd": m.get("estimated_usd", 0.0),
+                "output_tokens": m.get("output_tokens"),
+                "cached_tokens": m.get("cached_tokens"),
+                "llm_calls": m.get("llm_calls"),
+                "estimated_usd": estimated_usd,
                 "split_ratio": split_ratio,
                 "cost_per_1m_input_tokens": (
-                    round(m.get("estimated_usd", 0.0) / (model_input / 1_000_000), 4)
-                    if model_input > 0
+                    round(_measured(estimated_usd) / (measured_input / 1_000_000), 4)
+                    if measured_input > 0
                     else 0.0
                 ),
             }
@@ -1833,6 +1965,12 @@ def merge_session_results(results: list[dict]) -> dict:
     Totals and per-model breakdowns are summed across sessions. The returned
     dict has the same ``total`` / ``model_breakdown`` structure produced by
     ``analyze_session``, so it can be passed directly to the trailer builders.
+
+    A per-model field that is ``None`` on one contributing session/model row
+    (partial evidence, e.g. an incomplete Copilot CLI ``modelMetrics`` entry)
+    contributes nothing to that field's sum rather than crashing the ``+=``
+    or being counted as a measured zero, matching how session-level ``total``
+    fields are already merged above.
     """
     if not results:
         return {"total": {}, "model_breakdown": []}
@@ -1843,11 +1981,11 @@ def merge_session_results(results: list[dict]) -> dict:
 
     for r in results:
         t = r.get("total", {})
-        total_input += t.get("input_tokens", 0)
-        total_output += t.get("output_tokens", 0)
-        total_cached += t.get("cached_tokens", 0)
-        total_calls += t.get("llm_calls", 0)
-        total_usd += t.get("estimated_usd", 0.0)
+        total_input += _measured(t.get("input_tokens"))
+        total_output += _measured(t.get("output_tokens"))
+        total_cached += _measured(t.get("cached_tokens"))
+        total_calls += _measured(t.get("llm_calls"))
+        total_usd += _measured(t.get("estimated_usd"))
 
         for m in r.get("model_breakdown", []):
             model = m["model"]
@@ -1860,11 +1998,11 @@ def merge_session_results(results: list[dict]) -> dict:
                     "llm_calls": 0,
                     "estimated_usd": 0.0,
                 }
-            per_model[model]["input_tokens"] += m.get("input_tokens", 0)
-            per_model[model]["output_tokens"] += m.get("output_tokens", 0)
-            per_model[model]["cached_tokens"] += m.get("cached_tokens", 0)
-            per_model[model]["llm_calls"] += m.get("llm_calls", 0)
-            per_model[model]["estimated_usd"] += m.get("estimated_usd", 0.0)
+            per_model[model]["input_tokens"] += _measured(m.get("input_tokens"))
+            per_model[model]["output_tokens"] += _measured(m.get("output_tokens"))
+            per_model[model]["cached_tokens"] += _measured(m.get("cached_tokens"))
+            per_model[model]["llm_calls"] += _measured(m.get("llm_calls"))
+            per_model[model]["estimated_usd"] += _measured(m.get("estimated_usd"))
 
     cache_ratio = round(total_cached / total_input, 3) if total_input > 0 else 0.0
     model_breakdown = sorted(
@@ -1887,7 +2025,16 @@ def merge_session_results(results: list[dict]) -> dict:
 
 
 def aggregate_sessions(results: list[dict]) -> dict:
-    """Aggregate multiple session analyses into a single efficiency summary."""
+    """Aggregate multiple session analyses into a single efficiency summary.
+
+    Sessions with unavailable evidence (``total`` fields are ``None``, e.g. a
+    CLI session with no ``session.shutdown``) contribute nothing to the sums
+    and are excluded from ``avg_cache_ratio``, rather than being counted as a
+    measured zero. The same applies per model: a ``model_breakdown`` row with
+    a ``None`` field (partial per-model evidence) contributes nothing to that
+    field's cross-session sum rather than crashing or being fabricated as a
+    measured zero.
+    """
     total_input = total_output = total_cached = total_calls = 0
     total_usd = 0.0
     total_dur = total_active = 0
@@ -1901,11 +2048,11 @@ def aggregate_sessions(results: list[dict]) -> dict:
 
     for r in results:
         t = r.get("total", {})
-        inp = t.get("input_tokens", 0)
-        out = t.get("output_tokens", 0)
-        cch = t.get("cached_tokens", 0)
-        calls = t.get("llm_calls", 0)
-        usd = t.get("estimated_usd", 0.0)
+        inp = _measured(t.get("input_tokens"))
+        out = _measured(t.get("output_tokens"))
+        cch = _measured(t.get("cached_tokens"))
+        calls = _measured(t.get("llm_calls"))
+        usd = _measured(t.get("estimated_usd"))
 
         total_input += inp
         total_output += out
@@ -1914,16 +2061,23 @@ def aggregate_sessions(results: list[dict]) -> dict:
         total_usd += usd
         total_dur += r.get("duration_seconds") or 0
         total_active += r.get("active_duration_seconds") or 0
-        cache_ratios.append(t.get("cache_ratio", 0.0))
+        if t.get("cache_ratio") is not None:
+            cache_ratios.append(t["cache_ratio"])
         fallback_models.update(r.get("fallback_pricing_models") or [])
 
         for m in r.get("model_breakdown", []):
             model = m["model"]
-            per_model_input[model] = per_model_input.get(model, 0) + m.get("input_tokens", 0)
-            per_model_output[model] = per_model_output.get(model, 0) + m.get("output_tokens", 0)
-            per_model_cached[model] = per_model_cached.get(model, 0) + m.get("cached_tokens", 0)
-            per_model_calls[model] = per_model_calls.get(model, 0) + m.get("llm_calls", 0)
-            per_model_usd[model] = per_model_usd.get(model, 0.0) + m.get("estimated_usd", 0.0)
+            per_model_input[model] = per_model_input.get(model, 0) + _measured(
+                m.get("input_tokens")
+            )
+            per_model_output[model] = per_model_output.get(model, 0) + _measured(
+                m.get("output_tokens")
+            )
+            per_model_cached[model] = per_model_cached.get(model, 0) + _measured(
+                m.get("cached_tokens")
+            )
+            per_model_calls[model] = per_model_calls.get(model, 0) + _measured(m.get("llm_calls"))
+            per_model_usd[model] = per_model_usd.get(model, 0.0) + _measured(m.get("estimated_usd"))
 
     total_tokens = total_input + total_output + total_cached
     avg_cache = round(sum(cache_ratios) / len(cache_ratios), 3) if cache_ratios else 0.0
@@ -2069,6 +2223,11 @@ def list_session_dirs(debug_logs_dir: Path) -> list[dict]:
 # ─── Rendering ─────────────────────────────────────────────────────────────────
 
 
+def _na(value: Any, fmt: str = "{}") -> str:
+    """Format ``value`` with ``fmt``, or ``"n/a"`` when it is unavailable (``None``)."""
+    return "n/a" if value is None else fmt.format(value)
+
+
 def _col_width(header: str, values: list[str], cap: int | None = None, floor: int = 0) -> int:
     """Compute a column width that fits its widest value (and header), up to `cap`."""
     width = max([len(header), floor, *(len(v) for v in values)])
@@ -2105,7 +2264,7 @@ def render_table_single(data: dict) -> str:
     """Render one session as a human-readable block, adapting to available fields."""
     lines: list[str] = []
     total = data.get("total") or {}
-    usd = total.get("estimated_usd", 0)
+    usd = total.get("estimated_usd")
     dur = data.get("duration_seconds")
     active = data.get("active_duration_seconds")
     dur_str = f"{dur}s" if dur is not None else "n/a"
@@ -2113,17 +2272,30 @@ def render_table_single(data: dict) -> str:
         dur_str += f"  (active: {active}s)"
 
     lines.append(f"Session:   {data.get('session_id')}")
+    provider = data.get("provider")
+    if provider and provider != "vscode":
+        lines.append(f"Provider:  {provider}")
+        if data.get("source"):
+            lines.append(f"Source:    {data.get('source')}")
     lines.append(f"Title:     {data.get('title') or '(unknown)'}")
     lines.append(f"Started:   {data.get('started_at')}")
     lines.append(f"Duration:  {dur_str}")
     if data.get("models") is not None:
         lines.append(f"Models:    {', '.join(data.get('models') or [])}")
-    lines.append(f"Input:     {total.get('input_tokens', 0):,} tokens")
-    lines.append(f"Output:    {total.get('output_tokens', 0):,} tokens")
-    cache_pct = f"{total.get('cache_ratio', 0):.0%}"
-    lines.append(f"Cached:    {total.get('cached_tokens', 0):,} ({cache_pct})")
-    lines.append(f"LLM calls: {total.get('llm_calls', 0)}")
-    lines.append(f"Est. cost: ${usd:.4f}")
+    lines.append(f"Input:     {_na(total.get('input_tokens'), '{:,} tokens')}")
+    lines.append(f"Output:    {_na(total.get('output_tokens'), '{:,} tokens')}")
+    cache_ratio = total.get("cache_ratio")
+    cache_pct = _na(cache_ratio, "{:.0%}")
+    lines.append(f"Cached:    {_na(total.get('cached_tokens'), '{:,}')} ({cache_pct})")
+    lines.append(f"LLM calls: {_na(total.get('llm_calls'))}")
+    lines.append(f"Est. cost: {_na(usd, '${:.4f}')}")
+
+    diagnostics = data.get("diagnostics")
+    if diagnostics:
+        lines.append("")
+        lines.append("Diagnostics:")
+        for note in diagnostics:
+            lines.append(f"  - {note}")
 
     fallback = data.get("fallback_pricing_models")
     if fallback:
@@ -2137,11 +2309,15 @@ def render_table_single(data: dict) -> str:
         rows = [
             (
                 m["model"],
-                f"{m['input_tokens']:,}",
-                f"{m['cached_tokens']:,}",
-                f"{m['output_tokens']:,}",
-                f"{m['llm_calls']:,}",
-                f"${m['estimated_usd']:.2f}",
+                # A model row can carry a ``None`` field when the source
+                # (e.g. a Copilot CLI session with partial modelMetrics)
+                # only reported some of these; render "n/a" for that field
+                # instead of crashing on `:,`/`:.2f` formatting of None.
+                _na(m["input_tokens"], "{:,}"),
+                _na(m["cached_tokens"], "{:,}"),
+                _na(m["output_tokens"], "{:,}"),
+                _na(m["llm_calls"], "{:,}"),
+                _na(m["estimated_usd"], "${:.2f}"),
             )
             for m in model_breakdown
         ]
@@ -2277,6 +2453,12 @@ def _render_summary_footer(summary: dict) -> str:
     )
     lines.append(f"  Total calls:   {summary.get('total_llm_calls', 0)}")
     lines.append(f"  Total cost:    ${summary.get('total_estimated_usd', 0):.4f}")
+    unavailable = summary.get("sessions_with_unavailable_cost")
+    if unavailable:
+        lines.append(
+            f"  Note:          {unavailable} session(s) had no cost evidence and were "
+            "excluded from Total cost."
+        )
     fallback = summary.get("fallback_pricing_models")
     if fallback:
         lines.append(f"  Warning:       fallback pricing used for {', '.join(fallback)}")
@@ -2293,9 +2475,7 @@ def _render_analyzed_rows(items: list[dict], summary: dict | None = None) -> str
         models = s.get("models") or []
         model = models[0] if models else "unknown"
         t = s.get("total", {})
-        rows.append(
-            (i, started, title, sid, model, t.get("input_tokens", 0), t.get("estimated_usd", 0))
-        )
+        rows.append((i, started, title, sid, model, t.get("input_tokens"), t.get("estimated_usd")))
 
     w_title = _col_width("Title", [r[2] for r in rows], cap=60)
     w_id = _col_width("ID", [r[3] for r in rows])
@@ -2311,11 +2491,13 @@ def _render_analyzed_rows(items: list[dict], summary: dict | None = None) -> str
     total_input = 0
     total_usd = 0.0
     for i, started, title, sid, model, inp, usd in rows:
-        total_input += inp
-        total_usd += usd
+        total_input += inp or 0
+        total_usd += usd or 0.0
+        inp_str = _na(inp, "{:,}")
+        usd_str = _na(usd, "${:.2f}")
         lines.append(
             f"{i:<3} {started:<16} {title[:w_title]:<{w_title}} {sid:<{w_id}} "
-            f"{model[:w_model]:<{w_model}} {inp:>10,} ${usd:>7.2f}"
+            f"{model[:w_model]:<{w_model}} {inp_str:>10} {usd_str:>8}"
         )
 
     if summary is not None:
@@ -2351,14 +2533,14 @@ def render_summary(data: dict) -> str:
     lines = [
         f"Session:   {data.get('session_id') or '(unknown)'}",
         f"Title:     {data.get('title') or '(unknown)'}",
-        f"Cache ratio: {data.get('cache_ratio', 0):.0%}",
-        f"Total tokens: {data.get('total_tokens', 0):,}",
-        f"Input tokens: {data.get('total_input_tokens', 0):,}",
-        f"Output tokens: {data.get('total_output_tokens', 0):,}",
-        f"Cached tokens: {data.get('total_cached_tokens', 0):,}",
-        f"LLM calls: {data.get('llm_calls', 0)}",
-        f"Est. cost: ${data.get('estimated_usd', 0):.4f}",
-        f"Cost per 1M tokens: ${data.get('cost_per_1m_tokens', 0):.4f}",
+        f"Cache ratio: {_na(data.get('cache_ratio'), '{:.0%}')}",
+        f"Total tokens: {_na(data.get('total_tokens'), '{:,}')}",
+        f"Input tokens: {_na(data.get('total_input_tokens'), '{:,}')}",
+        f"Output tokens: {_na(data.get('total_output_tokens'), '{:,}')}",
+        f"Cached tokens: {_na(data.get('total_cached_tokens'), '{:,}')}",
+        f"LLM calls: {_na(data.get('llm_calls'))}",
+        f"Est. cost: {_na(data.get('estimated_usd'), '${:.4f}')}",
+        f"Cost per 1M tokens: {_na(data.get('cost_per_1m_tokens'), '${:.4f}')}",
     ]
     model_split = data.get("model_split", [])
     if model_split:
@@ -2368,9 +2550,14 @@ def render_summary(data: dict) -> str:
         rows = [
             (
                 m["model"],
-                f"{m['input_tokens']:,}",
+                # A single-session model row can have a ``None``
+                # input_tokens/estimated_usd for a model with partial
+                # evidence (e.g. an incomplete Copilot CLI modelMetrics
+                # entry); render "n/a" rather than crashing on `:,`/`:.2f`
+                # formatting of None.
+                _na(m["input_tokens"], "{:,}"),
                 f"{m['split_ratio']:.0%}",
-                f"${m['estimated_usd']:.2f}",
+                _na(m["estimated_usd"], "${:.2f}"),
                 f"${m['cost_per_1m_input_tokens']:.2f}",
             )
             for m in model_split
@@ -2416,6 +2603,101 @@ def render_aggregate(data: dict) -> str:
     return "\n".join(lines)
 
 
+def render_span_report(data: dict) -> str:
+    """Render the compact date-span report as total/model/session sections."""
+    period = data.get("period", {})
+    period_parts = []
+    if period.get("since"):
+        period_parts.append(f"since {period['since']}")
+    if period.get("until"):
+        period_parts.append(f"until {period['until']}")
+    if period.get("last"):
+        period_parts.append(f"last {period['last']}")
+    period_text = ", ".join(period_parts) if period_parts else "all discovered sessions"
+
+    total = data.get("total", {})
+    lines = [f"Span report ({period_text})", "", "Total:"]
+    lines.extend(
+        [
+            f"  Sessions:       {total.get('session_count', 0):,}",
+            f"  Input:          {total.get('total_input_tokens', 0):,} tokens",
+            f"  Output:         {total.get('total_output_tokens', 0):,} tokens",
+            f"  Cached:         {total.get('total_cached_tokens', 0):,} tokens "
+            f"(avg ratio {total.get('avg_cache_ratio', 0):.0%})",
+            f"  LLM calls:      {total.get('total_llm_calls', 0):,}",
+            f"  Estimated cost: ${total.get('total_estimated_usd', 0):.4f}",
+        ]
+    )
+    unavailable = total.get("sessions_with_unavailable_cost", 0)
+    if unavailable:
+        lines.append(
+            f"  Unavailable:     {unavailable} session(s), excluded from estimated cost totals"
+        )
+
+    model_rows = [
+        (
+            model["model"],
+            str(model.get("session_count", 0)),
+            _na(model.get("input_tokens"), "{:,}"),
+            _na(model.get("output_tokens"), "{:,}"),
+            _na(model.get("cached_tokens"), "{:,}"),
+            _na(model.get("llm_calls"), "{:,}"),
+            _na(model.get("estimated_usd"), "${:.4f}"),
+        )
+        for model in data.get("models", [])
+    ]
+    lines.extend(["", "Per model:"])
+    if model_rows:
+        lines.extend(
+            _render_columns(
+                ("Model", "Sessions", "Input", "Output", "Cached", "Calls", "Cost"),
+                model_rows,
+                left_cols={0},
+            )
+        )
+    else:
+        lines.append("  (no costed model evidence)")
+
+    session_rows = []
+    for session in data.get("sessions", []):
+        total = session.get("total", {})
+        session_rows.append(
+            (
+                session.get("title") or "(no title)",
+                session.get("provider") or "vscode",
+                (session.get("started_at") or session.get("created_at") or "")[:19],
+                _na(session.get("duration_seconds")),
+                _na(total.get("llm_calls"), "{:,}"),
+                _na(total.get("input_tokens"), "{:,}"),
+                _na(total.get("output_tokens"), "{:,}"),
+                _na(total.get("cached_tokens"), "{:,}"),
+                _na(total.get("estimated_usd"), "${:.4f}"),
+            )
+        )
+    lines.extend(["", "Per session:"])
+    if session_rows:
+        lines.extend(
+            _render_columns(
+                (
+                    "Session",
+                    "Provider",
+                    "Started",
+                    "Duration",
+                    "Calls",
+                    "Input",
+                    "Output",
+                    "Cached",
+                    "Cost",
+                ),
+                session_rows,
+                left_cols={0, 1, 2},
+            )
+        )
+    else:
+        lines.append("  (no sessions found)")
+    return "\n".join(lines)
+
+
 def render_costed_list(items: list[dict]) -> str:
     """Render a list of sessions with cost columns."""
     if not items:
@@ -2426,15 +2708,16 @@ def render_costed_list(items: list[dict]) -> str:
         title = s.get("title") or "(no title)"
         sid = s.get("session_id") or ""
         total = s.get("total", {})
+        input_tokens = total.get("input_tokens")
+        output_tokens = total.get("output_tokens")
+        cached_tokens = total.get("cached_tokens")
         total_tokens = (
-            total.get("input_tokens", 0)
-            + total.get("output_tokens", 0)
-            + total.get("cached_tokens", 0)
+            None
+            if input_tokens is None and output_tokens is None and cached_tokens is None
+            else (input_tokens or 0) + (output_tokens or 0) + (cached_tokens or 0)
         )
         model_count = len(s.get("models") or [])
-        rows.append(
-            (started, title, sid, model_count, total_tokens, total.get("estimated_usd", 0.0))
-        )
+        rows.append((started, title, sid, model_count, total_tokens, total.get("estimated_usd")))
 
     w_title = _col_width("Title", [r[1] for r in rows], cap=60)
     w_id = _col_width("ID", [r[2] for r in rows])
@@ -2446,19 +2729,22 @@ def render_costed_list(items: list[dict]) -> str:
     total_width = 19 + 1 + w_title + 1 + w_id + 1 + 6 + 1 + 10 + 1 + 8
     lines.append("-" * total_width)
 
-    total_tokens = 0
-    total_usd = 0.0
+    total_tokens_sum = 0
+    total_usd_sum = 0.0
     for started, title, sid, model_count, tokens, usd in rows:
-        total_tokens += tokens
-        total_usd += usd
+        total_tokens_sum += tokens or 0
+        total_usd_sum += usd or 0.0
+        tokens_str = _na(tokens, "{:,}")
+        usd_str = _na(usd, "${:.2f}")
         lines.append(
             f"{started:<19} {title[:w_title]:<{w_title}} {sid:<{w_id}} "
-            f"{model_count:>6} {tokens:>10,} ${usd:>7.2f}"
+            f"{model_count:>6} {tokens_str:>10} {usd_str:>8}"
         )
 
     lines.append("-" * total_width)
     lines.append(
-        f"{'TOTAL':<19} {'':<{w_title}} {'':<{w_id}} {'':>6} {total_tokens:>10,} ${total_usd:>7.2f}"
+        f"{'TOTAL':<19} {'':<{w_title}} {'':<{w_id}} {'':>6} "
+        f"{total_tokens_sum:>10,} ${total_usd_sum:>7.2f}"
     )
     return "\n".join(lines)
 
@@ -2485,6 +2771,8 @@ def render(payload: object, fmt: str, costed_list: bool = False) -> str:
             return _render_summary_list(payload)
         return render_table_list(payload)
     if isinstance(payload, dict):
+        if payload.get("report") == "span":
+            return render_span_report(payload)
         if "summary" in payload and "sessions" in payload:
             return render_table_list(payload["sessions"], summary=payload["summary"])
         if "session_count" in payload and "model_split" in payload:

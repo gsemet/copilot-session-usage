@@ -9,7 +9,8 @@
 [![Type checked](https://img.shields.io/badge/type%20checked-mypy%2Fty-blue.svg)](./)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Extract VS Code Copilot session cost KPIs (tokens, estimated USD, model, duration) from local debug logs.
+Extract Copilot session cost KPIs (tokens, estimated USD, model, duration) from local
+VS Code Copilot debug logs and/or local Copilot CLI/Copilot App session logs.
 
 **Full documentation:** [copilot-session-usage.readthedocs.io](https://copilot-session-usage.readthedocs.io/en/stable/)
 
@@ -38,8 +39,8 @@ models without providing a reproducible split of tokens and dollars by model or 
 
 ### What this project adds
 
-`copilot-session-usage` reads the original VS Code Copilot debug logs and turns them into
-repeatable reports. It provides:
+`copilot-session-usage` reads the original VS Code Copilot debug logs and local
+Copilot CLI/App event logs and turns them into repeatable reports. It provides:
 
 | Need | Chronicle | `copilot-session-usage` |
 | --- | --- | --- |
@@ -66,6 +67,38 @@ breakdown for it.
 Use Chronicle for **“What did I do?”** and use this project for **“How much did it cost,
 which model or subagent consumed it, and can I export the evidence?”**
 
+## Providers
+
+`copilot-session-usage` supports two local session sources, selected explicitly
+with `--agent` (default `vscode`):
+
+- **`vscode`** (default) — VS Code Copilot Chat debug logs.
+- **`cli`** — Copilot CLI and Copilot App local sessions, stored under
+  `~/.copilot/session-state/<session-id>/events.jsonl`. The macOS Copilot App
+  runs a bundled Copilot CLI runtime and uses the same session-state layout.
+- **`all`** — an explicit, opt-in combined mode that discovers and
+  aggregates sessions from both providers, deduplicated by session UUID.
+  Commands never mix providers unless `--agent all` is passed. Missing
+  provider roots are ignored, including when both roots are absent.
+
+Both providers share the same model catalog, pricing data, cache rules, and
+estimated-USD calculation. Copilot CLI/App sessions additionally expose
+provider-native counters (`provider_usage`: nanoAiu, premium requests) as
+separate fields, and never turn missing evidence (for example, a session that
+has not shut down yet) into a fabricated zero — see `diagnostics` in the
+output when data is unavailable.
+
+```bash
+# Analyze the latest Copilot CLI/App session
+copilot-session-usage --agent cli latest
+
+# Analyze a specific Copilot CLI/App session by its session-state directory
+copilot-session-usage --agent cli analyze ~/.copilot/session-state/<uuid>
+
+# List and aggregate sessions from both VS Code and Copilot CLI/App
+copilot-session-usage --agent all list --format table
+```
+
 ## Installation
 
 ```bash
@@ -87,6 +120,12 @@ copilot-session-usage list
 # Batch analyze the last 10 sessions
 copilot-session-usage batch 10
 
+# Compact total/model/session report for a date span
+copilot-session-usage --agent all span \
+  --since 2026-07-01T00:00:00Z \
+  --until 2026-07-08T00:00:00Z \
+  --format table
+
 # Aggregate cost across all sessions matching a PRD path
 copilot-session-usage analyze --name "PRD: /path/to/prd" --aggregate --format table
 
@@ -100,6 +139,7 @@ copilot-session-usage list --dir /path/to/debug-logs --format table
 - **Multi-model sessions** — correctly handles sessions that call multiple models (e.g. Claude + Kimi)
 - **Threshold-aware pricing** — long-context tier switching (e.g. GPT-5.4 > 272k tokens)
 - **Subagent cost attribution** — tracks `runSubagent` calls and their token usage
+- **VS Code and Copilot CLI/App providers** — `--agent vscode` (default), `--agent cli`, or the opt-in combined `--agent all`
 - **Cross-platform** — macOS, Linux, Windows, WSL2
 - **Three output formats** — `json` (default), `table`, `detailed`
 - **Three detail levels** — `minimal`, `compact`, `full`
@@ -107,13 +147,15 @@ copilot-session-usage list --dir /path/to/debug-logs --format table
 - **Session filtering** — regex match by name, date-range filtering
 - **Aggregation** — roll up costs across many sessions in one command
 - **Skill-aware cost attribution** — detect skills, attribute LLM and tool calls to the active skill
-- **Skill cost breakdown** — per-skill token counts and estimated cost
+- **Skill cost breakdown** — per-skill token counts and estimated cost (VS Code provider)
 - **Tool-call attribution** — per-skill/per-subagent tool-call counts
 - **Title filtering** — find sessions by title substring
 - **Efficiency summaries** — cache ratio, model split, cost per 1M tokens
 - **Field extraction** — pull specific values with `--query`
 
 ## How it works
+
+### VS Code provider (`--agent vscode`, default)
 
 `copilot-session-usage` reads VS Code Copilot debug logs stored in
 `~/Library/Application Support/Code/User/workspaceStorage/` (macOS),
@@ -127,6 +169,44 @@ switching), and estimates the session cost in USD.
 
 Subagent calls (`runSubagent`) are tracked separately so you can see how much
 token usage was delegated to helper agents.
+
+### Copilot CLI/App provider (`--agent cli`)
+
+Copilot CLI and the Copilot App store one directory per session under
+`~/.copilot/session-state/<session-id>/` (override with `--session-root`).
+Each session directory has a structured `events.jsonl` event log — the
+primary evidence source — plus an optional `workspace.yaml` sidecar with
+title, working directory, git branch, and timestamps.
+
+`copilot-session-usage` also accepts an explicit session directory or a
+relocated/exported `events.jsonl` file directly (for example
+`copilot-session-usage --agent cli analyze /path/to/exported/events.jsonl`),
+without requiring auto-discovery. An explicit source is only analyzed when it
+contains recognizable Copilot CLI event records and a canonical session UUID
+can be determined (from the directory name or a `session.start` event) —
+otherwise it is rejected with an actionable error instead of being analyzed
+with a fabricated identity.
+
+Per-model token totals and cost come from the session's final
+`session.shutdown` event and use the same shared, token-based pricing
+calculation as the VS Code provider. GitHub Copilot's own `totalNanoAiu`
+billing figure is kept separate under `provider_usage.total_nano_aiu` and
+never substituted into the shared cost calculation. For a session that has
+not shut down yet (still active, or interrupted), only provider-native
+counters from the last usage checkpoint are available; token totals and cost
+are reported as unavailable (`null`) via the shared `total` block, with
+`diagnostics` explaining why, rather than as fabricated zeros. Tool calls and
+skill attribution are scoped to the subagent that made them, using
+`subagent.started`/`subagent.completed` events and each event's `agentId`;
+`provider_usage.subagents` separately preserves the raw per-subagent evidence
+available (name, model, tool-call count, reported tokens, duration). Parsing
+tolerates unrecognized event types and schema versions other than the one
+currently validated, recording a diagnostic instead of failing.
+
+Pricing lookups for `--agent cli`/`--agent all` are local-only by default
+(no runtime pricing refresh attempt over the network), unlike the `vscode`
+provider's default daily refresh attempt. Run
+`copilot-session-usage pricing refresh` to update pricing explicitly.
 
 ## Knowledge base
 
@@ -149,6 +229,7 @@ just knowledge-validate
 | `id SESSION_ID` | Analyze a session by exact UUID |
 | `list` | List recent sessions (metadata only by default) |
 | `batch N` | Analyze the N most recent sessions in one pass |
+| `span` | Emit a compact total, per-model, and per-session date-span report |
 | `skills` | List skills used across sessions with aggregated cost |
 
 ### Analysis options
@@ -159,6 +240,7 @@ just knowledge-validate
 | `--title SUBSTRING` | Filter sessions by title substring (case-insensitive) |
 | `--since DATE` | Only sessions created after DATE (ISO 8601 with timezone) |
 | `--until DATE` | Only sessions created before DATE (ISO 8601 with timezone) |
+| `--last DURATION` | Use a rolling window such as `7d`, `24h`, or `30m` with `span` |
 | `--workspace PATH` | Only sessions from this workspace folder |
 | `--aggregate` | Aggregate all matching sessions into one summary |
 | `--summary` | Output a cost-efficiency summary |
@@ -172,8 +254,9 @@ just knowledge-validate
 
 | Option | Description |
 |--------|-------------|
-| `--workspace-storage PATH` | Override workspaceStorage directory (auto-detected by default) |
-| `--agent {vscode,cli}` | Provider to use (`cli` not yet implemented) |
+| `--workspace-storage PATH` | Override workspaceStorage directory (auto-detected by default). Used by `--agent vscode`/`all` |
+| `--session-root PATH` | Override the Copilot CLI/App session-state root (default: `~/.copilot/session-state`). Used by `--agent cli`/`all` |
+| `--agent {vscode,cli,all}` | Provider for session discovery: `vscode` (default), `cli`, or the explicit opt-in combined mode `all` |
 | `--detail {minimal,compact,full}` | Detail level (default: `compact`) |
 | `--format {json,table,detailed}` | Output format (default: `json`) |
 | `--output PATH` | Write output to file instead of stdout |
@@ -304,6 +387,11 @@ sessions = list_sessions(
     since="2026-07-01T00:00:00Z",
     until="2026-07-07T00:00:00Z",
 )
+
+# Analyze a Copilot CLI/App session, or discover/aggregate across all
+# providers with the explicit opt-in agent="all"
+cli_result = analyze_session(Path("~/.copilot/session-state/<uuid>"), agent="cli")
+combined = list_sessions(agent="all")
 ```
 
 ## Development

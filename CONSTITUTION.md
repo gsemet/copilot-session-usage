@@ -24,8 +24,8 @@ Python package, usable from automation, and honest about unavailable evidence.
 - Public API belongs in `src/copilot_session_usage/api.py`; internal implementation
   belongs under `src/copilot_session_usage/_internal/`.
 - Public API functions retain the optional `agent` parameter used for provider
-  routing. The supported provider values are `vscode` and `cli`; the CLI provider
-  remains explicitly unsupported until implemented.
+  routing. The supported provider values are `vscode`, `cli`, and the explicit
+  combined mode `all`.
 - Keep provider discovery separate from parsing, pricing, shaping, and presentation.
 - Do not expose internal modules as public API merely to avoid a proper API change.
 

@@ -64,6 +64,40 @@ copilot-session-usage list --title "get-session-costs"
 copilot-session-usage analyze --title "grill-me" --latest --format table
 ```
 
+## Copilot CLI/App session
+
+Copilot CLI and the Copilot App store sessions as event logs under
+`~/.copilot/session-state/<session-uuid>/` on macOS. Select this provider
+explicitly because `vscode` remains the default:
+
+```bash
+# Analyze by UUID
+copilot-session-usage --agent cli id <session-uuid> --format table
+
+# Use a non-default session root
+copilot-session-usage --agent cli \
+  --session-root /path/to/session-state \
+  latest --format table
+```
+
+For an exported or relocated session, pass either the session directory or its
+`events.jsonl` file directly:
+
+```bash
+copilot-session-usage --agent cli analyze /path/to/session/events.jsonl
+```
+
+The source must contain recognizable Copilot CLI event records and a canonical
+session UUID. CLI/App pricing uses the bundled or user-cached model catalog
+locally; it does not perform the VS Code provider's automatic runtime pricing
+refresh. Active or interrupted sessions can retain provider-native checkpoint
+counters while shared token and cost totals remain unavailable.
+
+To opt into a combined report across both providers, use `--agent all` with
+discovery commands such as `list`, `latest`, `batch`, or `analyze --name`.
+Missing provider roots are ignored, including when both roots are absent.
+Path-based analysis requires choosing one provider.
+
 ## Skill-aware analysis
 
 When a session invokes a skill (for example `/compendium-generic get-session-costs`),

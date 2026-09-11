@@ -147,10 +147,12 @@ def test_refresh_pricing_compatibility_alias(runner, mocker):
     refresh.assert_called_once_with(force=False)
 
 
-def test_cli_agent_cli_raises(runner):
-    result = runner.invoke(cli, ["--agent", "cli", "list"])
-    assert result.exit_code != 0
-    assert "not yet implemented" in result.output
+def test_cli_help_mentions_agent_choices(runner):
+    result = runner.invoke(cli, ["--help"])
+    assert result.exit_code == 0
+    assert "--agent" in result.output
+    assert "[vscode|cli|all]" in result.output
+    assert "--session-root" in result.output
 
 
 # ─── analyze command ──────────────────────────────────────────────────────────
@@ -204,7 +206,7 @@ def test_latest_command_not_found(runner, mocker):
     mock_find.return_value = None
     result = runner.invoke(cli, ["latest"])
     assert result.exit_code != 0
-    assert "no session debug logs found" in result.output
+    assert "no session logs found" in result.output
 
 
 def test_latest_command_with_workspace_filter(runner, sample_session_dir, mocker):
@@ -275,7 +277,7 @@ def test_find_command_missing_logs(runner, mocker):
     ]
     result = runner.invoke(cli, ["find", "hello"])
     assert result.exit_code != 0
-    assert "debug logs not present" in result.output
+    assert "session logs not present" in result.output
 
 
 # ─── id command ───────────────────────────────────────────────────────────────
@@ -296,7 +298,7 @@ def test_id_command_not_found(runner, mocker):
     mock_find.return_value = None
     result = runner.invoke(cli, ["id", "missing"])
     assert result.exit_code != 0
-    assert "no debug logs found" in result.output
+    assert "no session logs found" in result.output
 
 
 # ─── list command ─────────────────────────────────────────────────────────────
@@ -360,6 +362,50 @@ def test_batch_command_with_options(runner, sample_session_dir, mocker):
     ]
     result = runner.invoke(cli, ["batch", "1", "--since", "2026-01-01", "--workspace", "/project"])
     assert result.exit_code == 0
+
+
+def test_span_command_emits_compact_report(runner, sample_session_dir, mocker):
+    mock_list = mocker.patch("copilot_session_usage._internal.vscode.list_recent_sessions")
+    mock_list.return_value = [
+        {
+            "session_id": "s1",
+            "title": "Test",
+            "provider": "vscode",
+            "debug_log_dir": str(sample_session_dir),
+        }
+    ]
+    result = runner.invoke(
+        cli,
+        [
+            "span",
+            "--since",
+            "2026-07-01",
+            "--until",
+            "2026-07-02",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["report"] == "span"
+    assert payload["period"]["since"] == "2026-07-01"
+    assert payload["total"]["session_count"] == 1
+    assert payload["sessions"][0]["provider"] == "vscode"
+    assert "skills" not in payload["sessions"][0]
+
+
+def test_span_command_last_window_and_table(runner, mocker):
+    mock_list = mocker.patch("copilot_session_usage._internal.vscode.list_recent_sessions")
+    mock_list.return_value = []
+    mock_parse = mocker.patch(
+        "copilot_session_usage._internal.core.parse_last_window_to_ms", return_value=123
+    )
+    result = runner.invoke(cli, ["span", "--last", "7d", "--format", "table"])
+    assert result.exit_code == 0
+    assert "Span report (last 7d)" in result.output
+    assert "Per model:" in result.output
+    mock_parse.assert_called_once_with("7d")
 
 
 # ─── resolve_ws_roots error path ──────────────────────────────────────────────
@@ -811,3 +857,321 @@ def test_amend_commit_with_session_id_trailers(runner, sample_session_dir, tmp_p
     assert "Copilot-Session-Usage-Session-ID: def-456" in result.output
     assert "Copilot-Session-Usage-Acc:" in result.output
     mock_git_amend.assert_not_called()
+
+
+# ─── --agent cli / --agent all ────────────────────────────────────────────────
+
+
+CLI_SESSION_ID = "11111111-1111-1111-1111-111111111111"
+
+
+@pytest.fixture
+def cli_root(tmp_path, write_cli_session):
+    """A Copilot CLI session-state root with one discoverable session."""
+    root = tmp_path / "cli-session-state"
+    root.mkdir()
+    write_cli_session(root, CLI_SESSION_ID)
+    return root
+
+
+def test_agent_cli_analyze_by_path(runner, cli_root):
+    session_dir = cli_root / CLI_SESSION_ID
+    result = runner.invoke(cli, ["--agent", "cli", "analyze", str(session_dir), "--format", "json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["provider"] == "cli"
+    assert payload["total"]["llm_calls"] == 1
+
+
+def test_agent_cli_analyze_events_file_directly(runner, cli_root):
+    events_path = cli_root / CLI_SESSION_ID / "events.jsonl"
+    result = runner.invoke(cli, ["--agent", "cli", "analyze", str(events_path), "--format", "json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["session_id"] == CLI_SESSION_ID
+
+
+def test_agent_cli_analyze_invalid_path_reports_diagnostic(runner, tmp_path):
+    empty_dir = tmp_path / "not-a-session"
+    empty_dir.mkdir()
+    result = runner.invoke(cli, ["--agent", "cli", "analyze", str(empty_dir)])
+    assert result.exit_code != 0
+    assert "missing events.jsonl" in result.output
+
+
+def test_agent_all_analyze_by_path_rejected(runner, cli_root):
+    session_dir = cli_root / CLI_SESSION_ID
+    result = runner.invoke(cli, ["--agent", "all", "analyze", str(session_dir)])
+    assert result.exit_code != 0
+    assert "single provider" in result.output
+
+
+def test_agent_cli_id_command(runner, cli_root):
+    result = runner.invoke(
+        cli, ["--agent", "cli", "--session-root", str(cli_root), "id", CLI_SESSION_ID]
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["provider"] == "cli"
+
+
+def test_agent_cli_id_command_not_found(runner, cli_root):
+    result = runner.invoke(
+        cli, ["--agent", "cli", "--session-root", str(cli_root), "id", "missing-id"]
+    )
+    assert result.exit_code != 0
+    assert "no session logs found" in result.output
+
+
+def test_agent_cli_latest_command(runner, cli_root):
+    result = runner.invoke(
+        cli, ["--agent", "cli", "--session-root", str(cli_root), "latest", "--format", "json"]
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["session_id"] == CLI_SESSION_ID
+    assert payload["provider"] == "cli"
+
+
+def test_agent_cli_find_command(runner, cli_root):
+    result = runner.invoke(
+        cli,
+        [
+            "--agent",
+            "cli",
+            "--session-root",
+            str(cli_root),
+            "find",
+            "Test CLI Session",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["session_id"] == CLI_SESSION_ID
+
+
+def test_agent_cli_list_command(runner, cli_root):
+    result = runner.invoke(
+        cli, ["--agent", "cli", "--session-root", str(cli_root), "list", "--format", "json"]
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert len(payload) == 1
+    assert payload[0]["provider"] == "cli"
+
+
+def test_agent_cli_list_with_costs(runner, cli_root):
+    result = runner.invoke(
+        cli,
+        ["--agent", "cli", "--session-root", str(cli_root), "list", "--costs", "--format", "json"],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload[0]["total"]["llm_calls"] == 1
+
+
+def test_agent_cli_list_dir_uses_cli_session_layout(runner, cli_root):
+    """`--agent cli list --dir PATH` scans PATH as a CLI session-state root, not VS Code logs."""
+    result = runner.invoke(
+        cli,
+        ["--agent", "cli", "list", "--dir", str(cli_root), "--format", "json"],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert len(payload) == 1
+    assert payload[0]["session_id"] == CLI_SESSION_ID
+    assert payload[0]["provider"] == "cli"
+
+
+def test_agent_cli_list_dir_with_costs_analyzes_cli_sessions(runner, cli_root):
+    """`--agent cli list --dir` (implied --costs) analyzes via the CLI provider, not VS Code."""
+    result = runner.invoke(
+        cli,
+        ["--agent", "cli", "list", "--dir", str(cli_root), "--format", "json"],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload[0]["provider"] == "cli"
+    assert payload[0]["total"]["llm_calls"] == 1
+
+
+def test_agent_all_list_dir_rejected(runner, cli_root):
+    """`--dir` requires a single provider; 'all' is ambiguous between layouts."""
+    result = runner.invoke(
+        cli,
+        ["--agent", "all", "list", "--dir", str(cli_root)],
+    )
+    assert result.exit_code != 0
+    assert "single provider" in result.output
+
+
+def test_agent_cli_batch_command(runner, cli_root):
+    result = runner.invoke(
+        cli, ["--agent", "cli", "--session-root", str(cli_root), "batch", "5", "--format", "json"]
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["summary"]["session_count"] == 1
+    assert payload["sessions"][0]["provider"] == "cli"
+
+
+def test_agent_cli_skills_command(runner, cli_root):
+    result = runner.invoke(
+        cli, ["--agent", "cli", "--session-root", str(cli_root), "skills", "--format", "json"]
+    )
+    assert result.exit_code == 0
+    # CLI-provider skill invocations have no per-skill cost breakdown evidence yet.
+    payload = json.loads(result.output)
+    assert payload["session_count"] == 1
+
+
+def test_agent_all_list_merges_providers(runner, cli_root, tmp_path, mocker):
+    vscode_root = tmp_path / "vscode-storage"
+    vscode_root.mkdir()
+    mocker.patch(
+        "copilot_session_usage._internal.vscode.default_workspace_storage_roots",
+        return_value=[vscode_root],
+    )
+    result = runner.invoke(
+        cli,
+        ["--agent", "all", "--session-root", str(cli_root), "list", "--format", "json"],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert any(s["provider"] == "cli" for s in payload)
+
+
+def test_agent_all_ignores_missing_provider_root(runner, cli_root, mocker):
+    mocker.patch(
+        "copilot_session_usage._internal.vscode.default_workspace_storage_roots",
+        return_value=[],
+    )
+    result = runner.invoke(
+        cli,
+        ["--agent", "all", "--session-root", str(cli_root), "list", "--format", "json"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert len(payload) == 1
+    assert payload[0]["provider"] == "cli"
+
+
+def test_agent_all_ignores_missing_explicit_provider_root(runner, cli_root, tmp_path):
+    missing_workspace_root = tmp_path / "missing-workspace-storage"
+    result = runner.invoke(
+        cli,
+        [
+            "--agent",
+            "all",
+            "--workspace-storage",
+            str(missing_workspace_root),
+            "--session-root",
+            str(cli_root),
+            "list",
+            "--format",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert len(payload) == 1
+    assert payload[0]["provider"] == "cli"
+
+
+def test_agent_all_ignores_all_missing_provider_roots(runner, mocker):
+    mocker.patch(
+        "copilot_session_usage._internal.vscode.default_workspace_storage_roots",
+        return_value=[],
+    )
+    mocker.patch(
+        "copilot_session_usage._internal.copilot_cli.default_session_state_roots",
+        return_value=[],
+    )
+    result = runner.invoke(cli, ["--agent", "all", "list", "--format", "json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == []
+
+
+def test_session_root_override_missing_path_errors(runner, tmp_path):
+    missing = tmp_path / "missing-root"
+    result = runner.invoke(cli, ["--agent", "cli", "--session-root", str(missing), "list"])
+    assert result.exit_code != 0
+    assert "not found" in result.output
+
+
+def test_agent_cli_table_output_shows_provider_and_diagnostics(runner, tmp_path, write_cli_session):
+    events = [
+        {
+            "type": "session.start",
+            "data": {
+                "sessionId": CLI_SESSION_ID,
+                "version": 1,
+                "startTime": "2026-01-01T00:00:00.000Z",
+                "selectedModel": "gpt-5.6-luna",
+                "context": {"cwd": "/proj"},
+            },
+            "id": "e1",
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "parentId": None,
+        },
+    ]
+    root = tmp_path / "cli-session-state"
+    root.mkdir()
+    write_cli_session(root, CLI_SESSION_ID, events=events, workspace={})
+    result = runner.invoke(
+        cli,
+        ["--agent", "cli", "--session-root", str(root), "id", CLI_SESSION_ID, "--format", "table"],
+    )
+    assert result.exit_code == 0
+    assert "Provider:  cli" in result.output
+    assert "Diagnostics:" in result.output
+
+
+# ─── local-only pricing default for cli/all ──────────────────────────────────
+
+
+def test_agent_cli_analyze_is_local_only_by_default(runner, cli_root, mocker):
+    """`--agent cli` never attempts a network pricing refresh unless asked."""
+    load_pricing = mocker.patch(
+        "copilot_session_usage.cli.core.load_pricing", return_value={"models": {}}
+    )
+    result = runner.invoke(
+        cli,
+        ["--agent", "cli", "--session-root", str(cli_root), "id", CLI_SESSION_ID],
+    )
+    assert result.exit_code == 0
+    load_pricing.assert_called_once_with(auto_refresh=False)
+
+
+def test_agent_all_list_is_local_only_by_default(runner, cli_root, tmp_path, mocker):
+    """`--agent all` also defaults to no network pricing refresh."""
+    vscode_root = tmp_path / "vscode-storage"
+    vscode_root.mkdir()
+    mocker.patch(
+        "copilot_session_usage._internal.vscode.default_workspace_storage_roots",
+        return_value=[vscode_root],
+    )
+    load_pricing = mocker.patch(
+        "copilot_session_usage.cli.core.load_pricing", return_value={"models": {}}
+    )
+    result = runner.invoke(
+        cli,
+        ["--agent", "all", "--session-root", str(cli_root), "list", "--costs"],
+    )
+    assert result.exit_code == 0
+    load_pricing.assert_called_once_with(auto_refresh=False)
+
+
+def test_agent_vscode_analyze_keeps_default_auto_refresh(runner, sample_session_dir, mocker):
+    """The default `vscode` provider preserves its historical auto-refresh attempt."""
+    load_pricing = mocker.patch(
+        "copilot_session_usage.cli.core.load_pricing", return_value={"models": {}}
+    )
+    result = runner.invoke(cli, ["analyze", str(sample_session_dir)])
+    assert result.exit_code == 0
+    load_pricing.assert_called_once_with(auto_refresh=True)
