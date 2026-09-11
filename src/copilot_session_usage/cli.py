@@ -8,19 +8,9 @@ from pathlib import Path
 
 import click
 
-from copilot_session_usage._internal import core, git, vscode
+from copilot_session_usage._internal import copilot_cli, core, git, vscode
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
-
-
-def _resolve_agent(agent: str) -> str:
-    """Validate agent choice and return it."""
-    if agent == "cli":
-        raise click.ClickException(
-            "Copilot-CLI session discovery is not yet implemented. "
-            "Use --agent vscode (the default)."
-        )
-    return agent
 
 
 @click.group(context_settings=CONTEXT_SETTINGS)
@@ -30,42 +20,223 @@ def _resolve_agent(agent: str) -> str:
     metavar="PATH",
     help=(
         "Override workspaceStorage directory (auto-detected by default). "
-        "Required on WSL2 when VS Code runs on the Windows host."
+        "Required on WSL2 when VS Code runs on the Windows host. Used by --agent vscode/all."
+    ),
+)
+@click.option(
+    "--session-root",
+    "session_root",
+    metavar="PATH",
+    help=(
+        "Override the Copilot CLI/App session-state root (auto-detected by default; "
+        "normally ~/.copilot/session-state). Used by --agent cli/all."
     ),
 )
 @click.option(
     "--agent",
     "agent",
-    type=click.Choice(("vscode", "cli")),
+    type=click.Choice(("vscode", "cli", "all")),
     default="vscode",
     show_default=True,
-    help="Provider to use for session discovery. 'cli' is not yet implemented.",
+    help=(
+        "Provider for session discovery: 'vscode' (VS Code Copilot Chat debug logs), "
+        "'cli' (Copilot CLI/Copilot App local sessions), or the explicit opt-in combined "
+        "mode 'all' (discovers and dedups sessions from each provider by UUID)."
+    ),
 )
 @click.pass_context
 def cli(
     ctx: click.Context,
     workspace_storage: str | None,
+    session_root: str | None,
     agent: str,
 ) -> None:
-    """Extract VS Code Copilot session cost KPIs from local debug logs.
+    """Extract Copilot session cost KPIs from local VS Code and Copilot CLI/App logs.
 
-    Reads JSONL debug logs written by the VS Code Copilot Chat extension to
-    compute per-session token counts, estimated USD spend, model breakdowns,
-    duration, and subagent attribution.
+    Reads JSONL logs written by the VS Code Copilot Chat extension
+    (workspaceStorage debug logs) and/or by Copilot CLI / the Copilot App
+    (``~/.copilot/session-state/<uuid>/events.jsonl``) to compute per-session
+    token counts, estimated USD spend, model breakdowns, duration, and
+    skill/tool attribution.
 
-    Sessions are auto-discovered from the VS Code workspaceStorage directory
-    (override with --workspace-storage). Use the subcommands below to analyze
+    Sessions are auto-discovered per --agent: from VS Code workspaceStorage
+    (override with --workspace-storage), from the Copilot CLI/App
+    session-state root (override with --session-root), or from both
+    explicitly with --agent all. Use the subcommands below to analyze
     individual sessions, the latest session, or batches.
 
     Output is controlled by --detail (minimal / compact / full) and
     --format (table / json / detailed). Key capabilities include per-model
     pricing with cache-hit discounts, threshold-aware tier switching for
-    long-context models, multi-model session handling, subagent cost
-    attribution, and cross-platform support (macOS, Linux, Windows, WSL2).
+    long-context models, multi-model session handling, subagent/skill/tool
+    cost attribution, and cross-platform support (macOS, Linux, Windows, WSL2).
     """
     ctx.ensure_object(dict)
     ctx.obj["workspace_storage"] = workspace_storage
-    ctx.obj["agent"] = _resolve_agent(agent)
+    ctx.obj["session_root"] = session_root
+    ctx.obj["agent"] = agent
+
+
+def _provider_roots(ctx: click.Context) -> dict[str, list[Path]]:
+    """Resolve discovery roots for the active agent(s) from CLI context."""
+    agent = ctx.obj.get("agent", "vscode")
+    roots: dict[str, list[Path]] = {}
+    if agent == "all":
+        workspace_storage = ctx.obj.get("workspace_storage")
+        if workspace_storage:
+            workspace_root = Path(workspace_storage)
+            if workspace_root.is_dir():
+                roots["vscode"] = [workspace_root]
+        else:
+            vscode_roots = vscode.default_workspace_storage_roots()
+            if vscode_roots:
+                roots["vscode"] = vscode_roots
+
+        session_root = ctx.obj.get("session_root")
+        if session_root:
+            cli_root = Path(session_root)
+            if cli_root.is_dir():
+                roots["cli"] = [cli_root]
+        else:
+            cli_roots = copilot_cli.default_session_state_roots()
+            if cli_roots:
+                roots["cli"] = cli_roots
+        return roots
+
+    if agent == "vscode":
+        roots["vscode"] = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
+    else:
+        roots["cli"] = copilot_cli.resolve_session_state_roots(ctx.obj.get("session_root"))
+    return roots
+
+
+def _discover_sessions(
+    ctx: click.Context,
+    *,
+    limit: int,
+    since_ms: int | None = None,
+    workspace_filter: str | None = None,
+    require_logs: bool = False,
+) -> list[dict]:
+    """Discover session metadata across the active provider(s), tagged and deduped."""
+    roots = _provider_roots(ctx)
+    lists: list[list[dict]] = []
+    if "vscode" in roots:
+        sessions = vscode.list_recent_sessions(
+            roots["vscode"],
+            limit=limit,
+            since_ms=since_ms,
+            workspace_filter=workspace_filter,
+            require_logs=require_logs,
+        )
+        for s in sessions:
+            s.setdefault("provider", "vscode")
+        lists.append(sessions)
+    if "cli" in roots:
+        sessions = copilot_cli.list_recent_sessions(
+            roots["cli"],
+            limit=limit,
+            since_ms=since_ms,
+            workspace_filter=workspace_filter,
+            require_logs=require_logs,
+        )
+        for s in sessions:
+            s.setdefault("provider", "cli")
+        lists.append(sessions)
+    if len(lists) == 1:
+        return lists[0][:limit]
+    return core.merge_provider_sessions(lists)[:limit]
+
+
+def _load_pricing_for_agent(agent: str) -> dict:
+    """Load pricing, keeping CLI/App and combined-mode analysis local-only by default.
+
+    The ``vscode`` provider preserves its historical behavior (a throttled
+    daily runtime pricing refresh attempt). The ``cli`` provider and the
+    combined ``all`` mode default to no network access, matching the CLI/App
+    integration's local-only design; use ``pricing refresh`` to opt into an
+    explicit network refresh.
+    """
+    return core.load_pricing(auto_refresh=(agent == "vscode"))
+
+
+def _analyze_session_record(session: dict, pricing: dict) -> dict:
+    """Analyze a session-metadata record produced by either provider's discovery."""
+    session_dir = Path(session["debug_log_dir"])
+    if session.get("provider") == "cli":
+        result = copilot_cli.analyze_cli_session(session_dir, pricing)
+    else:
+        result = core.analyze_session(session_dir, pricing)
+    result["title"] = session.get("title") or result.get("title")
+    result["provider"] = session.get("provider", result.get("provider", "vscode"))
+    return result
+
+
+def _analyze_path(agent: str, path: Path, pricing: dict) -> dict:
+    """Analyze a single session by explicit PATH, honoring --agent (not 'all')."""
+    if agent == "all":
+        msg = "PATH-based analysis requires a single provider; pass --agent vscode or --agent cli."
+        raise click.ClickException(msg)
+    if agent == "cli":
+        try:
+            return copilot_cli.analyze_cli_session(path, pricing)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+    return core.analyze_session(path, pricing)
+
+
+def _find_session_dir_by_id(ctx: click.Context, session_id: str) -> tuple[Path, str] | None:
+    """Search the active provider(s) for a session directory by UUID."""
+    roots = _provider_roots(ctx)
+    if "vscode" in roots:
+        session_dir = vscode.find_session_dir_by_id(session_id, roots["vscode"])
+        if session_dir is not None:
+            return session_dir, "vscode"
+    if "cli" in roots:
+        session_dir = copilot_cli.find_session_dir_by_id(session_id, roots["cli"])
+        if session_dir is not None:
+            return session_dir, "cli"
+    return None
+
+
+def _find_latest_session_dir(
+    ctx: click.Context, workspace_filter: str | None
+) -> tuple[Path, str] | None:
+    """Find the most recently modified session directory across the active provider(s)."""
+    roots = _provider_roots(ctx)
+    candidates: list[tuple[float, Path, str]] = []
+    if "vscode" in roots:
+        found = vscode.find_latest_session_dir(roots["vscode"], workspace_filter=workspace_filter)
+        if found is not None:
+            candidates.append((found.stat().st_mtime, found, "vscode"))
+    if "cli" in roots:
+        found = copilot_cli.find_latest_session_dir(roots["cli"], workspace_filter=workspace_filter)
+        if found is not None:
+            candidates.append(((found / copilot_cli.EVENTS_FILENAME).stat().st_mtime, found, "cli"))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: c[0], reverse=True)
+    _, path, provider = candidates[0]
+    return path, provider
+
+
+def _find_sessions_by_title(ctx: click.Context, title: str) -> list[dict]:
+    """Search the active provider(s) for sessions whose title matches ``title``."""
+    roots = _provider_roots(ctx)
+    lists: list[list[dict]] = []
+    if "vscode" in roots:
+        matches = vscode.find_sessions_by_title(title, roots["vscode"])
+        for m in matches:
+            m.setdefault("provider", "vscode")
+        lists.append(matches)
+    if "cli" in roots:
+        matches = copilot_cli.find_sessions_by_title(title, roots["cli"])
+        for m in matches:
+            m.setdefault("provider", "cli")
+        lists.append(matches)
+    if len(lists) == 1:
+        return lists[0]
+    return core.merge_provider_sessions(lists)
 
 
 def _apply_query(payload: object, query: str | None) -> object:
@@ -268,14 +439,14 @@ def analyze(
         raise click.ClickException("Provide a PATH or --name regex or --title substring.")
 
     out_path = Path(output_path) if output_path else None
-    pricing = core.load_pricing()
+    pricing = _load_pricing_for_agent(ctx.obj.get("agent", "vscode"))
 
     if log_dir:
         session_dir = Path(log_dir)
         if not session_dir.exists():
             msg = f"log directory not found: {session_dir}"
             raise click.ClickException(msg)
-        result = core.analyze_session(session_dir, pricing)
+        result = _analyze_path(ctx.obj.get("agent", "vscode"), session_dir, pricing)
         shaped = _shape_analysis_result(
             result,
             detail=detail,
@@ -289,10 +460,9 @@ def analyze(
         core.emit(output, core.normalize_format(format_), out_path)
         return
 
-    ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
     since_ms = core.parse_since_to_ms(since) if since else None
-    sessions = vscode.list_recent_sessions(
-        ws_roots, limit=1000, since_ms=since_ms, workspace_filter=workspace, require_logs=True
+    sessions = _discover_sessions(
+        ctx, limit=1000, since_ms=since_ms, workspace_filter=workspace, require_logs=True
     )
     if until:
         until_ms = core.parse_since_to_ms(until)
@@ -316,9 +486,7 @@ def analyze(
         session_dir = Path(session["debug_log_dir"])
         if not session_dir.exists():
             continue
-        result = core.analyze_session(session_dir, pricing)
-        result["title"] = session.get("title") or result.get("title")
-        results.append(result)
+        results.append(_analyze_session_record(session, pricing))
 
     payload: object
     if aggregate:
@@ -360,16 +528,19 @@ def latest(
     output_path: str | None,
 ) -> None:
     """Analyze the most recently modified session across all workspaces."""
-    ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
-    session_dir = vscode.find_latest_session_dir(ws_roots, workspace_filter=workspace)
-    if not session_dir:
-        msg = "no session debug logs found in workspace storage."
+    found = _find_latest_session_dir(ctx, workspace)
+    if not found:
+        msg = "no session logs found for the active provider(s)."
         raise click.ClickException(msg)
-    pricing = core.load_pricing()
-    result = core.analyze_session(session_dir, pricing)
-    session_id = session_dir.name
-    meta = vscode.find_session_metadata_by_id(session_id, ws_roots)
-    result["title"] = meta.get("title") if meta else result.get("title")
+    session_dir, provider = found
+    pricing = _load_pricing_for_agent(ctx.obj.get("agent", "vscode"))
+    if provider == "cli":
+        result = copilot_cli.analyze_cli_session(session_dir, pricing)
+    else:
+        result = core.analyze_session(session_dir, pricing)
+        ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
+        meta = vscode.find_session_metadata_by_id(session_dir.name, ws_roots)
+        result["title"] = meta.get("title") if meta else result.get("title")
     detail = core.resolve_detail(detail, format_)
     out_path = Path(output_path) if output_path else None
     core.emit(
@@ -401,8 +572,7 @@ def find_by_title(
     If more than one session matches, candidates are printed and the command
     exits with an error — re-run with `id <SESSION_ID>` to pick one.
     """
-    ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
-    matches = vscode.find_sessions_by_title(title, ws_roots)
+    matches = _find_sessions_by_title(ctx, title)
     if workspace:
         matches = [m for m in matches if workspace in m.get("workspace_folder", "")]
     if not matches:
@@ -418,11 +588,10 @@ def find_by_title(
     match = matches[0]
     session_dir = Path(match["debug_log_dir"])
     if not session_dir.exists():
-        msg = f"debug logs not present at: {session_dir}"
+        msg = f"session logs not present at: {session_dir}"
         raise click.ClickException(msg)
-    pricing = core.load_pricing()
-    result = core.analyze_session(session_dir, pricing)
-    result["title"] = match.get("title") or result.get("title")
+    pricing = _load_pricing_for_agent(ctx.obj.get("agent", "vscode"))
+    result = _analyze_session_record(match, pricing)
     detail = core.resolve_detail(detail, format_)
     out_path = Path(output_path) if output_path else None
     core.emit(
@@ -450,15 +619,19 @@ def analyze_by_id(
     skill_name: str | None,
 ) -> None:
     """Analyze a session by its exact SESSION_ID (UUID)."""
-    ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
-    session_dir = vscode.find_session_dir_by_id(session_id, ws_roots)
-    if not session_dir:
-        msg = f"no debug logs found for session ID: {session_id}"
+    found = _find_session_dir_by_id(ctx, session_id)
+    if not found:
+        msg = f"no session logs found for session ID: {session_id}"
         raise click.ClickException(msg)
-    pricing = core.load_pricing()
-    result = core.analyze_session(session_dir, pricing)
-    meta = vscode.find_session_metadata_by_id(session_id, ws_roots)
-    result["title"] = meta.get("title") if meta else result.get("title")
+    session_dir, provider = found
+    pricing = _load_pricing_for_agent(ctx.obj.get("agent", "vscode"))
+    if provider == "cli":
+        result = copilot_cli.analyze_cli_session(session_dir, pricing)
+    else:
+        result = core.analyze_session(session_dir, pricing)
+        ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
+        meta = vscode.find_session_metadata_by_id(session_id, ws_roots)
+        result["title"] = meta.get("title") if meta else result.get("title")
     shaped = _shape_analysis_result(
         result,
         detail=detail,
@@ -525,24 +698,46 @@ def list_sessions(
 ) -> None:
     """List recent sessions with optional cost analysis.
 
-    Without --dir, sessions are discovered from workspace storage metadata.
-    With --dir, session directories under PATH are scanned and analyzed.
+    Without --dir, sessions are discovered from the active --agent's default
+    roots (VS Code workspace storage, the Copilot CLI/App session-state
+    root, or all). With --dir, PATH is scanned for session directories in
+    the active --agent's layout instead: VS Code debug-log session
+    directories for --agent vscode (the default), or Copilot CLI/App
+    ``<uuid>/events.jsonl`` session directories for --agent cli. --dir
+    requires a single provider; it is not supported with --agent all.
     """
     out_path = Path(output_path) if output_path else None
     analyze_sessions = costs or bool(dir_path)
-    pricing = core.load_pricing()
+    pricing = _load_pricing_for_agent(ctx.obj.get("agent", "vscode"))
 
     if dir_path:
         debug_dir = Path(dir_path)
         if not debug_dir.exists():
             msg = f"directory not found: {debug_dir}"
             raise click.ClickException(msg)
-        sessions = core.list_session_dirs(debug_dir)
+        agent = ctx.obj.get("agent", "vscode")
+        if agent == "all":
+            msg = (
+                "listing --dir sessions requires a single provider; pass --agent vscode or "
+                "--agent cli."
+            )
+            raise click.ClickException(msg)
+        if agent == "cli":
+            since_ms = core.parse_since_to_ms(since) if since else None
+            # Treat PATH as a Copilot CLI session-root override (a directory
+            # of <uuid>/events.jsonl session directories), not the VS Code
+            # debug-logs layout used below.
+            sessions = copilot_cli.list_recent_sessions(
+                [debug_dir], limit=limit, since_ms=since_ms, workspace_filter=workspace
+            )
+        else:
+            sessions = core.list_session_dirs(debug_dir)
+            for s in sessions:
+                s.setdefault("provider", "vscode")
     else:
-        ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
         since_ms = core.parse_since_to_ms(since) if since else None
-        sessions = vscode.list_recent_sessions(
-            ws_roots, limit=limit, since_ms=since_ms, workspace_filter=workspace
+        sessions = _discover_sessions(
+            ctx, limit=limit, since_ms=since_ms, workspace_filter=workspace
         )
 
     if until:
@@ -563,9 +758,7 @@ def list_sessions(
             session_dir = Path(session["debug_log_dir"])
             if not session_dir.exists():
                 continue
-            result = core.analyze_session(session_dir, pricing)
-            result["title"] = session.get("title") or result.get("title")
-            analyzed.append(result)
+            analyzed.append(_analyze_session_record(session, pricing))
         sessions = analyzed
 
     core.emit(sessions, core.normalize_format(format_), out_path, costed_list=analyze_sessions)
@@ -604,14 +797,9 @@ def batch(
     aggregate across all N sessions plus a per-session array shaped by
     --detail. Much faster than N separate `id` invocations.
     """
-    ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
     since_ms = core.parse_since_to_ms(since) if since else None
-    sessions = vscode.list_recent_sessions(
-        ws_roots,
-        limit=count,
-        since_ms=since_ms,
-        workspace_filter=workspace,
-        require_logs=True,
+    sessions = _discover_sessions(
+        ctx, limit=count, since_ms=since_ms, workspace_filter=workspace, require_logs=True
     )
     if until:
         until_ms = core.parse_since_to_ms(until)
@@ -624,18 +812,99 @@ def batch(
             sessions = core.filter_sessions_by_name(sessions, name)
         except ValueError as exc:
             raise click.ClickException(str(exc)) from exc
-    pricing = core.load_pricing()
+    pricing = _load_pricing_for_agent(ctx.obj.get("agent", "vscode"))
     results: list[dict] = []
     for session in sessions:
         session_dir = Path(session["debug_log_dir"])
         if not session_dir.exists():
             continue
-        result = core.analyze_session(session_dir, pricing)
-        result["title"] = session.get("title") or result.get("title")
-        results.append(result)
+        results.append(_analyze_session_record(session, pricing))
     detail = core.resolve_detail(detail, format_)
     out_path = Path(output_path) if output_path else None
     core.emit(core.shape_batch(results, detail), core.normalize_format(format_), out_path)
+
+
+@cli.command()
+@core.format_option
+@core.output_option
+@core.title_filter_option
+@click.option(
+    "--last",
+    "last_window",
+    metavar="DURATION",
+    help="Only sessions started within the last DURATION (e.g. 7d, 24h, 30m).",
+)
+@click.option(
+    "--since", metavar="DATE", help="Only sessions created after DATE (ISO 8601 with timezone)."
+)
+@click.option(
+    "--until", metavar="DATE", help="Only sessions created before DATE (ISO 8601 with timezone)."
+)
+@click.option(
+    "--workspace", metavar="PATH", help="Only consider sessions from this workspace folder."
+)
+@click.option("--name", metavar="REGEX", help="Only sessions whose title or ID matches REGEX.")
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1),
+    default=1000,
+    show_default=True,
+    help="Maximum number of sessions to inspect.",
+)
+@click.pass_context
+def span(
+    ctx: click.Context,
+    last_window: str | None,
+    since: str | None,
+    until: str | None,
+    workspace: str | None,
+    name: str | None,
+    title_filter: str | None,
+    limit: int,
+    format_: str,
+    output_path: str | None,
+) -> None:
+    """Emit a compact total/model/session report for a date span.
+
+    This is the preferred machine-readable report for multi-session analysis:
+    it omits full skills, subagents, diagnostics, and pricing prose.
+    """
+    since_ms = core.parse_since_to_ms(since) if since else None
+    if last_window:
+        since_ms = core.parse_last_window_to_ms(last_window)
+        if since_ms is None:
+            raise click.ClickException(
+                f"invalid --last value: {last_window!r}. Use e.g. 7d, 24h, 30m."
+            )
+    sessions = _discover_sessions(
+        ctx, limit=limit, since_ms=since_ms, workspace_filter=workspace, require_logs=True
+    )
+    if until:
+        until_ms = core.parse_since_to_ms(until)
+        if until_ms is not None:
+            sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
+    if title_filter:
+        sessions = [s for s in sessions if title_filter.lower() in (s.get("title") or "").lower()]
+    if name:
+        try:
+            sessions = core.filter_sessions_by_name(sessions, name)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+    pricing = _load_pricing_for_agent(ctx.obj.get("agent", "vscode"))
+    results: list[dict] = []
+    for session in sessions:
+        session_dir = Path(session["debug_log_dir"])
+        if session_dir.exists():
+            results.append(_analyze_session_record(session, pricing))
+    payload = core.shape_span_report(
+        results,
+        since=since,
+        until=until,
+        last=last_window,
+    )
+    out_path = Path(output_path) if output_path else None
+    core.emit(payload, core.normalize_format(format_), out_path)
 
 
 @cli.command(name="amend-commit")
@@ -780,7 +1049,6 @@ def skills_command(
     Discovers sessions from workspace storage, analyzes each one, and rolls
     up per-skill token counts and estimated cost.
     """
-    ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
     since_ms = core.parse_since_to_ms(since) if since else None
     if last_window:
         since_ms = core.parse_last_window_to_ms(last_window)
@@ -788,12 +1056,8 @@ def skills_command(
             raise click.ClickException(
                 f"invalid --last value: {last_window!r}. Use e.g. 7d, 24h, 30m."
             )
-    sessions = vscode.list_recent_sessions(
-        ws_roots,
-        limit=1000,
-        since_ms=since_ms,
-        workspace_filter=workspace,
-        require_logs=True,
+    sessions = _discover_sessions(
+        ctx, limit=1000, since_ms=since_ms, workspace_filter=workspace, require_logs=True
     )
     if until:
         until_ms = core.parse_since_to_ms(until)
@@ -802,15 +1066,13 @@ def skills_command(
     if not sessions:
         raise click.ClickException("no sessions matched the given filters.")
 
-    pricing = core.load_pricing()
+    pricing = _load_pricing_for_agent(ctx.obj.get("agent", "vscode"))
     results: list[dict] = []
     for session in sessions:
         session_dir = Path(session["debug_log_dir"])
         if not session_dir.exists():
             continue
-        result = core.analyze_session(session_dir, pricing)
-        result["title"] = session.get("title") or result.get("title")
-        results.append(result)
+        results.append(_analyze_session_record(session, pricing))
 
     payload = core.aggregate_skills(results)
     out_path = Path(output_path) if output_path else None

@@ -41,6 +41,35 @@ Each field:
 
 ---
 
+## Analyze a Copilot CLI or Copilot App session
+
+VS Code remains the default provider. To analyze sessions created by standalone
+Copilot CLI or the Copilot App, select the `cli` provider explicitly:
+
+```bash
+# Analyze the most recently modified Copilot CLI/App session
+copilot-session-usage --agent cli latest --format table
+
+# List discovered CLI/App sessions
+copilot-session-usage --agent cli list --format table
+
+# Analyze a known session UUID
+copilot-session-usage --agent cli id <session-uuid> --format table
+```
+
+On macOS, CLI/App sessions are discovered under
+`~/.copilot/session-state/`. Use `--session-root PATH` for an alternate root,
+or pass a session directory or exported `events.jsonl` file to `analyze`
+explicitly. See the [Copilot CLI/App provider guide](../how-to/copilot-cli-provider.md)
+for the complete workflow.
+
+CLI/App sessions use the final `session.shutdown` event for shared token and
+estimated-cost totals. Active or interrupted sessions may expose only
+provider-native counters; their unavailable shared totals are reported as
+unavailable rather than as zero.
+
+---
+
 ## Details Tables
 
 `--format` controls the output type. Default is `json`:

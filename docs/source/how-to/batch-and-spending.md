@@ -1,6 +1,8 @@
 # Track Spending Over Time
 
-Use `batch` with `--since` to aggregate costs for a time window.
+Use `span` with `--since` and `--until` for a compact total/model/session
+breakdown of a time window. It is preferred over manually listing sessions
+and analyzing them one by one.
 
 For a specific set of related sessions (for example, all sessions whose title
 matches a PRD or feature), prefer `analyze --name ... --aggregate`. It reads
@@ -13,37 +15,54 @@ copilot-session-usage analyze --name "feature-x" --aggregate --format table
 ## Daily cost report
 
 ```bash
-# All sessions today
-copilot-session-usage batch 50 --since $(date +%Y-%m-%d)
+# All sessions today (replace bounds with the local timezone)
+copilot-session-usage --agent all span \
+  --since 2026-07-02T00:00:00+02:00 \
+  --until 2026-07-02T23:59:59+02:00 \
+  --format table
 ```
 
 ## Weekly report
 
 ```bash
-copilot-session-usage batch 100 --since 2026-06-25
+# Rolling seven-day report
+copilot-session-usage --agent all span --last 7d --format table
 ```
 
 Sample output:
 
 ```
-Sessions analyzed: 23
-Total input:       8,412,304 tokens
-Total output:      142,887 tokens
-Total cached:      7,103,220 (84%)
-Total LLM calls:   312
-Est. total cost:   $11.74
+Span report (since 2026-07-02T00:00:00+02:00, until 2026-07-02T23:59:59+02:00)
 
-Session                            Started              Cost
-Implement new feature X            2026-07-02 09:14Z   $0.42
-Debug failing CI pipeline          2026-07-01 18:03Z   $1.87
+Total:
+  Sessions:       23
+  Input:          8,412,304 tokens
+  Output:         142,887 tokens
+  Cached:         7,103,220 tokens (avg ratio 84%)
+  LLM calls:      312
+  Estimated cost: $11.7400
+
+Per model:
+  Model                  Sessions       Input    Output   Cached  Calls     Cost
+  Claude Sonnet 4.6             18   7,900,000   130,000  6,900,000    280  $10.5000
+
+Per session:
+  Session                         Provider  Started              Duration  Calls      Cost
+  Implement new feature X        vscode    2026-07-02 09:14:00       42s      8   $0.4200
+  Debug failing CI pipeline      cli       2026-07-01 18:03:00      8m      31   $1.8700
 ...
 ```
+
+The JSON form follows the stable contract in the packaged
+`span-analysis-template.md` reference. A session with missing cost evidence
+has `null` token/cost fields and is counted separately; it is not silently
+treated as a zero-cost session.
 
 ## Save to a file and diff
 
 ```bash
-copilot-session-usage batch 100 --since 2026-07-01 \
-  --format json --output july-costs.json
+copilot-session-usage --agent all span --last 7d \
+  --format json --output weekly-costs.json
 ```
 
 Then open `july-costs.json` in any tool that understands JSON arrays.
@@ -88,7 +107,6 @@ Skills across 23 sessions:
 ```bash
 # ~/.zshrc or crontab -e
 # Run every Sunday at 23:55, append weekly cost to a log
-55 23 * * 0 copilot-session-usage batch 200 \
-  --since $(date -v-7d +%Y-%m-%d) \
+55 23 * * 0 copilot-session-usage --agent all span --last 7d \
   --format json >> ~/copilot-costs.jsonl
 ```

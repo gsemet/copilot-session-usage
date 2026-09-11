@@ -819,6 +819,40 @@ def test_shape_batch_always_has_summary_and_sessions(full_session_result):
     assert batch["summary"]["session_count"] == 2
 
 
+def test_shape_span_report_has_total_models_and_minimal_sessions(full_session_result):
+    unavailable = {
+        **full_session_result,
+        "session_id": "unavailable",
+        "provider": "cli",
+        "total": {
+            "input_tokens": None,
+            "output_tokens": None,
+            "cached_tokens": None,
+            "llm_calls": None,
+            "estimated_usd": None,
+            "cache_ratio": None,
+        },
+        "model_breakdown": [],
+    }
+    report = core.shape_span_report(
+        [full_session_result, unavailable],
+        since="2026-07-01T00:00:00Z",
+        until="2026-07-02T00:00:00Z",
+    )
+
+    assert set(report) == {"report", "period", "total", "models", "sessions"}
+    assert report["report"] == "span"
+    assert report["period"]["since"] == "2026-07-01T00:00:00Z"
+    assert report["total"]["session_count"] == 2
+    assert report["total"]["total_input_tokens"] == 1_000
+    assert report["total"]["sessions_with_unavailable_cost"] == 1
+    assert report["models"][0]["model"] == "claude-sonnet-4.6"
+    assert report["models"][0]["session_count"] == 1
+    assert report["sessions"][0]["total"]["estimated_usd"] == 0.42
+    assert report["sessions"][1]["total"]["estimated_usd"] is None
+    assert "skills" not in report["sessions"][0]
+
+
 # ─── Session usage trailer helpers ───────────────────────────────────────────
 
 
@@ -1059,6 +1093,62 @@ def test_merge_session_results_empty():
     assert core.merge_session_results([]) == {"total": {}, "model_breakdown": []}
 
 
+def test_merge_session_results_partial_model_evidence_never_crashes():
+    """A model_breakdown row with None fields never crashes the merge.
+
+    crashes the per-model sum, and only the fully-reported session contributes to
+    that field's merged total, matching the ``total``-level ``_measured`` behavior.
+    """
+    results = [
+        {
+            "total": {
+                "input_tokens": None,
+                "output_tokens": None,
+                "cached_tokens": None,
+                "llm_calls": None,
+                "estimated_usd": None,
+            },
+            "model_breakdown": [
+                {
+                    "model": "gpt-partial",
+                    "input_tokens": None,
+                    "output_tokens": None,
+                    "cached_tokens": None,
+                    "llm_calls": 2,
+                    "estimated_usd": None,
+                },
+            ],
+        },
+        {
+            "total": {
+                "input_tokens": 1_000,
+                "output_tokens": 200,
+                "cached_tokens": 100,
+                "llm_calls": 3,
+                "estimated_usd": 0.5,
+            },
+            "model_breakdown": [
+                {
+                    "model": "gpt-partial",
+                    "input_tokens": 1_000,
+                    "output_tokens": 200,
+                    "cached_tokens": 100,
+                    "llm_calls": 3,
+                    "estimated_usd": 0.5,
+                },
+            ],
+        },
+    ]
+    merged = core.merge_session_results(results)
+    gpt = merged["model_breakdown"][0]
+    assert gpt["model"] == "gpt-partial"
+    assert gpt["input_tokens"] == 1_000
+    assert gpt["output_tokens"] == 200
+    assert gpt["cached_tokens"] == 100
+    assert gpt["llm_calls"] == 5
+    assert gpt["estimated_usd"] == 0.5
+
+
 def test_shape_batch_empty():
     batch = core.shape_batch([], "compact")
     assert batch["summary"]["session_count"] == 0
@@ -1100,6 +1190,12 @@ def test_parse_since_to_ms_with_timezone_offset():
 
 def test_parse_since_to_ms_invalid_returns_none():
     assert core.parse_since_to_ms("not-a-date") is None
+
+
+@pytest.mark.parametrize("value", [None, 12345, 12.5, {"a": 1}, ["a"], True, False])
+def test_parse_since_to_ms_non_string_returns_none(value):
+    """Non-string evidence (e.g. from JSON-parsed CLI events) never raises."""
+    assert core.parse_since_to_ms(value) is None
 
 
 # ─── Name filtering ───────────────────────────────────────────────────────────
@@ -1163,6 +1259,81 @@ def test_compute_efficiency_summary_empty_model_breakdown():
     assert summary["model_split"] == []
 
 
+def test_compute_efficiency_summary_unavailable_evidence_stays_none():
+    """Unavailable evidence (e.g. a CLI checkpoint-only session) propagates as None."""
+    result = {
+        "session_id": "s1",
+        "title": "Unavailable",
+        "total": {
+            "input_tokens": None,
+            "output_tokens": None,
+            "cached_tokens": None,
+            "llm_calls": None,
+            "estimated_usd": None,
+            "cache_ratio": None,
+        },
+        "model_breakdown": [],
+    }
+    summary = core.compute_efficiency_summary(result)
+    assert summary["total_tokens"] is None
+    assert summary["total_input_tokens"] is None
+    assert summary["llm_calls"] is None
+    assert summary["estimated_usd"] is None
+    assert summary["cost_per_1m_tokens"] is None
+    assert summary["cache_ratio"] is None
+
+
+def test_compute_efficiency_summary_partial_model_evidence_preserved_and_no_crash():
+    """A model row with partial evidence never crashes the efficiency summary.
+
+    never crashes the split math, and its own None fields are preserved rather than
+    fabricated as 0, while a fully-reported sibling model is still split correctly.
+    """
+    result = {
+        "session_id": "s1",
+        "title": "Partial",
+        "total": {
+            "input_tokens": 500,
+            "output_tokens": 100,
+            "cached_tokens": 0,
+            "llm_calls": 3,
+            "estimated_usd": 0.1,
+            "cache_ratio": 0.0,
+        },
+        "model_breakdown": [
+            {
+                "model": "gpt-partial",
+                "input_tokens": None,
+                "output_tokens": None,
+                "cached_tokens": None,
+                "llm_calls": 2,
+                "estimated_usd": None,
+            },
+            {
+                "model": "gpt-full",
+                "input_tokens": 500,
+                "output_tokens": 100,
+                "cached_tokens": 0,
+                "llm_calls": 1,
+                "estimated_usd": 0.1,
+            },
+        ],
+    }
+    summary = core.compute_efficiency_summary(result)
+    by_model = {m["model"]: m for m in summary["model_split"]}
+    assert by_model["gpt-partial"]["input_tokens"] is None
+    assert by_model["gpt-partial"]["output_tokens"] is None
+    assert by_model["gpt-partial"]["cached_tokens"] is None
+    assert by_model["gpt-partial"]["estimated_usd"] is None
+    assert by_model["gpt-partial"]["llm_calls"] == 2
+    assert by_model["gpt-partial"]["split_ratio"] == 0.0
+    assert by_model["gpt-partial"]["cost_per_1m_input_tokens"] == 0.0
+    assert by_model["gpt-full"]["input_tokens"] == 500
+    # The fully-reported model gets the entire available input for the ratio,
+    # since the partial-evidence model contributes nothing to the denominator.
+    assert by_model["gpt-full"]["split_ratio"] == 1.0
+
+
 # ─── Aggregate sessions ───────────────────────────────────────────────────────
 
 
@@ -1181,6 +1352,105 @@ def test_aggregate_sessions_empty():
     assert aggregate["session_count"] == 0
     assert aggregate["total_estimated_usd"] == 0.0
     assert aggregate["model_split"] == []
+
+
+def test_aggregate_sessions_excludes_unavailable_evidence(full_session_result):
+    """A session with unavailable evidence contributes nothing to totals."""
+    unavailable = {
+        "session_id": "s2",
+        "title": "Unavailable",
+        "total": {
+            "input_tokens": None,
+            "output_tokens": None,
+            "cached_tokens": None,
+            "llm_calls": None,
+            "estimated_usd": None,
+            "cache_ratio": None,
+        },
+        "model_breakdown": [],
+    }
+    only_available = core.aggregate_sessions([full_session_result])
+    with_unavailable = core.aggregate_sessions([full_session_result, unavailable])
+    assert with_unavailable["total_input_tokens"] == only_available["total_input_tokens"]
+    assert with_unavailable["total_estimated_usd"] == only_available["total_estimated_usd"]
+    assert with_unavailable["avg_cache_ratio"] == only_available["avg_cache_ratio"]
+
+
+def test_aggregate_sessions_partial_model_evidence_never_crashes():
+    """A model_breakdown row with None fields across sessions never crashes.
+
+    per-model cross-session sum or the sort-by-cost model_split ordering.
+    """
+    partial = {
+        "session_id": "s1",
+        "title": "Partial",
+        "total": {
+            "input_tokens": None,
+            "output_tokens": None,
+            "cached_tokens": None,
+            "llm_calls": 2,
+            "estimated_usd": None,
+        },
+        "model_breakdown": [
+            {
+                "model": "gpt-partial",
+                "input_tokens": None,
+                "output_tokens": None,
+                "cached_tokens": None,
+                "llm_calls": 2,
+                "estimated_usd": None,
+            },
+        ],
+    }
+    full = {
+        "session_id": "s2",
+        "title": "Full",
+        "total": {
+            "input_tokens": 1_000,
+            "output_tokens": 200,
+            "cached_tokens": 100,
+            "llm_calls": 3,
+            "estimated_usd": 0.5,
+        },
+        "model_breakdown": [
+            {
+                "model": "gpt-partial",
+                "input_tokens": 1_000,
+                "output_tokens": 200,
+                "cached_tokens": 100,
+                "llm_calls": 3,
+                "estimated_usd": 0.5,
+            },
+        ],
+    }
+    aggregate = core.aggregate_sessions([partial, full])
+    assert aggregate["session_count"] == 2
+    assert aggregate["total_input_tokens"] == 1_000
+    assert aggregate["total_llm_calls"] == 5
+    model_row = aggregate["model_split"][0]
+    assert model_row["model"] == "gpt-partial"
+    assert model_row["input_tokens"] == 1_000
+    assert model_row["llm_calls"] == 5
+    assert model_row["estimated_usd"] == 0.5
+
+
+def test_shape_batch_excludes_unavailable_cost_and_reports_count(full_session_result):
+    unavailable = {
+        **full_session_result,
+        "session_id": "s2",
+        "total": {
+            "input_tokens": None,
+            "output_tokens": None,
+            "cached_tokens": None,
+            "llm_calls": None,
+            "estimated_usd": None,
+            "cache_ratio": None,
+        },
+    }
+    batch = core.shape_batch([full_session_result, unavailable], "compact")
+    assert batch["summary"]["total_estimated_usd"] == full_session_result["total"]["estimated_usd"]
+    assert batch["summary"]["total_input_tokens"] == full_session_result["total"]["input_tokens"]
+    assert batch["summary"]["sessions_with_unavailable_cost"] == 1
 
 
 # ─── JSON path query ──────────────────────────────────────────────────────────

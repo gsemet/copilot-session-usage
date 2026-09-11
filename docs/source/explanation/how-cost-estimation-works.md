@@ -1,7 +1,8 @@
 # How Cost Estimation Works
 
-`copilot-session-usage` estimates session costs from VS Code debug logs.
-This page explains each step.
+`copilot-session-usage` estimates session costs from local VS Code Copilot
+debug logs (`--agent vscode`, the default) or local Copilot CLI/Copilot App
+session logs (`--agent cli`). This page explains each step for both.
 
 ---
 
@@ -131,6 +132,147 @@ Each `llm_request` and `tool_call` is attributed to the most recently invoked
 skill at that timestamp. The result is included in the session report under the
 `skills` key and can be surfaced with `--skill-breakdown`, `--tool-breakdown`,
 or `--skill <name>`.
+
+---
+
+## Copilot CLI / Copilot App provider (`--agent cli`)
+
+Everything above this section describes the `vscode` provider. The `cli`
+provider reads a different local log format, but reuses the same pricing,
+cache, and long-context logic described below.
+
+### Where the logs live
+
+Copilot CLI and the Copilot App store one directory per session under
+`~/.copilot/session-state/<session-uuid>/` (override the root with
+`--session-root`):
+
+```
+session-state/
+└── <session-uuid>/
+    ├── events.jsonl      ← structured event log (primary evidence)
+    └── workspace.yaml    ← optional sidecar: title, cwd, git branch, timestamps
+```
+
+An explicit session directory, or a relocated/exported `events.jsonl` file, can
+also be analyzed directly without discovery — useful for sharing a single
+session's logs without exposing the rest of the session-state tree.
+
+### How sessions are discovered
+
+A session directory is valid when its name is a session UUID and it contains
+`events.jsonl`. `workspace.yaml` is optional sidecar metadata (title, working
+directory, git branch, creation/update timestamps); its absence does not make
+a session invalid, it only means that metadata is unavailable.
+
+An explicit path (a relocated directory or a bare `events.jsonl` file) is
+analyzed only when its evidence is recognizable and its identity is
+verifiable: the file must contain at least one recognized event record (a
+JSON object with a `type` field), and a canonical session UUID must be
+determinable — from the session directory's name, or otherwise from a
+`session.start` event's `sessionId`. A source that fails either check is
+rejected with an actionable error rather than being silently analyzed with an
+identity fabricated from the file name, or as an empty/zero-evidence session.
+
+### Parsing `events.jsonl`
+
+Each line is one JSON event with a `type`, a `data` payload, and a
+`timestamp`. The events used for cost analysis:
+
+- `session.start` / `session.resume` — session UUID, selected model, working
+  directory, and start time.
+- `skill.invoked` — skill name and invocation time, used to attribute
+  subsequent tool calls to the active skill.
+- `tool.execution_start` / `tool.execution_complete` — per-tool-call counts.
+- `session.shutdown` — the authoritative, cumulative usage summary for the
+  whole session: per-model `usage` (input/output/cache-read/cache-write/
+  reasoning tokens), per-model `totalNanoAiu`, and `totalApiDurationMs`.
+- `session.usage_checkpoint` — a lighter-weight, periodic cumulative counter
+  (`totalNanoAiu`, `totalPremiumRequests`, and the models currently in use)
+  used only as a fallback when no `session.shutdown` event exists yet.
+
+Only the **last** `session.shutdown` event is used: Copilot CLI reports it as
+a running total for the whole session, including across resumes, so earlier
+occurrences would double-count.
+
+Event types this parser does not recognize, and schema versions other than
+the currently validated one, are skipped rather than treated as fatal — the
+session is still analyzed from the events it does understand, and a note is
+added to `diagnostics` explaining what was skipped.
+
+### Cost calculation
+
+The shared, token-based pricing calculation (the same as the VS Code
+provider's, described above) is applied to the per-model `usage` reported in
+`session.shutdown`. Copilot CLI's own per-model billing figure,
+`totalNanoAiu`, is *not* used for this calculation: it is reported separately
+under `provider_usage.total_nano_aiu` and never substituted for or blended
+into `total.estimated_usd` or `model_breakdown[].estimated_usd`, since it is
+not validated to carry the same USD-billing meaning as VS Code's own
+`copilotUsageNanoAiu` field.
+
+### When usage is unavailable
+
+A session that is still active, or that was interrupted before shutting down,
+has no `session.shutdown` event. In that case:
+
+- Per-model token totals, the model breakdown, skill cost breakdown, and the
+  shared `total` block (tokens, cost, cache ratio) are all unavailable — they
+  are represented as `null`/missing, **never** as a fabricated zero.
+- If a `session.usage_checkpoint` exists, its cumulative `totalNanoAiu` and
+  `totalPremiumRequests` are still reported under `provider_usage` (separate
+  from the shared token/cost calculation), but the shared `total` block stays
+  unavailable — there is no per-model token breakdown at checkpoint
+  granularity to price.
+- `diagnostics` explains exactly what is unavailable and why.
+- Batch/aggregate operations exclude sessions with unavailable evidence from
+  their sums (rather than counting them as zero) and report how many were
+  excluded via `sessions_with_unavailable_cost`.
+
+### Skill and tool attribution
+
+Skills are detected from `skill.invoked` events (no slash-command guessing).
+Tool calls are attributed to the most recently invoked skill at that
+timestamp, the same way the VS Code provider attributes LLM calls. Attribution
+is scoped per `agentId` (see "Subagent attribution" below), so a subagent's
+skill invocations never bleed into the main session's tool attribution, or
+vice versa, when their events interleave in the log. Per-skill **cost**
+attribution is not available for this provider: `events.jsonl` only exposes
+cumulative session-level token totals, not per-request ones, so
+`skills.breakdown` is empty and `--skill-breakdown` reports no per-skill cost
+for `cli` sessions even though `skills.detected` and `--tool-breakdown` are
+populated.
+
+### Subagent attribution
+
+`subagent.started` and `subagent.completed` events, plus each event's
+top-level `agentId` field, are the evidence this provider currently parses for
+subagent activity. Other subagent event types are retained as unknown-event
+diagnostics. `agentId` is present on `tool.execution_start`/
+`tool.execution_complete`/`skill.invoked` events that happened inside a
+subagent's own execution, and absent for the top-level session. This is used
+to:
+
+- attribute `--tool-breakdown` rows to the subagent's display name (falling
+  back to the raw `agentId` if its `subagent.started` event wasn't captured),
+  instead of collapsing every tool call into `main`;
+- populate `provider_usage.subagents`: one row per observed `agentId` with
+  its name, model, total tool-call count, a combined `total_tokens_reported`,
+  and duration — all evidence taken directly from `subagent.started`/
+  `subagent.completed`.
+
+The shared, per-subagent `subagents` block (the same contract VS Code
+populates with a validated input/output/cached split per subagent) stays
+empty for `cli` sessions: `subagent.completed` reports only a single combined
+`totalTokens` figure, with no validated split to populate that contract
+without fabricating it.
+
+### Provider-native counters
+
+`provider_usage` always carries Copilot CLI's own counters — `total_nano_aiu`,
+`total_premium_requests`, `shutdown_type`, `resume_count`, and `code_changes`
+— separately from the shared `total` block. These are never substituted for
+the shared token/estimated-USD calculation.
 
 ---
 

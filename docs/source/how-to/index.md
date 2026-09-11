@@ -6,6 +6,7 @@ Task-oriented recipes for common workflows.
 :maxdepth: 1
 
 analyze-specific-session
+copilot-cli-provider
 add-commit-trailer
 export-json
 batch-and-spending

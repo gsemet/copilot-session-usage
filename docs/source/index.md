@@ -2,16 +2,19 @@
 
 [![GitHub](https://img.shields.io/badge/GitHub-copilot--session--usage-181717?logo=github)](https://github.com/gsemet/copilot-session-usage)
 
-**copilot-session-usage** reads VS Code Copilot debug logs and tells you
-how much each AI coding session cost in USD.
+**copilot-session-usage** reads local VS Code Copilot debug logs and/or local
+Copilot CLI/Copilot App session logs and tells you how much each AI coding
+session cost in USD.
 
-VS Code does not show session costs in its UI. The debug logs contain
-token counts per model. This tool reads those logs, applies the real
-published pricing (with cache discounts and long-context tiers), and
-prints a cost report in seconds.
+Neither VS Code nor Copilot CLI/Copilot App show session costs in their UI.
+Their local logs contain token counts per model. This tool reads those logs,
+applies the real published pricing (with cache discounts and long-context
+tiers), and prints a cost report in seconds — all from files already on your
+machine, with no network access required.
 
 The most common use: after a heavy agentic session, run
-`copilot-session-usage latest` to see what it cost.
+`copilot-session-usage latest` (or `copilot-session-usage --agent cli latest`
+for Copilot CLI/App sessions) to see what it cost.
 
 Links to source code: [gsemet/copilot-session-usage](https://github.com/gsemet/copilot-session-usage)
 
@@ -36,8 +39,8 @@ Analyze your first session and understand the output in under 5 minutes.
 :link: how-to/index
 :link-type: doc
 
-Export to JSON, track spending over time, integrate in scripts,
-and configure WSL2.
+Export to JSON, analyze Copilot CLI/App sessions, track spending over time,
+integrate in scripts, and configure WSL2.
 :::
 
 :::{grid-item-card} 📚 Reference
