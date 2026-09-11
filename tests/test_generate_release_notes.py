@@ -43,9 +43,11 @@ def test_build_copilot_command_leaves_model_selection_to_cli_when_unset() -> Non
     command = build_copilot_command("release prompt", None)
 
     assert "--model" not in command
-    assert "--allow-all-tools" in command
-    assert "--available-tools=read" in command
-    assert not any(argument == "--allow-tool=write" for argument in command)
+    assert "--available-tools=read,create,edit,bash" in command
+    assert "--allow-tool=read" in command
+    assert "--allow-tool=write" in command
+    assert "--allow-tool=shell(git:*)" in command
+    assert "--allow-all-tools" not in command
 
 
 def test_parser_uses_generic_git_ref_arguments() -> None:
@@ -64,8 +66,10 @@ def test_build_prompt_contains_generic_execution_contract() -> None:
     assert "Use the /gh-release-notes skill" in prompt
     assert "skill is authoritative" in prompt
     assert str(Path("/tmp/notes.md")) in prompt
-    assert "wrapper writes it" in prompt
-    assert "Do not create or edit the output file through tools" in prompt
+    assert f"file {Path('/tmp/notes.md')}" in prompt
+    assert "file-writing tools" in prompt
+    assert "response stream is discarded" in prompt
+    assert "Do not put release notes or" in prompt
     assert "See the [pricing reference for details]" in prompt
     assert "never as a bare URL" in prompt
     assert "omit Maintenance" in prompt
@@ -149,8 +153,8 @@ def test_require_copilot_token_fails_without_authentication(monkeypatch: MonkeyP
         require_copilot_token()
 
 
-def test_run_copilot_returns_final_response(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
-    """Return the response so the wrapper can persist it deterministically."""
+def test_run_copilot_discards_successful_response(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    """Do not use Copilot's response stream as the release-note artifact."""
 
     def fake_subprocess_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         del args, kwargs
@@ -163,15 +167,13 @@ def test_run_copilot_returns_final_response(monkeypatch: MonkeyPatch, tmp_path: 
 
     monkeypatch.setattr(MODULE["subprocess"], "run", fake_subprocess_run)
 
-    assert run_copilot(tmp_path, "release prompt", None) == (
-        "## Enhancements\n\n- Useful change.\n"
-    )
+    assert run_copilot(tmp_path, "release prompt", None) is None
 
 
-def test_generate_release_notes_writes_copilot_response(
+def test_generate_release_notes_validates_skill_written_file(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Write Copilot's final response to the requested output path."""
+    """Validate the file written by the skill at the requested output path."""
     repo = tmp_path / "repo"
     repo.mkdir()
     function_globals = generate_release_notes.__globals__
@@ -179,11 +181,14 @@ def test_generate_release_notes_writes_copilot_response(
     monkeypatch.setitem(function_globals, "require_copilot_token", lambda: None)
     monkeypatch.setitem(function_globals, "run_skill_check", lambda *args: None)
     monkeypatch.setitem(function_globals, "build_git_context", lambda *args: "git evidence")
-    monkeypatch.setitem(
-        function_globals,
-        "run_copilot",
-        lambda *args: "## Enhancements\n\n- Useful change.\n",
-    )
+
+    def fake_run_copilot(repo_arg: Path, prompt: str, model: str | None) -> None:
+        del prompt, model
+        (repo_arg / "release-notes.md").write_text(
+            "## Enhancements\n\n- Useful change.\n", encoding="utf-8"
+        )
+
+    monkeypatch.setitem(function_globals, "run_copilot", fake_run_copilot)
 
     generate_release_notes(repo, "v0.1.0", "v0.2.0", Path("release-notes.md"), None)
 
@@ -192,10 +197,34 @@ def test_generate_release_notes_writes_copilot_response(
     )
 
 
+def test_generate_release_notes_precreates_shared_handoff_file(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """Give the skill an existing shared file to edit instead of relying on file creation."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    function_globals = generate_release_notes.__globals__
+    monkeypatch.setitem(function_globals, "validate_range", lambda *args: None)
+    monkeypatch.setitem(function_globals, "require_copilot_token", lambda: None)
+    monkeypatch.setitem(function_globals, "run_skill_check", lambda *args: None)
+    monkeypatch.setitem(function_globals, "build_git_context", lambda *args: "git evidence")
+
+    def fake_run_copilot(repo_arg: Path, prompt: str, model: str | None) -> None:
+        del prompt, model
+        assert (repo_arg / "release-notes.md").exists()
+        (repo_arg / "release-notes.md").write_text(
+            "## Maintenance\n\nNo user-facing behavior changed.\n", encoding="utf-8"
+        )
+
+    monkeypatch.setitem(function_globals, "run_copilot", fake_run_copilot)
+
+    generate_release_notes(repo, "v0.1.0", "v0.2.0", Path("release-notes.md"), None)
+
+
 def test_validate_output_preserves_skill_authored_markdown(tmp_path: Path) -> None:
     """Verify the output file without rewriting the skill's Markdown."""
     output = tmp_path / "release-notes.md"
-    content = "preamble\n\n## Enhancements\n\nA useful change.\n"
+    content = "## Enhancements\n\nA useful change.\n"
     output.write_text(content, encoding="utf-8")
 
     validate_output(output)
@@ -204,11 +233,12 @@ def test_validate_output_preserves_skill_authored_markdown(tmp_path: Path) -> No
 
 
 def test_validate_output_accepts_markdown_without_interpreting_it(tmp_path: Path) -> None:
-    """Leave content decisions to the skill rather than rejecting unfamiliar headings."""
+    """Reject output that does not start with a permitted release-note section."""
     output = tmp_path / "release-notes.md"
     output.write_text("Generated title\n\nNo release section.", encoding="utf-8")
 
-    validate_output(output)
+    with pytest.raises(RuntimeError, match="permitted section headings"):
+        validate_output(output)
 
 
 def test_validate_output_accepts_maintenance_release_notes(tmp_path: Path) -> None:
