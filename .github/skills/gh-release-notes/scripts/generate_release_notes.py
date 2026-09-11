@@ -13,6 +13,26 @@ from pathlib import Path
 SKILL_NAME = "gh-release-notes"
 DEFAULT_OUTPUT = Path("release-notes.md")
 MAX_GIT_CONTEXT_LENGTH = 60_000
+PERMITTED_HEADINGS = frozenset(
+    {
+        "## New Features",
+        "## Enhancements",
+        "## Bug Fixes",
+        "## Breaking Changes",
+        "## Examples",
+        "## Documentation",
+        "## Maintenance",
+    }
+)
+TRACE_MARKERS = (
+    "<function_call",
+    "<thinking>",
+    "<system_notification>",
+    "assistant.reasoning",
+    "function_calls",
+    "to=bash.exec",
+    "to=functions.exec",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -49,7 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--validate",
         type=Path,
         metavar="FILE",
-        help="Verify that an existing release-note file is readable and non-empty.",
+        help="Verify that an existing release-note file follows the output contract.",
     )
     return parser
 
@@ -87,13 +107,20 @@ def build_prompt(
     git_context: str | None = None,
 ) -> str:
     """Build the small orchestration prompt; the skill owns release-note policy."""
+    try:
+        output_reference = output.relative_to(repo).as_posix()
+    except ValueError:
+        output_reference = str(output)
+
     prompt = (
         f"Use the /{SKILL_NAME} skill. Generate release notes for the exact Git range "
         f"{from_ref}..{to_ref} in {repo}. The skill is authoritative for analysis, "
-        f"classification, wording, documentation, and Markdown format. Return only "
-        f"the final release-note Markdown in your response; the wrapper writes it to {output}. "
-        "Do not create or edit the output file through tools, and do not summarize it in "
-        "your response. "
+        f"classification, wording, documentation, and Markdown format. Write the final "
+        f"release-note Markdown directly to the shared repository file "
+        f"{output_reference} using the file-writing tools. Its resolved path is {output}. "
+        "The release workflow reads this exact file as its notes input; the Copilot "
+        "response stream is discarded. Do not put release notes or a summary in your "
+        "response, and do not modify any other files. "
         "Before writing, enforce the skill's final output contract: render every "
         "documentation URL as concise inline Markdown such as "
         "See the [pricing reference for details](https://example.com/pricing), never as a "
@@ -128,8 +155,12 @@ def build_copilot_command(
         "--output-format",
         "text",
         "--disable-builtin-mcps",
-        "--available-tools=read",
-        "--allow-all-tools",
+        "--available-tools=read,create,edit,bash",
+        "--allow-tool=read",
+        "--allow-tool=write",
+        "--allow-tool=shell(git:*)",
+        "--allow-url=https://github.com",
+        "--allow-url=https://copilot-session-usage.readthedocs.io",
     ]
     if model:
         command.extend(["--model", model])
@@ -203,8 +234,8 @@ def run_copilot(
     repo: Path,
     prompt: str,
     model: str | None,
-) -> str:
-    """Run Copilot CLI and return its final response."""
+) -> None:
+    """Run Copilot CLI and leave the generated Markdown in the shared output file."""
     result = subprocess.run(
         build_copilot_command(prompt, model),
         cwd=repo,
@@ -215,17 +246,41 @@ def run_copilot(
     if result.returncode != 0:
         output = f"{result.stdout}\n{result.stderr}".strip()
         raise RuntimeError(f"Copilot CLI failed with exit code {result.returncode}:\n{output}")
-    return result.stdout
 
 
 def validate_output(output: Path) -> None:
-    """Verify that generated release notes are readable and non-empty."""
+    """Verify that generated release notes follow the file output contract."""
     try:
         content = output.read_text(encoding="utf-8")
     except OSError as error:
         raise RuntimeError(f"Unable to read release-note output {output}: {error}") from error
     if not content.strip():
         raise RuntimeError(f"Copilot created an empty release-note file: {output}")
+
+    first_line = content.splitlines()[0] if content.splitlines() else ""
+    if first_line not in PERMITTED_HEADINGS:
+        raise RuntimeError(
+            f"Release-note output must start with one of the permitted section headings: {output}"
+        )
+
+    lowered = content.lower()
+    leaked_markers = [marker for marker in TRACE_MARKERS if marker.lower() in lowered]
+    if leaked_markers:
+        markers = ", ".join(leaked_markers)
+        raise RuntimeError(
+            f"Release-note output contains Copilot trace markers ({markers}): {output}"
+        )
+    if "```" in content:
+        raise RuntimeError(f"Release-note output must not contain a code fence: {output}")
+    if any(line.startswith("# ") for line in content.splitlines()):
+        raise RuntimeError(f"Release-note output must not contain a title heading: {output}")
+    headings = [line for line in content.splitlines() if line.startswith("## ")]
+    invalid_headings = [heading for heading in headings if heading not in PERMITTED_HEADINGS]
+    if invalid_headings:
+        raise RuntimeError(
+            f"Release-note output contains an invalid section heading "
+            f"{invalid_headings[0]!r}: {output}"
+        )
     print("Release-note output file verified.")
 
 
@@ -241,19 +296,18 @@ def generate_release_notes(
     output = resolve_path(output, repo).resolve()
     validate_range(repo, from_ref, to_ref)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.unlink(missing_ok=True)
+    output.write_text("", encoding="utf-8")
 
     print(f"Generating release notes from {from_ref} (exclusive) to {to_ref} (inclusive).")
     print(f"Copilot model: {model or 'CLI default'}")
     require_copilot_token()
     run_skill_check(repo)
     git_context = build_git_context(repo, from_ref, to_ref)
-    release_notes = run_copilot(
+    run_copilot(
         repo,
         build_prompt(from_ref, to_ref, repo, output, git_context),
         model,
     )
-    output.write_text(release_notes, encoding="utf-8")
 
     validate_output(output)
     print(f"Release notes written to {output}")

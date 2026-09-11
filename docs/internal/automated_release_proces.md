@@ -303,11 +303,11 @@ The bundled script disables the built-in GitHub MCP server and exposes only
 reading, Git inspection, and the file tools needed to create `release-notes.md`.
 It explicitly instructs the skill not to modify, commit, or push any other
 repository files. The workflow discards the Copilot response stream and uses the
-skill-written file directly, after the script normalizes harmless titles and
-preambles and rejects traces, code fences, or unusable content. Polluted
-no-product fallbacks are replaced with the canonical maintenance wording. The
-allowed documentation hosts are the project repository and the published Read
-the Docs site.
+skill-written `release-notes.md` directly. The script pre-creates that shared
+handoff file, then rejects empty or polluted output, including traces, code
+fences, title headings, and unsupported section headings. The allowed
+documentation hosts are the project repository and the published Read the Docs
+site.
 
 ## Release-note generation
 

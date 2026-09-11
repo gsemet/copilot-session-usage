@@ -39,18 +39,29 @@ This release contains maintenance and internal improvements. No user-facing beha
     assert result.returncode == 0, result.stderr
 
 
-def test_validate_accepts_arbitrary_non_empty_markdown(tmp_path: Path) -> None:
+def test_validate_rejects_output_without_a_release_heading(tmp_path: Path) -> None:
     result = run_validator(tmp_path, "A skill-authored release note without a heading.")
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1
+    assert "permitted section headings" in result.stderr
 
 
 def test_validate_does_not_rewrite_markdown(tmp_path: Path) -> None:
-    content = "preamble\n\n## Whatever the skill chose\n\n- User-facing result.\n"
+    content = "## Bug Fixes\n\n- User-facing result.\n"
     result = run_validator(tmp_path, content)
 
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "release-notes.md").read_text(encoding="utf-8") == content
+
+
+def test_validate_rejects_tool_trace_and_title_leakage(tmp_path: Path) -> None:
+    result = run_validator(
+        tmp_path,
+        "## Bug Fixes\n\n# v0.8.0\n\nto=bash.exec code\n",
+    )
+
+    assert result.returncode == 1
+    assert "title heading" in result.stderr or "trace markers" in result.stderr
 
 
 def test_validate_rejects_empty_markdown(tmp_path: Path) -> None:

@@ -44,8 +44,9 @@ The skill includes `scripts/generate_release_notes.py`, a standalone Python scri
 - precomputes the commit log and complete diff locally so generation also works
 	when the Copilot CLI cannot inspect Git history inside its tool environment;
 - invokes the Copilot CLI with `/gh-release-notes`;
-- captures the final Markdown response and writes the requested output file; and
-- verifies only that the requested output file is readable and non-empty. The
+- gives the skill scoped file-writing tools so it writes the final Markdown to the
+	requested output file while the response stream is discarded; and
+- verifies that the requested output file follows the release-note output contract. The
 	script does not normalize Markdown or decide user impact, categorize changes,
 	discover documentation, infer breaking changes, or require examples; those
 	decisions belong to this skill.
@@ -58,6 +59,13 @@ python .github/skills/gh-release-notes/scripts/generate_release_notes.py \
 	--to-ref v1.1.0 \
 	--output release-notes.md
 ```
+
+`release-notes.md` is the canonical shared artifact filename. The generator, both
+release workflows, and `gh release --notes-file` use this same file so the release
+body never depends on Copilot's response stream. An explicitly supplied `--output`
+path is honored exactly. The generator creates the empty handoff file before
+invoking Copilot so the skill can edit the known repository-relative target; the
+file is accepted only after the skill has replaced it with valid Markdown.
 
 The range is Git's two-dot range, `from_ref..to_ref`: `from_ref` itself is excluded
 and `to_ref` is included. Both refs may be tags, branches, or commit IDs.
@@ -396,12 +404,12 @@ When this skill is invoked by a CI job with an explicit output-file request:
 
 - Honor the requested tag range and repository path exactly.
 - Treat the requested output file as mandatory. Writing it is the only successful completion condition.
-- Use the `create` file tool when the requested file does not exist, or the `edit` file tool when it already exists.
+- Replace the pre-created handoff file with the final Markdown using the `edit` file tool.
 - After writing, use the `read` file tool to verify that the requested file exists and contains the final release-note Markdown.
 - Do not modify, commit, or push any other repository files.
 - The output file must contain only the final release-note Markdown, without an explanation, title heading, or code fence.
 - The first line must be exactly one of: `## New Features`, `## Enhancements`, `## Bug Fixes`, `## Breaking Changes`, `## Examples`, `## Documentation`, or `## Maintenance`.
-- Do not write a preamble, title, code fence, or explanatory text before the first release-note section.
+- Do not write a preamble, tool-call transcript, title, code fence, or explanatory text before the first release-note section.
 - Never use the Copilot response stream as output. The caller may discard it after the file is written.
 - Do not report the release notes only in the response. If the file cannot be written or verified, the task has failed.
 - Preserve the user-impact categories, concrete examples, evidence-based breaking-change detection, and repository-derived public documentation links described above.
