@@ -24,6 +24,8 @@ build_prompt = MODULE["build_prompt"]
 resolve_path = MODULE["resolve_path"]
 require_copilot_token = MODULE["require_copilot_token"]
 validate_output = MODULE["validate_output"]
+run_copilot = MODULE["run_copilot"]
+generate_release_notes = MODULE["generate_release_notes"]
 
 
 def test_build_copilot_command_uses_explicit_model_when_provided() -> None:
@@ -41,6 +43,9 @@ def test_build_copilot_command_leaves_model_selection_to_cli_when_unset() -> Non
     command = build_copilot_command("release prompt", None)
 
     assert "--model" not in command
+    assert "--allow-all-tools" in command
+    assert "--available-tools=read" in command
+    assert not any(argument == "--allow-tool=write" for argument in command)
 
 
 def test_parser_uses_generic_git_ref_arguments() -> None:
@@ -59,6 +64,8 @@ def test_build_prompt_contains_generic_execution_contract() -> None:
     assert "Use the /gh-release-notes skill" in prompt
     assert "skill is authoritative" in prompt
     assert str(Path("/tmp/notes.md")) in prompt
+    assert "wrapper writes it" in prompt
+    assert "Do not create or edit the output file through tools" in prompt
     assert "See the [pricing reference for details]" in prompt
     assert "never as a bare URL" in prompt
     assert "omit Maintenance" in prompt
@@ -140,6 +147,49 @@ def test_require_copilot_token_fails_without_authentication(monkeypatch: MonkeyP
 
     with pytest.raises(RuntimeError, match="COPILOT_GITHUB_TOKEN or GH_TOKEN"):
         require_copilot_token()
+
+
+def test_run_copilot_returns_final_response(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    """Return the response so the wrapper can persist it deterministically."""
+
+    def fake_subprocess_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        return subprocess.CompletedProcess(
+            ["gh", "copilot"],
+            0,
+            "## Enhancements\n\n- Useful change.\n",
+            "",
+        )
+
+    monkeypatch.setattr(MODULE["subprocess"], "run", fake_subprocess_run)
+
+    assert run_copilot(tmp_path, "release prompt", None) == (
+        "## Enhancements\n\n- Useful change.\n"
+    )
+
+
+def test_generate_release_notes_writes_copilot_response(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """Write Copilot's final response to the requested output path."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    function_globals = generate_release_notes.__globals__
+    monkeypatch.setitem(function_globals, "validate_range", lambda *args: None)
+    monkeypatch.setitem(function_globals, "require_copilot_token", lambda: None)
+    monkeypatch.setitem(function_globals, "run_skill_check", lambda *args: None)
+    monkeypatch.setitem(function_globals, "build_git_context", lambda *args: "git evidence")
+    monkeypatch.setitem(
+        function_globals,
+        "run_copilot",
+        lambda *args: "## Enhancements\n\n- Useful change.\n",
+    )
+
+    generate_release_notes(repo, "v0.1.0", "v0.2.0", Path("release-notes.md"), None)
+
+    assert (repo / "release-notes.md").read_text(encoding="utf-8") == (
+        "## Enhancements\n\n- Useful change.\n"
+    )
 
 
 def test_validate_output_preserves_skill_authored_markdown(tmp_path: Path) -> None:

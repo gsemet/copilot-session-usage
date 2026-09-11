@@ -44,7 +44,7 @@ The skill includes `scripts/generate_release_notes.py`, a standalone Python scri
 - precomputes the commit log and complete diff locally so generation also works
 	when the Copilot CLI cannot inspect Git history inside its tool environment;
 - invokes the Copilot CLI with `/gh-release-notes`;
-- writes the requested output file; and
+- captures the final Markdown response and writes the requested output file; and
 - verifies only that the requested output file is readable and non-empty. The
 	script does not normalize Markdown or decide user impact, categorize changes,
 	discover documentation, infer breaking changes, or require examples; those

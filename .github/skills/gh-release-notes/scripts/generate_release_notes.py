@@ -90,8 +90,10 @@ def build_prompt(
     prompt = (
         f"Use the /{SKILL_NAME} skill. Generate release notes for the exact Git range "
         f"{from_ref}..{to_ref} in {repo}. The skill is authoritative for analysis, "
-        f"classification, wording, documentation, and Markdown format. Write only "
-        f"the final release-note Markdown to {output}; do not summarize it in your response. "
+        f"classification, wording, documentation, and Markdown format. Return only "
+        f"the final release-note Markdown in your response; the wrapper writes it to {output}. "
+        "Do not create or edit the output file through tools, and do not summarize it in "
+        "your response. "
         "Before writing, enforce the skill's final output contract: render every "
         "documentation URL as concise inline Markdown such as "
         "See the [pricing reference for details](https://example.com/pricing), never as a "
@@ -126,10 +128,8 @@ def build_copilot_command(
         "--output-format",
         "text",
         "--disable-builtin-mcps",
-        "--available-tools=read,create,edit,bash",
-        "--allow-tool=read",
-        "--allow-tool=write",
-        "--allow-tool=shell(git:*)",
+        "--available-tools=read",
+        "--allow-all-tools",
     ]
     if model:
         command.extend(["--model", model])
@@ -203,8 +203,8 @@ def run_copilot(
     repo: Path,
     prompt: str,
     model: str | None,
-) -> None:
-    """Run Copilot CLI and fail with its captured diagnostics when needed."""
+) -> str:
+    """Run Copilot CLI and return its final response."""
     result = subprocess.run(
         build_copilot_command(prompt, model),
         cwd=repo,
@@ -215,10 +215,11 @@ def run_copilot(
     if result.returncode != 0:
         output = f"{result.stdout}\n{result.stderr}".strip()
         raise RuntimeError(f"Copilot CLI failed with exit code {result.returncode}:\n{output}")
+    return result.stdout
 
 
 def validate_output(output: Path) -> None:
-    """Verify that Copilot created a readable, non-empty output file."""
+    """Verify that generated release notes are readable and non-empty."""
     try:
         content = output.read_text(encoding="utf-8")
     except OSError as error:
@@ -247,11 +248,12 @@ def generate_release_notes(
     require_copilot_token()
     run_skill_check(repo)
     git_context = build_git_context(repo, from_ref, to_ref)
-    run_copilot(
+    release_notes = run_copilot(
         repo,
         build_prompt(from_ref, to_ref, repo, output, git_context),
         model,
     )
+    output.write_text(release_notes, encoding="utf-8")
 
     validate_output(output)
     print(f"Release notes written to {output}")
