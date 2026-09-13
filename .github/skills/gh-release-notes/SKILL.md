@@ -42,7 +42,8 @@ The skill includes `scripts/generate_release_notes.py`, a standalone Python scri
 
 - verifies the requested Git range and Copilot skill availability;
 - writes the deterministic `## Maintenance` output without invoking Copilot when the
-	requested Git range contains no commits;
+	requested Git range contains no commits or the caller explicitly requests
+	`--maintenance-only`;
 - precomputes the commit log and complete diff locally so generation also works
 	when the Copilot CLI cannot inspect Git history inside its tool environment;
 - invokes the Copilot CLI with `/gh-release-notes`;
@@ -61,6 +62,10 @@ python .github/skills/gh-release-notes/scripts/generate_release_notes.py \
 	--to-ref v1.1.0 \
 	--output release-notes.md
 ```
+
+For an intentional maintenance-only release whose range contains internal commits,
+pass `--maintenance-only` to write the deterministic Maintenance section without
+invoking Copilot.
 
 `release-notes.md` is the canonical shared artifact filename. The generator, both
 release workflows, and `gh release --notes-file` use this same file so the release

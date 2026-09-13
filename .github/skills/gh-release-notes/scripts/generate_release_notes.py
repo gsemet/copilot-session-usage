@@ -66,6 +66,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Release-note output path (default: release-notes.md).",
     )
     parser.add_argument(
+        "--maintenance-only",
+        action="store_true",
+        help="Write deterministic maintenance notes without invoking Copilot.",
+    )
+    parser.add_argument(
         "--model",
         default=None,
         help="Copilot CLI model identifier; defaults to COPILOT_MODEL or the CLI default.",
@@ -220,7 +225,7 @@ def range_has_commits(repo: Path, from_ref: str, to_ref: str) -> bool:
 
 
 def write_maintenance_notes(output: Path) -> None:
-    """Write the deterministic notes required for an empty release range."""
+    """Write the deterministic notes required for a maintenance-only release."""
     output.write_text(MAINTENANCE_NOTES, encoding="utf-8")
 
 
@@ -306,6 +311,7 @@ def generate_release_notes(
     to_ref: str,
     output: Path,
     model: str | None,
+    maintenance_only: bool = False,
 ) -> None:
     """Generate release notes, then validate the resulting Markdown file."""
     repo = repo.resolve()
@@ -316,7 +322,7 @@ def generate_release_notes(
 
     print(f"Generating release notes from {from_ref} (exclusive) to {to_ref} (inclusive).")
     print(f"Copilot model: {model or 'CLI default'}")
-    if not range_has_commits(repo, from_ref, to_ref):
+    if maintenance_only or not range_has_commits(repo, from_ref, to_ref):
         write_maintenance_notes(output)
         validate_output(output)
         print(f"Release notes written to {output}")
@@ -363,6 +369,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             to_ref=args.to_ref,
             output=args.output,
             model=args.model or os.environ.get("COPILOT_MODEL"),
+            maintenance_only=args.maintenance_only,
         )
     except (OSError, RuntimeError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)

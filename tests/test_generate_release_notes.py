@@ -56,6 +56,16 @@ def test_parser_uses_generic_git_ref_arguments() -> None:
 
     assert args.from_ref == "main"
     assert args.to_ref == "HEAD"
+    assert args.maintenance_only is False
+
+
+def test_parser_accepts_explicit_maintenance_only_mode() -> None:
+    """Expose the deterministic mode used for forced internal-only releases."""
+    args = build_parser().parse_args(
+        ["--from-ref", "main", "--to-ref", "HEAD", "--maintenance-only"]
+    )
+
+    assert args.maintenance_only is True
 
 
 def test_build_prompt_contains_generic_execution_contract() -> None:
@@ -244,6 +254,42 @@ def test_generate_release_notes_writes_maintenance_notes_for_empty_range(
     )
 
     generate_release_notes(repo, "v0.1.0", "v0.1.1", Path("release-notes.md"), None)
+
+    assert (repo / "release-notes.md").read_text(encoding="utf-8") == (
+        "## Maintenance\n\n"
+        "This release contains maintenance and internal improvements. "
+        "No user-facing behavior changed.\n"
+    )
+
+
+def test_generate_release_notes_writes_maintenance_notes_when_requested(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """Skip Copilot for a non-empty range explicitly classified as maintenance-only."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    function_globals = generate_release_notes.__globals__
+    monkeypatch.setitem(function_globals, "validate_range", lambda *args: None)
+    monkeypatch.setitem(function_globals, "range_has_commits", lambda *args: True)
+    monkeypatch.setitem(
+        function_globals,
+        "require_copilot_token",
+        lambda: pytest.fail("maintenance-only releases should not require Copilot authentication"),
+    )
+    monkeypatch.setitem(
+        function_globals,
+        "run_copilot",
+        lambda *args: pytest.fail("maintenance-only releases should not invoke Copilot"),
+    )
+
+    generate_release_notes(
+        repo,
+        "v0.1.0",
+        "v0.1.1",
+        Path("release-notes.md"),
+        None,
+        maintenance_only=True,
+    )
 
     assert (repo / "release-notes.md").read_text(encoding="utf-8") == (
         "## Maintenance\n\n"

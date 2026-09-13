@@ -95,19 +95,30 @@ jobs:
             exit 1
           fi
 
+          maintenance_only=false
           if [[ "$INCREMENT" == "auto" ]]; then
             bump_args=(--get-next --yes)
-            if [[ "$FORCE_RELEASE" == "true" ]]; then
-              bump_args+=(--allow-no-commit)
-            fi
             if ! next_version_output="$(uv run --no-sync cz bump "${bump_args[@]}" 2>&1)"; then
               if grep -q "NO_COMMITS_TO_BUMP" <<<"$next_version_output"; then
-                echo "::error::No eligible conventional commits were found for an automatic release. You can either wait for a user-impacting feature or bug fix and start a new release, or enable 'Force a patch release when auto finds no eligible commit' when triggering the 'Release' Action."
+                if [[ "$FORCE_RELEASE" != "true" ]]; then
+                  echo "::error::No eligible conventional commits were found for an automatic release. You can either wait for a user-impacting feature or bug fix and start a new release, or enable 'Force a patch release when auto finds no eligible commit' when triggering the 'Release' Action."
+                  printf '%s\n' "$next_version_output"
+                  exit 1
+                fi
+
+                echo "No eligible conventional commits found; forcing a maintenance-only patch release."
+                if ! next_version_output="$(uv run --no-sync cz bump --get-next \
+                  --increment PATCH --yes --allow-no-commit 2>&1)"; then
+                  echo "::error::Commitizen could not calculate the forced patch release version."
+                  printf '%s\n' "$next_version_output"
+                  exit 1
+                fi
+                maintenance_only=true
               else
                 echo "::error::Commitizen could not calculate the requested release version."
+                printf '%s\n' "$next_version_output"
+                exit 1
               fi
-              printf '%s\n' "$next_version_output"
-              exit 1
             fi
           else
             echo "Using explicit $INCREMENT bump."
@@ -137,6 +148,7 @@ jobs:
           echo "previous_tag=$previous_tag" >> "$GITHUB_OUTPUT"
           echo "target_tag=$target_tag" >> "$GITHUB_OUTPUT"
           echo "target_sha=$(git rev-parse "$target_tag^{commit}")" >> "$GITHUB_OUTPUT"
+          echo "maintenance_only=$maintenance_only" >> "$GITHUB_OUTPUT"
           echo "Prepared local tag $target_tag from $previous_tag without modifying the default branch."
 
       - name: Generate release notes
@@ -144,12 +156,18 @@ jobs:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           PREVIOUS_TAG: ${{ steps.version.outputs.previous_tag }}
           TARGET_TAG: ${{ steps.version.outputs.target_tag }}
+          MAINTENANCE_ONLY: ${{ steps.version.outputs.maintenance_only }}
         run: |
           set -euo pipefail
+          maintenance_args=()
+          if [[ "$MAINTENANCE_ONLY" == "true" ]]; then
+            maintenance_args+=(--maintenance-only)
+          fi
           uv run -- python .github/skills/gh-release-notes/scripts/generate_release_notes.py \
             --from-ref "$PREVIOUS_TAG" \
             --to-ref "$TARGET_TAG" \
-            --output release-notes.md
+            --output release-notes.md \
+            "${maintenance_args[@]}"
 
       - name: Upload generated notes
         uses: actions/upload-artifact@v4
