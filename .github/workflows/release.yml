@@ -32,25 +32,44 @@ permissions:
   contents: write
 
 jobs:
+  validate-trigger:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Require the default branch
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_ref="refs/heads/$DEFAULT_BRANCH"
+          if [[ "$WORKFLOW_REF" != "$expected_ref" ]]; then
+            echo "::error::Release must be dispatched from the default branch ($DEFAULT_BRANCH)."
+            echo "::error::Received workflow ref: $WORKFLOW_REF"
+            exit 1
+          fi
+
   ci:
+    needs: validate-trigger
     uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ github.sha }}
 
   release:
-    needs: ci
+    needs: [validate-trigger, ci]
     runs-on: ubuntu-latest
     env:
-      GH_TOKEN: ${{ github.token }}
-      RELEASE_BRANCH: ${{ github.event.repository.default_branch }}
       INCREMENT: ${{ inputs.increment }}
       DRAFT_RELEASE: ${{ inputs.draft }}
       FORCE_RELEASE: ${{ inputs.force }}
 
     steps:
-      - name: Check out the default branch
+      - name: Check out the validated release commit
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -70,8 +89,6 @@ jobs:
             exit 1
           fi
 
-          git switch --force-create "$RELEASE_BRANCH" "origin/$RELEASE_BRANCH"
-
           previous_tag="$(git describe --tags --abbrev=0 HEAD 2>/dev/null || true)"
           if [[ -z "$previous_tag" ]]; then
             echo "::error::Could not find a previous release tag."
@@ -84,7 +101,11 @@ jobs:
               bump_args+=(--allow-no-commit)
             fi
             if ! next_version_output="$(uv run --no-sync cz bump "${bump_args[@]}" 2>&1)"; then
-              echo "::error::No eligible conventional commits were found for an automatic release. You can either wait for a user-impacting feature or bug fix and start a new release, or enable 'Force a patch release when auto finds no eligible commit' when triggering the 'Release' Action."
+              if grep -q "NO_COMMITS_TO_BUMP" <<<"$next_version_output"; then
+                echo "::error::No eligible conventional commits were found for an automatic release. You can either wait for a user-impacting feature or bug fix and start a new release, or enable 'Force a patch release when auto finds no eligible commit' when triggering the 'Release' Action."
+              else
+                echo "::error::Commitizen could not calculate the requested release version."
+              fi
               printf '%s\n' "$next_version_output"
               exit 1
             fi
@@ -102,7 +123,7 @@ jobs:
           fi
 
           target_tag="v$next_version"
-          if [[ ! "$target_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
+          if [[ ! "$target_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::The calculated version did not create a semantic-version tag."
             exit 1
           fi
@@ -115,6 +136,7 @@ jobs:
 
           echo "previous_tag=$previous_tag" >> "$GITHUB_OUTPUT"
           echo "target_tag=$target_tag" >> "$GITHUB_OUTPUT"
+          echo "target_sha=$(git rev-parse "$target_tag^{commit}")" >> "$GITHUB_OUTPUT"
           echo "Prepared local tag $target_tag from $previous_tag without modifying the default branch."
 
       - name: Generate release notes
@@ -137,6 +159,7 @@ jobs:
 
       - name: Create GitHub release
         env:
+          GH_TOKEN: ${{ github.token }}
           TARGET_TAG: ${{ steps.version.outputs.target_tag }}
         shell: bash
         run: |
@@ -168,6 +191,7 @@ jobs:
 
     outputs:
       target_tag: ${{ steps.version.outputs.target_tag }}
+      target_sha: ${{ steps.version.outputs.target_sha }}
 
   publish:
     if: ${{ !inputs.draft }}
@@ -185,13 +209,31 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ needs.release.outputs.target_tag }}
+          ref: ${{ needs.release.outputs.target_sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
       - name: Build package
         run: uv build
+
+      - name: Verify package version
+        env:
+          TARGET_TAG: ${{ needs.release.outputs.target_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_version="${TARGET_TAG#v}"
+          shopt -s nullglob
+          artifacts=(
+            dist/copilot_session_usage-"$expected_version"-*.whl
+            dist/copilot_session_usage-"$expected_version".tar.gz
+          )
+          if (( ${#artifacts[@]} != 2 )); then
+            echo "::error::Built package artifacts do not match $TARGET_TAG."
+            printf '%s\n' dist/*
+            exit 1
+          fi
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

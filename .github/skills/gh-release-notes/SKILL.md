@@ -41,6 +41,8 @@ Markdown.
 The skill includes `scripts/generate_release_notes.py`, a standalone Python script that:
 
 - verifies the requested Git range and Copilot skill availability;
+- writes the deterministic `## Maintenance` output without invoking Copilot when the
+	requested Git range contains no commits;
 - precomputes the commit log and complete diff locally so generation also works
 	when the Copilot CLI cannot inspect Git history inside its tool environment;
 - invokes the Copilot CLI with `/gh-release-notes`;
@@ -63,9 +65,11 @@ python .github/skills/gh-release-notes/scripts/generate_release_notes.py \
 `release-notes.md` is the canonical shared artifact filename. The generator, both
 release workflows, and `gh release --notes-file` use this same file so the release
 body never depends on Copilot's response stream. An explicitly supplied `--output`
-path is honored exactly. The generator creates the empty handoff file before
-invoking Copilot so the skill can edit the known repository-relative target; the
-file is accepted only after the skill has replaced it with valid Markdown.
+path is honored exactly. For a non-empty range, the generator creates the empty
+handoff file before invoking Copilot so the skill can edit the known
+repository-relative target; the file is accepted only after the skill has replaced
+it with valid Markdown. An empty range produces the valid maintenance output
+directly and does not require Copilot authentication or skill discovery.
 
 The range is Git's two-dot range, `from_ref..to_ref`: `from_ref` itself is excluded
 and `to_ref` is included. Both refs may be tags, branches, or commit IDs.

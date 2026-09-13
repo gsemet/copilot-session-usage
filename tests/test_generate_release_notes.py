@@ -178,6 +178,7 @@ def test_generate_release_notes_validates_skill_written_file(
     repo.mkdir()
     function_globals = generate_release_notes.__globals__
     monkeypatch.setitem(function_globals, "validate_range", lambda *args: None)
+    monkeypatch.setitem(function_globals, "range_has_commits", lambda *args: True)
     monkeypatch.setitem(function_globals, "require_copilot_token", lambda: None)
     monkeypatch.setitem(function_globals, "run_skill_check", lambda *args: None)
     monkeypatch.setitem(function_globals, "build_git_context", lambda *args: "git evidence")
@@ -205,6 +206,7 @@ def test_generate_release_notes_precreates_shared_handoff_file(
     repo.mkdir()
     function_globals = generate_release_notes.__globals__
     monkeypatch.setitem(function_globals, "validate_range", lambda *args: None)
+    monkeypatch.setitem(function_globals, "range_has_commits", lambda *args: True)
     monkeypatch.setitem(function_globals, "require_copilot_token", lambda: None)
     monkeypatch.setitem(function_globals, "run_skill_check", lambda *args: None)
     monkeypatch.setitem(function_globals, "build_git_context", lambda *args: "git evidence")
@@ -219,6 +221,35 @@ def test_generate_release_notes_precreates_shared_handoff_file(
     monkeypatch.setitem(function_globals, "run_copilot", fake_run_copilot)
 
     generate_release_notes(repo, "v0.1.0", "v0.2.0", Path("release-notes.md"), None)
+
+
+def test_generate_release_notes_writes_maintenance_notes_for_empty_range(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    """Handle forced maintenance releases without requiring a Copilot request."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    function_globals = generate_release_notes.__globals__
+    monkeypatch.setitem(function_globals, "validate_range", lambda *args: None)
+    monkeypatch.setitem(function_globals, "range_has_commits", lambda *args: False)
+    monkeypatch.setitem(
+        function_globals,
+        "require_copilot_token",
+        lambda: pytest.fail("empty release ranges should not require Copilot authentication"),
+    )
+    monkeypatch.setitem(
+        function_globals,
+        "run_copilot",
+        lambda *args: pytest.fail("empty release ranges should not invoke Copilot"),
+    )
+
+    generate_release_notes(repo, "v0.1.0", "v0.1.1", Path("release-notes.md"), None)
+
+    assert (repo / "release-notes.md").read_text(encoding="utf-8") == (
+        "## Maintenance\n\n"
+        "This release contains maintenance and internal improvements. "
+        "No user-facing behavior changed.\n"
+    )
 
 
 def test_validate_output_preserves_skill_authored_markdown(tmp_path: Path) -> None:
