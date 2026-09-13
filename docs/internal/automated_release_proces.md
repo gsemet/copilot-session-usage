@@ -202,8 +202,9 @@ just preflight
    - `patch` — explicitly request a patch bump.
 6. Choose the `force` input:
    - `false` — stop if `auto` finds no eligible conventional commit.
-   - `true` — in `auto` mode, force a patch bump with
-     `--allow-no-commit`. This does not override other errors.
+    - `true` — in `auto` mode, force a patch bump with
+       `--allow-no-commit` and generate deterministic maintenance notes. This does
+       not override other errors.
 7. Choose the `draft` input:
    - `false` — create a published GitHub Release after notes are generated.
    - `true` — create a draft GitHub Release for review.
@@ -265,10 +266,11 @@ create a release with no conventional-commit change that Commitizen would
 normally consider user-visible. The force checkbox does not hide unrelated
 Commitizen errors or invalid version output.
 
-When the resulting patch range contains no commits, the release-note generator
-creates exactly one generic `## Maintenance` section without invoking Copilot. This
+For this forced fallback, the release-note generator receives
+`--maintenance-only` and creates exactly one generic `## Maintenance` section
+without invoking Copilot, even when the tag range contains internal commits. This
 allows an intentional maintenance-only patch release to complete while preserving
-the user-impact gate for non-empty ranges.
+the user-impact gate for ordinary non-empty ranges.
 
 For an explicit `major`, `minor`, or `patch` input, the workflow runs the
 corresponding Commitizen increment with `--allow-no-commit`. This permits a
