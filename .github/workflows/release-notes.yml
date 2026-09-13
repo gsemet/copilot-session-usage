@@ -20,11 +20,52 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out tagged source
+      - name: Require the default branch
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_ref="refs/heads/$DEFAULT_BRANCH"
+          if [[ "$WORKFLOW_REF" != "$expected_ref" ]]; then
+            echo "::error::Release-note recovery must be dispatched from the default branch ($DEFAULT_BRANCH)."
+            echo "::error::Received workflow ref: $WORKFLOW_REF"
+            exit 1
+          fi
+
+      - name: Check out repository history
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ github.sha }}
+
+      - name: Validate and check out the existing release tag
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TARGET_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$TARGET_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Expected a semantic-version tag such as v0.7.0, got '$TARGET_TAG'."
+            exit 1
+          fi
+          if ! git ls-remote --exit-code --refs origin "refs/tags/$TARGET_TAG" >/dev/null; then
+            echo "::error::Remote tag $TARGET_TAG does not exist."
+            exit 1
+          fi
+
+          git fetch --force origin "refs/tags/$TARGET_TAG:refs/tags/$TARGET_TAG"
+          git fetch --force origin \
+            "refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          target_commit="$(git rev-parse --verify "refs/tags/$TARGET_TAG^{commit}")"
+          if ! git merge-base --is-ancestor "$target_commit" "refs/remotes/origin/$DEFAULT_BRANCH"; then
+            echo "::error::Release tag $TARGET_TAG is not reachable from the default branch."
+            exit 1
+          fi
+          git checkout --detach "$target_commit"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -36,14 +77,9 @@ jobs:
         id: range
         shell: bash
         env:
-          TARGET_TAG: ${{ inputs.tag || github.ref_name }}
+          TARGET_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-
-          if [[ ! "$TARGET_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
-            echo "::error::Expected a semantic-version tag such as v0.7.0, got '$TARGET_TAG'."
-            exit 1
-          fi
 
           previous_tag="$(git tag --sort=-v:refname --merged "$TARGET_TAG" \
             | awk -v current="$TARGET_TAG" '$0 != current { print; exit }')"

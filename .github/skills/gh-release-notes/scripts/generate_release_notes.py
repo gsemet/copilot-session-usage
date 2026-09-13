@@ -33,6 +33,11 @@ TRACE_MARKERS = (
     "to=bash.exec",
     "to=functions.exec",
 )
+MAINTENANCE_NOTES = (
+    "## Maintenance\n\n"
+    "This release contains maintenance and internal improvements. "
+    "No user-facing behavior changed.\n"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -208,6 +213,17 @@ def validate_range(repo: Path, from_ref: str, to_ref: str) -> None:
         raise ValueError(f"Git ref {from_ref!r} is not an ancestor of {to_ref!r}.")
 
 
+def range_has_commits(repo: Path, from_ref: str, to_ref: str) -> bool:
+    """Return whether the requested Git range contains at least one commit."""
+    count = git_output(repo, "commit count", "rev-list", "--count", f"{from_ref}..{to_ref}")
+    return count != "0"
+
+
+def write_maintenance_notes(output: Path) -> None:
+    """Write the deterministic notes required for an empty release range."""
+    output.write_text(MAINTENANCE_NOTES, encoding="utf-8")
+
+
 def run_skill_check(repo: Path) -> None:
     """Ensure the release-note skill is installed in the Copilot CLI."""
     result = subprocess.run(
@@ -300,6 +316,12 @@ def generate_release_notes(
 
     print(f"Generating release notes from {from_ref} (exclusive) to {to_ref} (inclusive).")
     print(f"Copilot model: {model or 'CLI default'}")
+    if not range_has_commits(repo, from_ref, to_ref):
+        write_maintenance_notes(output)
+        validate_output(output)
+        print(f"Release notes written to {output}")
+        return
+
     require_copilot_token()
     run_skill_check(repo)
     git_context = build_git_context(repo, from_ref, to_ref)

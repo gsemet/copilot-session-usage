@@ -22,10 +22,12 @@ The normal flow is:
    as a draft.
 6. Commitizen calculates the next version without modifying files or creating a
    release commit.
-7. The workflow creates a local `vX.Y.Z` tag on the existing default-branch
-   commit.
+7. The workflow validates that it was dispatched from the default branch, then
+   creates a local `vX.Y.Z` tag on the immutable commit selected by that dispatch.
 8. GitHub Copilot CLI, invoked through `gh copilot`, runs the repository skill
-   `gh-release-notes` against the actual `from_ref..to_ref` diff.
+   `gh-release-notes` against the actual `from_ref..to_ref` diff. If the range is
+   empty, the generator writes the required generic `## Maintenance` note directly
+   without consuming a Copilot request.
 9. After clean notes are generated, the workflow pushes the tag and creates the
    GitHub Release.
 10. The release workflow runs CI before creating the GitHub Release and, for a
@@ -210,6 +212,11 @@ just preflight
 The workflow serializes all releases using the `release` concurrency group. A
 second release run will not run concurrently with the first one.
 
+The workflow rejects dispatches from any branch other than the repository's
+default branch. CI, version calculation, tagging, note generation, and publication
+all use the commit identified when the workflow was dispatched; later default-branch
+commits cannot change what that run releases.
+
 ## Version bump behavior
 
 The project uses Commitizen's Conventional Commits adapter. In automatic mode,
@@ -258,6 +265,11 @@ create a release with no conventional-commit change that Commitizen would
 normally consider user-visible. The force checkbox does not hide unrelated
 Commitizen errors or invalid version output.
 
+When the resulting patch range contains no commits, the release-note generator
+creates exactly one generic `## Maintenance` section without invoking Copilot. This
+allows an intentional maintenance-only patch release to complete while preserving
+the user-impact gate for non-empty ranges.
+
 For an explicit `major`, `minor`, or `patch` input, the workflow runs the
 corresponding Commitizen increment with `--allow-no-commit`. This permits a
 maintainer to make an intentional release even when no eligible conventional
@@ -265,7 +277,7 @@ commit is present. Use that option carefully; it can create a release containing
 no user-visible change.
 
 The release workflow does not update `CHANGELOG.md` or create a release commit.
-It creates a lightweight local `vX.Y.Z` tag on the current default-branch commit,
+It creates a lightweight local `vX.Y.Z` tag on the immutable dispatched commit,
 generates and validates release notes, then pushes only that tag. This ordering
 prevents a failed note-generation step from leaving a remote tag without a
 release. It is required because the default branch is protected and requires
@@ -276,26 +288,26 @@ actual previous-tag-to-new-tag diff by `gh-release-notes`.
 
 The steps occur in this order:
 
-1. **Checkout** — fetches the complete repository history from the default branch
-   so tags and tag ranges are available.
+1. **Checkout** — fetches the complete repository history at the immutable commit
+   selected by the default-branch dispatch so tags and tag ranges are available.
 2. **Install tooling** — installs the pinned `uv.lock` environment, including
    Commitizen.
 3. **Clean-tree guard** — refuses to proceed if the checked-out tree is dirty.
-4. **Branch setup** — switches to the remote default branch without changing it.
-5. **Previous tag resolution** — finds the nearest reachable tag with
+4. **Previous tag resolution** — finds the nearest reachable tag with
    `git describe --tags --abbrev=0`.
-6. **Version calculation** — calculates the selected next version without
+5. **Version calculation** — calculates the selected next version without
    modifying files; in forced `auto` mode, allows the patch fallback.
-7. **Tag validation** — verifies that the new tag matches the semantic-version
-   pattern `vX.Y.Z`, with optional prerelease/build suffixes.
-8. **Note generation** — invokes the bundled
+6. **Tag validation** — verifies that the new tag matches the semantic-version
+   pattern `vX.Y.Z`.
+7. **Note generation** — invokes the bundled
    `.github/skills/gh-release-notes/scripts/generate_release_notes.py` script,
-   which checks `COPILOT_GITHUB_TOKEN`, verifies that `gh-release-notes` is
-   discoverable, and invokes `gh copilot` with the exact previous-ref-to-target-ref
+   which writes a generic maintenance note directly for an empty range. For a
+   non-empty range, it checks `COPILOT_GITHUB_TOKEN`, verifies that `gh-release-notes`
+   is discoverable, and invokes `gh copilot` with the exact previous-ref-to-target-ref
    range. The previous ref is excluded and the target ref is included.
-10. **Artifact upload** — stores `release-notes.md` as a workflow artifact named
+8. **Artifact upload** — stores `release-notes.md` as a workflow artifact named
     `release-notes-vX.Y.Z`.
-11. **Push and release creation** — verifies that the remote tag does not already
+9. **Push and release creation** — verifies that the remote tag does not already
    exist, pushes only the new tag, refuses to overwrite an existing release, and
    calls `gh release create` with the generated Markdown.
 
@@ -354,18 +366,21 @@ the manual recovery workflow.
 
 Use **Generate release notes (manual)** when a tag already exists but the normal
 release workflow stopped before creating the GitHub Release, or when notes need
-to be generated for an existing tag.
+to be generated for an existing tag. The workflow accepts dispatches only from
+the default branch and verifies that the requested tag is an existing remote tag
+reachable from that branch.
 
 The fallback workflow is defined in
 [`.github/workflows/release-notes.yml`](../../.github/workflows/release-notes.yml).
-It requires a tag such as `v0.7.0` and then:
+It requires an existing remote tag such as `v0.7.0` and then:
 
-1. Checks out that tag with complete history.
+1. Checks out the workflow commit with complete history, verifies the exact remote
+   tag ref, and checks out the tag's immutable commit.
 2. Finds the previous merged version tag.
 3. Installs the pinned tooling environment.
-4. Runs the bundled release-note script, which verifies `COPILOT_GITHUB_TOKEN`
-   and skill discovery before invoking `gh-release-notes` with the exact tag
-   range.
+4. Runs the bundled release-note script with the exact tag range. Empty ranges use
+   the deterministic maintenance output; non-empty ranges verify
+   `COPILOT_GITHUB_TOKEN` and skill discovery before invoking `gh-release-notes`.
 5. Uploads the generated notes artifact.
 6. Creates a **draft** GitHub Release.
 
@@ -424,9 +439,10 @@ the abandoned tag before retrying the same version.
 The normal workflow uploads `release-notes.md` as an artifact before creating the
 release. Review the artifact to distinguish an empty output from a quality issue.
 
-For poor but non-empty notes, edit the draft release manually. For an empty output
-or a failed Copilot invocation, use the manual fallback after correcting the
-secret or CLI/skill problem.
+For poor but non-empty notes, edit the draft release manually. An empty range is
+handled deterministically as a maintenance release. If a non-empty range still
+produces empty output or Copilot fails, inspect the failed step and correct the
+secret or CLI/skill problem before retrying.
 
 ### GitHub Release creation fails
 
@@ -456,6 +472,11 @@ workflow can fail during publication. If that happens:
 Do not create a second GitHub Release for the same version. Do not reuse a version
 that has already been successfully published to PyPI; publish a corrective patch
 version instead.
+
+The manual publication workflow accepts only an existing `vMAJOR.MINOR.PATCH` tag
+that is reachable from the default branch. It checks out the tag's immutable commit
+and verifies that both built artifacts contain the requested package version before
+publishing with OIDC.
 
 ## Security and cost controls
 

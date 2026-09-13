@@ -46,16 +46,18 @@ just docs-serve
 
 1. Open the **Release** workflow under the repository's Actions tab.
 2. Run it from the default branch, choosing `auto` to derive the major, minor, or
-	patch bump from conventional commits, or choose an explicit bump. Enable
-	`force` to create a patch release when `auto` finds no eligible commit.
+	patch bump from conventional commits, or choose an explicit bump. The workflow
+	rejects dispatches from other branches. Enable `force` to create a patch release
+	when `auto` finds no eligible commit.
 	If `auto` finds no eligible commit, you can either wait for a user-impacting
 	feature or bug fix and start a new release, or enable **Force a patch release
 	when auto finds no eligible commit** when triggering the **Release** Action.
 3. The workflow uses Commitizen to calculate the next version, prepares a local
-	`vX.Y.Z` tag on the existing default-branch commit, generates notes with the
+	`vX.Y.Z` tag on the immutable dispatched commit, generates notes with the
 	`gh-release-notes` skill through `gh copilot`, writes the final Markdown to
 	`release-notes.md`, validates that file, and pushes the tag only after note
-	generation succeeds. It does not create a version/changelog commit.
+	generation succeeds. An empty forced range receives a generic `## Maintenance`
+	note without a Copilot request. It does not create a version/changelog commit.
 4. The generated notes are uploaded as an artifact and used to create the GitHub
 	Release. Enable the `draft` option if the release needs review before publishing.
 5. The release workflow runs CI before creating the GitHub Release and, for a
@@ -68,4 +70,6 @@ a fine-grained token with the **Copilot Requests** permission. The normal Action
 `GITHUB_TOKEN` is used for repository writes and GitHub Release creation.
 
 The **Generate release notes (manual)** workflow remains available when notes need
-to be regenerated for an existing tag without creating a new release.
+to be regenerated for an existing tag without creating a new release. The
+**Publish existing tag to PyPI** workflow accepts only a verified version tag from
+the default branch and checks the built package version before publication.
