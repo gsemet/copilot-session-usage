@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -13,6 +15,9 @@ from pathlib import Path
 SKILL_NAME = "gh-release-notes"
 DEFAULT_OUTPUT = Path("release-notes.md")
 MAX_GIT_CONTEXT_LENGTH = 60_000
+MAX_GENERATION_ATTEMPTS = 3
+COPILOT_TIMEOUT_SECONDS = 300
+DOCUMENTATION_LINK = re.compile(r"\[[^\]\n]+\]\(https://[^\s)]+\)")
 PERMITTED_HEADINGS = frozenset(
     {
         "## New Features",
@@ -95,9 +100,10 @@ def build_git_context(repo: Path, from_ref: str, to_ref: str) -> str:
     diff = git_output(repo, "diff", "diff", "--no-ext-diff", "--unified=3", f"{from_ref}..{to_ref}")
     context = (
         f"Precomputed Git evidence for {from_ref}..{to_ref}:\n\n"
+        f"Complete diff (the skill determines user impact, not directory names):\n"
+        f"{diff or '(empty)'}\n\n"
         f"Commit log:\n{log or '(no commits)'}\n\n"
-        f"Diff summary:\n{diff_stat or '(empty)'}\n\n"
-        f"Diff:\n{diff or '(empty)'}"
+        f"Complete diff summary:\n{diff_stat or '(empty)'}"
     )
     if len(context) <= MAX_GIT_CONTEXT_LENGTH:
         return context
@@ -105,7 +111,9 @@ def build_git_context(repo: Path, from_ref: str, to_ref: str) -> str:
     truncated = context[:MAX_GIT_CONTEXT_LENGTH]
     return (
         f"{truncated}\n\n[Git evidence truncated at {MAX_GIT_CONTEXT_LENGTH} characters; "
-        "use the included summary and inspect the checked-out files when needed.]"
+        "this excerpt is incomplete. Inspect the remaining changes with read/git tools "
+        "before deciding release coverage.]\n\n"
+        f"Complete diff summary:\n{diff_stat}"
     )
 
 
@@ -125,18 +133,19 @@ def build_prompt(
     prompt = (
         f"Use the /{SKILL_NAME} skill. Generate release notes for the exact Git range "
         f"{from_ref}..{to_ref} in {repo}. The skill is authoritative for analysis, "
-        f"classification, wording, documentation, and Markdown format. Write the final "
-        f"release-note Markdown directly to the shared repository file "
-        f"{output_reference} using the file-writing tools. Its resolved path is {output}. "
-        "The release workflow reads this exact file as its notes input; the Copilot "
-        "response stream is discarded. Do not put release notes or a summary in your "
-        "response, and do not modify any other files. "
+        f"classification, wording, documentation, and Markdown format. Return ONLY the "
+        f"complete release-note Markdown in your final answer, without commentary, "
+        f"title, or fences. The Python caller extracts the structured final_answer "
+        f"message, validates it, and writes file {output_reference}; its resolved path "
+        f"is {output}. Do not create or edit any files. "
         "Before writing, enforce the skill's final output contract: render every "
         "documentation URL as concise inline Markdown such as "
         "See the [pricing reference for details](https://example.com/pricing), never as a "
         "bare URL; exclude all internal CI, release automation, governance, "
         "contributor, agent, generator, Git-evidence, and maintainer content; and "
-        "omit Maintenance whenever any user-facing section remains."
+        "omit Maintenance whenever any user-facing section remains. "
+        "End each change's bullet with its closest verified documentation link. "
+        "State each outcome once; do not repeat it in Documentation or Examples."
     )
     if git_context:
         prompt += (
@@ -163,14 +172,11 @@ def build_copilot_command(
         "--no-auto-update",
         "--no-color",
         "--output-format",
-        "text",
+        "json",
         "--disable-builtin-mcps",
-        "--available-tools=read,create,edit,bash",
+        "--available-tools=view,glob,grep,bash,skill",
         "--allow-tool=read",
-        "--allow-tool=write",
         "--allow-tool=shell(git:*)",
-        "--allow-url=https://github.com",
-        "--allow-url=https://copilot-session-usage.readthedocs.io",
     ]
     if model:
         command.extend(["--model", model])
@@ -255,18 +261,60 @@ def run_copilot(
     repo: Path,
     prompt: str,
     model: str | None,
-) -> None:
-    """Run Copilot CLI and leave the generated Markdown in the shared output file."""
-    result = subprocess.run(
-        build_copilot_command(prompt, model),
-        cwd=repo,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+) -> str:
+    """Run Copilot CLI and return only its structured final-answer message."""
+    try:
+        result = subprocess.run(
+            build_copilot_command(prompt, model),
+            cwd=repo,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=COPILOT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"Copilot CLI timed out after {COPILOT_TIMEOUT_SECONDS} seconds."
+        ) from error
     if result.returncode != 0:
         output = f"{result.stdout}\n{result.stderr}".strip()
         raise RuntimeError(f"Copilot CLI failed with exit code {result.returncode}:\n{output}")
+    return parse_copilot_response(result.stdout)
+
+
+def parse_copilot_response(response: str) -> str:
+    """Select final Markdown from JSONL events, never from progress or tool output."""
+    final_answer: str | None = None
+    completed = False
+    for line in response.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("Copilot returned invalid JSONL output.") from error
+        if not isinstance(event, dict):
+            raise RuntimeError("Copilot returned a non-object JSONL event.")
+        data = event.get("data", {})
+        if event.get("type") == "result":
+            if event.get("exitCode") != 0:
+                raise RuntimeError("Copilot reported an unsuccessful result event.")
+            completed = True
+        elif (
+            event.get("type") == "assistant.message"
+            and isinstance(data, dict)
+            and data.get("phase") == "final_answer"
+            and not data.get("toolRequests")
+        ):
+            content = data.get("content")
+            if not isinstance(content, str):
+                raise RuntimeError("Copilot final-answer content must be a string.")
+            final_answer = content
+    if not completed:
+        raise RuntimeError("Copilot JSONL output has no successful result event.")
+    if final_answer is None:
+        raise RuntimeError("Copilot JSONL output has no final-answer message.")
+    return final_answer
 
 
 def validate_output(output: Path) -> None:
@@ -275,6 +323,12 @@ def validate_output(output: Path) -> None:
         content = output.read_text(encoding="utf-8")
     except OSError as error:
         raise RuntimeError(f"Unable to read release-note output {output}: {error}") from error
+    validate_content(content, output)
+    print("Release-note output file verified.")
+
+
+def validate_content(content: str, output: Path) -> None:
+    """Validate complete Markdown without extracting notes from an agent transcript."""
     if not content.strip():
         raise RuntimeError(f"Copilot created an empty release-note file: {output}")
 
@@ -302,7 +356,41 @@ def validate_output(output: Path) -> None:
             f"Release-note output contains an invalid section heading "
             f"{invalid_headings[0]!r}: {output}"
         )
-    print("Release-note output file verified.")
+    if len(headings) != len(set(headings)):
+        raise RuntimeError(f"Release-note output contains repeated section headings: {output}")
+    if "## Maintenance" in headings and len(headings) != 1:
+        raise RuntimeError(f"Maintenance must not accompany user-facing sections: {output}")
+    without_links = DOCUMENTATION_LINK.sub("", content)
+    if re.search(r"https?://", without_links):
+        raise RuntimeError(f"Release-note output contains a bare or invalid URL: {output}")
+
+    section = ""
+    section_has_content = False
+    seen_bullets: set[str] = set()
+    for line in content.splitlines():
+        if not line.strip():
+            continue
+        if line in PERMITTED_HEADINGS:
+            if section and not section_has_content:
+                raise RuntimeError(f"Release-note output contains an empty section: {output}")
+            section = line
+            section_has_content = False
+            continue
+        section_has_content = True
+        if section == "## Maintenance":
+            continue
+        if not line.startswith("- ") or not line[2:].strip():
+            raise RuntimeError(f"Release-note sections must contain concise flat bullets: {output}")
+        bullet = " ".join(line[2:].casefold().split()).rstrip(".")
+        if bullet in {"none", "n/a", "no breaking changes"}:
+            raise RuntimeError(f"Release-note output contains a placeholder bullet: {output}")
+        if bullet in seen_bullets:
+            raise RuntimeError(f"Release-note output contains a duplicate bullet: {output}")
+        seen_bullets.add(bullet)
+        if section == "## Documentation" and not DOCUMENTATION_LINK.search(line):
+            raise RuntimeError(f"Documentation bullets require an inline HTTPS link: {output}")
+    if not section_has_content:
+        raise RuntimeError(f"Release-note output contains an empty section: {output}")
 
 
 def generate_release_notes(
@@ -331,13 +419,31 @@ def generate_release_notes(
     require_copilot_token()
     run_skill_check(repo)
     git_context = build_git_context(repo, from_ref, to_ref)
-    run_copilot(
-        repo,
-        build_prompt(from_ref, to_ref, repo, output, git_context),
-        model,
-    )
-
-    validate_output(output)
+    prompt = build_prompt(from_ref, to_ref, repo, output, git_context)
+    feedback = ""
+    for attempt in range(1, MAX_GENERATION_ATTEMPTS + 1):
+        output.write_text("", encoding="utf-8")
+        try:
+            response = run_copilot(repo, prompt + feedback, model)
+            validate_content(response, output)
+            output.write_text(response, encoding="utf-8")
+            validate_output(output)
+            break
+        except RuntimeError as error:
+            print(f"Release-note attempt {attempt}/{MAX_GENERATION_ATTEMPTS} failed: {error}")
+            if attempt == MAX_GENERATION_ATTEMPTS:
+                output.write_text("", encoding="utf-8")
+                raise RuntimeError(
+                    f"Release-note generation failed after {attempt} attempts; "
+                    f"no notes are safe to publish. Last error: {error}"
+                ) from error
+            feedback = (
+                f"\nThe previous attempt failed validation: {error}\n"
+                "Return ONLY the complete release-note Markdown in your final answer, "
+                "starting with a permitted ## heading, with no commentary or tool traces. "
+                "The Python caller writes the file; do not attempt file-writing tools. "
+                "Do not infer Maintenance from a generation failure."
+            )
     print(f"Release notes written to {output}")
 
 
