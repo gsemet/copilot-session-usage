@@ -88,3 +88,39 @@ def test_validate_rejects_whitespace_only_output(tmp_path: Path, content: str) -
     result = run_validator(tmp_path, content)
 
     assert result.returncode == 1
+
+
+@pytest.mark.parametrize(
+    "content, message",
+    [
+        ("## Bug Fixes\n", "empty section"),
+        ("## Bug Fixes\n- Fixed discovery.\n## Documentation\n", "empty section"),
+        ("## Maintenance\nInternal improvements.\n## Bug Fixes\n- Fixed discovery.", "Maintenance"),
+        ("## Bug Fixes\n- Fixed discovery.\n## Bug Fixes\n- Fixed lookup.", "repeated section"),
+        ("## Documentation\n- See https://example.com/guide", "bare or invalid URL"),
+        ("## Documentation\n- Updated the guide.", "inline HTTPS link"),
+        ("## Documentation\n- [Guide](http://example.com/guide)", "bare or invalid URL"),
+        ("## Bug Fixes\n- Fixed discovery.\n\nDone.", "flat bullets"),
+        ("## Bug Fixes\n- Fixed discovery.\n  - Details.", "flat bullets"),
+        ("## Breaking Changes\n- None", "placeholder"),
+        ("## Bug Fixes\n- Fixed discovery.\n## Enhancements\n- Fixed discovery.", "duplicate"),
+    ],
+)
+def test_validate_rejects_contract_violations(tmp_path: Path, content: str, message: str) -> None:
+    """Enforce the skill's mechanically verifiable rules in the publishing gate."""
+    result = run_validator(tmp_path, content)
+
+    assert result.returncode == 1
+    assert message in result.stderr
+
+
+def test_validate_accepts_item_local_documentation_links(tmp_path: Path) -> None:
+    """Accept concise notes that attach documentation directly to each outcome."""
+    result = run_validator(
+        tmp_path,
+        "## New Features\n\n"
+        "- Analyze CLI sessions with `--agent cli`. "
+        "[Provider guide](https://example.com/how-to/provider.html#auto-discovery).\n",
+    )
+
+    assert result.returncode == 0, result.stderr

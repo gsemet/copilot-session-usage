@@ -57,7 +57,17 @@ just docs-serve
 	`gh-release-notes` skill through `gh copilot`, writes the final Markdown to
 	`release-notes.md`, validates that file, and pushes the tag only after note
 	generation succeeds. An empty forced range receives a generic `## Maintenance`
-	note without a Copilot request. It does not create a version/changelog commit.
+	note without a Copilot request. Non-empty forced ranges are still analyzed:
+	Commitizen eligibility does not determine user impact. Generation uses Copilot's
+	JSONL output to select only the structured final-answer message, never progress
+	prose, tool output, or telemetry. The Python wrapper validates and writes the
+	file itself; model-side file editing is not required. The CLI must support
+	final-answer phases and terminal result events. Generation retries up to three
+	times with a five-minute timeout per request. Exhausted
+	attempts block publication rather than inventing maintenance notes. The validator
+	rejects empty sections, mixed Maintenance output, bare URLs, exact duplicate
+	bullets, and commentary outside the release sections. It does not create a
+	version/changelog commit.
 4. The generated notes are uploaded as an artifact and used to create the GitHub
 	Release. Enable the `draft` option if the release needs review before publishing.
 5. The release workflow runs CI before creating the GitHub Release and, for a

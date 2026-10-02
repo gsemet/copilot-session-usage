@@ -10,6 +10,20 @@ user-invocable: true
 Generate **end-user-friendly, user-impact-only** release notes by analyzing the actual changes between releases.
 Interactive use requires no script; automated generation and validation use the bundled script described below.
 
+## Portability
+
+This skill works with any Git repository, regardless of language, framework,
+directory layout, documentation host, or release workflow. Discover the target
+product and its public documentation from the requested repository; do not assume
+the skill's own repository is the product being released.
+
+The bundled script uses only the Python standard library (Python 3.10+), Git,
+and `gh copilot`. Install this skill where Copilot can discover it in the target
+repository or user-level skill directory. The script may live outside the target
+repository; select that repository with `--repo`. No project package, task runner,
+configuration file, or particular CI workflow is required. Documentation links
+come from repository evidence, not a built-in domain allowlist.
+
 The output is meant to be **copy-pasted into a GitHub Release**. It must contain
 release-note sections only: never add a document title, version heading, preamble,
 file summary, commit summary, or closing separator. GitHub already displays the
@@ -18,13 +32,22 @@ Markdown.
 
 ## Non-negotiable output contract
 
+- Describe each user outcome once, in one concise bullet. End that same bullet
+	with the closest verified documentation link when available. Do not collect
+	those links at the bottom or repeat the change in Documentation or Examples.
+- Scale notes to the actual change: one pricing refresh or small fix normally
+	needs one bullet; a large feature release needs distinct outcomes, not a
+	bullet for every commit, field, edge case, or implementation detail.
 - Render every public documentation URL as an inline Markdown link with concise
 	descriptive text: `See the [pricing reference for details](https://example.com/pricing)`.
 - Never expose a documentation URL as plain text, after a colon, in parentheses,
 	or on its own line. A bare `https://...` URL is invalid release-note output.
 - Never include CI, release automation, Git evidence, generator internals,
-	governance, contributor or agent guidance, tests, repository housekeeping, or
+	internal governance, contributor or agent guidance, tests, repository housekeeping, or
 	maintainer process.
+- Apply internal-material exclusions by audience, not filename. If the target
+	repository publishes skills, documentation, or test utilities as its product,
+	describe evidenced changes for that product's users.
 - Never include `## Maintenance` together with any user-facing section. When a
 	user-facing change qualifies, omit Maintenance and discard all internal-only
 	candidates.
@@ -44,20 +67,31 @@ The skill includes `scripts/generate_release_notes.py`, a standalone Python scri
 - writes the deterministic `## Maintenance` output without invoking Copilot when the
 	requested Git range contains no commits or the caller explicitly requests
 	`--maintenance-only`;
-- precomputes the commit log and complete diff locally so generation also works
+- precomputes the commit log, complete diff summary, and full diff locally so generation also works
 	when the Copilot CLI cannot inspect Git history inside its tool environment;
 - invokes the Copilot CLI with `/gh-release-notes`;
-- gives the skill scoped file-writing tools so it writes the final Markdown to the
-	requested output file while the response stream is discarded; and
+- exposes Copilot's `view`, `glob`, and `grep` tools for reading and finding
+	skill instructions and exact documentation pages (`read` is a permission
+	category, not a builtin tool name);
+- invokes Copilot with `--output-format json`, reads JSONL events, and selects
+	only the completed `assistant.message` with `phase: final_answer`; commentary,
+	streaming deltas, tool results, and telemetry never become release notes;
+- validates the final Markdown and writes the requested file itself, without
+	depending on the model's file-writing tools;
+- retries generation up to three times with validation feedback, with a five-minute
+	timeout per request, clearing rejected output before each retry;
+- refuses publication after exhausted attempts, never substituting Maintenance
+	for a failed request; and
 - verifies that the requested output file follows the release-note output contract. The
 	script does not normalize Markdown or decide user impact, categorize changes,
 	discover documentation, infer breaking changes, or require examples; those
 	decisions belong to this skill.
 
-Generate notes for an exact range from the repository root:
+Generate notes for an exact range using the script's installed path:
 
 ```bash
-python .github/skills/gh-release-notes/scripts/generate_release_notes.py \
+python /path/to/gh-release-notes/scripts/generate_release_notes.py \
+	--repo /path/to/repo \
 	--from-ref v1.0.0 \
 	--to-ref v1.1.0 \
 	--output release-notes.md
@@ -67,21 +101,28 @@ For an intentional maintenance-only release whose range contains internal commit
 pass `--maintenance-only` to write the deterministic Maintenance section without
 invoking Copilot.
 
-`release-notes.md` is the canonical shared artifact filename. The generator, both
-release workflows, and `gh release --notes-file` use this same file so the release
-body never depends on Copilot's response stream. An explicitly supplied `--output`
-path is honored exactly. For a non-empty range, the generator creates the empty
-handoff file before invoking Copilot so the skill can edit the known
-repository-relative target; the file is accepted only after the skill has replaced
-it with valid Markdown. An empty range produces the valid maintenance output
+`release-notes.md` is the default output filename, relative to the target repository.
+An explicitly supplied `--output` path is honored exactly; absolute output paths
+are also supported. A release workflow can consume the validated file through
+`gh release --notes-file` or another publishing tool. This skill does not require
+or create that workflow and does not publish releases itself.
+For a non-empty range, the generator clears stale output
+before invoking Copilot and persists only a validated structured final answer.
+Copilot has reading and Git tools, but no file-writing tools. The CLI must support
+JSONL output with final-answer phases and a successful terminal `result` event.
+Malformed or incomplete streams fail validation; no Markdown is scraped from
+surrounding chatter or tool traces.
+An empty range produces the valid maintenance output
 directly and does not require Copilot authentication or skill discovery.
 
 The range is Git's two-dot range, `from_ref..to_ref`: `from_ref` itself is excluded
 and `to_ref` is included. Both refs may be tags, branches, or commit IDs.
 
 Set `COPILOT_MODEL` or pass `--model` to make model selection explicit. The script also
-supports `--validate FILE` when an existing release-note file should be checked for
-readability and non-empty content without invoking Copilot.
+supports `--validate FILE` to enforce section structure, flat non-empty bullets,
+HTTPS Markdown links, exact duplicate rejection, and Maintenance exclusivity
+without invoking Copilot. Semantic accuracy and paraphrased repetition still
+require the skill's audience review.
 
 ---
 
@@ -107,7 +148,7 @@ What changed since the last release tag?
 2. **Applies a strict user-impact gate** — includes a change only when an end user can do, observe, configure, rely on, or learn something different
 3. **Interprets for end-users** — no technical jargon, functions, variable names, file paths, or implementation summaries
 4. **Categorizes intelligently** — Features, Enhancements, Bug Fixes, Breaking Changes, Examples, Documentation, and Maintenance
-5. **Adds concrete examples** — shows what users see or can do after a qualifying change
+5. **Adds examples when useful** — includes short inline syntax only when it helps users act
 6. **Links to relevant public docs** — links each user-facing change to the closest published documentation page with concise inline Markdown link text when one exists, even if that page was not changed in the release
 7. **Consolidates related changes** — groups related diffs and eliminates back-and-forth noise
 8. **Outputs clean markdown** — ready to paste into a GitHub Release note
@@ -169,9 +210,12 @@ Gather all commits in the specified range with their messages.
 
 ### Step 2: Examine relevant diffs
 ```bash
-git diff v1.0.0..v1.1.0 -- . ':(exclude).github' ':(exclude)skills' ':(exclude)guidelines'
+git diff --no-ext-diff v1.0.0..v1.1.0
 ```
-Read actual code changes line-by-line to understand behavior. Inspect excluded paths only when needed to verify whether they caused a direct user-visible consequence; never report the paths themselves.
+Read actual changes to understand behavior. Determine which files form the
+published product before narrowing the analysis. Do not exclude directories by
+name: a skill catalog, documentation site, or testing library may publish skills,
+guidelines, knowledge, or test utilities as its actual product.
 
 Treat these as non-release content, and exclude them entirely unless the diff
 also proves a direct change to the published user experience:
@@ -186,7 +230,9 @@ also proves a direct change to the published user experience:
 
 These exclusions can be overridden only when the diff proves a direct user
 impact, such as a packaging change that changes the installable artifact or a
-security fix that changes behavior for users. In that case, describe the user
+security fix that changes behavior for users. Published skills, guidelines, or
+test utilities also qualify when they are the requested repository's product,
+rather than internal support material. In that case, describe the user
 outcome, not the internal mechanism or workflow that enabled it.
 
 After identifying a qualifying change, inspect the repository's user-facing
@@ -223,6 +269,21 @@ Do not wait for the documentation page itself to be modified. For example, a
 pricing or model-data change should link to the project's pricing/model reference
 page if that page explains the affected behavior.
 
+Keep the link at the end of the bullet that describes the change, before starting
+the next item. For a fictional reporting application, for example:
+
+```markdown
+## New Features
+- **PDF report exports** with `report export --format pdf`. [Export guide](https://docs.example.com/reports/export).
+- **Scheduled reports** with configurable delivery times. [Scheduling guide](https://docs.example.com/reports/scheduling).
+```
+
+These are layout examples, not claims about the requested range. Verify syntax
+and URLs from the checked-out product documentation. Use a section fragment only
+when its anchor is verified; do not guess one from a heading. Do not add a
+Documentation section linking these guides again. A guide modified alongside its
+feature belongs with the feature, not in a second bullet saying the guide changed.
+
 If no trustworthy public documentation URL can be established, omit the
 Documentation section and documentation bullets rather than writing a text-only
 documentation entry. Never emit `## Documentation` unless its body contains at
@@ -247,6 +308,14 @@ Breaking changes come from:
 - If a feature was added then removed → don't mention it
 - If something changed multiple times → only note the final state
 - If multiple commits fix the same issue → merge into one bullet
+- Assign each outcome to exactly one section. A breaking change belongs in
+	Breaking Changes, not again in New Features or Enhancements.
+- Put useful command syntax inline in the outcome's bullet. Add Examples only
+	for a distinct workflow that cannot be explained by that short syntax; do not
+	restate the same capability under a second heading.
+- Delete unchanged defaults, generic benefits, "also updated documentation",
+	"improved reliability", and "no breaking changes" unless they convey a specific
+	evidenced difference users need to know.
 
 ### Step 6: Categorize & Format
 
@@ -257,8 +326,9 @@ Fixes`, `## Breaking Changes`, `## Examples`, `## Documentation`, and
 `## Maintenance`. Do not add headings such as `Internal`, `User impact`, `Upgrade
 notes`, or `Summary`; fold useful user impact into the permitted sections instead.
 
-Treat Documentation as a link-only section: include it only when at least one
-trustworthy public documentation URL was found, and make every Documentation
+Reserve Documentation for documentation-only changes that help users operate the
+product and are not already covered by another bullet. Never use it as a link
+collection for features or fixes. Make every Documentation
 bullet an inline Markdown link with descriptive link text and an absolute HTTPS
 target. If no such URL was found, omit the entire Documentation section. Do not
 replace the missing URL with a repository path, an unlinked description, or a
@@ -279,8 +349,8 @@ Documentation bullet remains, remove `## Maintenance` and all of its bullets.
 
 ```markdown
 ## New Features
-- Added dark mode toggle in settings
-- New PDF export option
+- Added a dark mode toggle in settings. [Appearance guide](https://docs.example.com/settings#dark-mode).
+- Export reports as PDF from the File menu. [Export guide](https://docs.example.com/export).
 
 ## Enhancements
 - Improved search performance (now supports partial matches)
@@ -291,20 +361,19 @@ Documentation bullet remains, remove `## Maintenance` and all of its bullets.
 - Resolved crash when uploading 10MB+ files
 
 ## Breaking Changes
-- Database schema updated — run migration before upgrading
-- CSV export removed; use Excel or PDF instead
-
-## Examples
-- Dark mode can be enabled in Settings → Appearance → Theme
-- CSV export is no longer available; choose Excel or PDF from Export menu
+- Run the database migration before upgrading. [Migration guide](https://docs.example.com/upgrade#database).
+- CSV export removed; use Excel or PDF instead. [Export guide](https://docs.example.com/export).
 
 ## Documentation
-- [Dark mode guide](https://docs.example.com/settings#dark-mode)
-- [Migration notes](https://docs.example.com/upgrade#database)
+- New [account recovery guide](https://docs.example.com/accounts/recovery).
+```
 
+The example above illustrates a user-facing release. A maintenance-only release
+instead contains only:
+
+```markdown
 ## Maintenance
-This release contains maintenance and internal improvements. No user-facing behavior
-changed.
+This release contains maintenance and internal improvements. No user-facing behavior changed.
 ```
 
 Omit `## Breaking Changes` completely when the actual range contains no breaking
@@ -321,7 +390,7 @@ directly observe a supported behavior that the mechanism enables.
 1. **Parse input** — extract `from_ref`, `to_ref`, `repo_path`, and optional filters
 2. **Discover public documentation** — inspect the repository's available user-facing documentation surfaces and any published links they expose. Do not assume a particular language, documentation generator, directory layout, metadata file, or URL naming scheme. Prefer the closest trustworthy public page for each qualifying change.
 For hosting services like readthedocs that propose latest/stable URLs, prefer the stable version.
-Infere fragment identifiers to point to specific sections when available.
+Use fragment identifiers only when their anchors can be verified.
 Use absolute HTTPS URLs, and omit a documentation link when no public page can be established rather than inventing one.
 3. **Fetch commits** — run `git log` with range, collect hashes and messages
 4. **Read diffs per file** — use `git show <hash>` for each relevant commit and examine changed behavior, not just filenames
@@ -329,13 +398,13 @@ Use absolute HTTPS URLs, and omit a documentation link when no public page can b
 6. **Interpret impact** — state what users can do, observe, configure, rely on, or learn differently
 7. **Detect breaking changes** — scan for BREAKING markers, public API removals, format changes, migrations, and changed defaults
 8. **Group by category** — assign each qualifying change to **New Features**, **Enhancements**, **Bug Fixes**, **Breaking Changes**, **Examples**, **Documentation**, or **Maintenance**
-9. **Build examples** — for each user-facing change, use README, public docs, tests, or CLI help as evidence; add a concrete example for every added or changed CLI command, public API call, configuration option, or before/after workflow
+9. **Add useful syntax** — use public docs or CLI help to verify short inline command/API examples; add an Examples section only when a distinct workflow needs it
 10. **Consolidate** — merge related items, remove duplicates and flip-flops
 11. **Handle an empty range** — if no product change qualifies, generate exactly one concise `## Maintenance` section
 12. **Format markdown** — generate clean section headings and bullets with no title, preamble, footer, file summary, or commit summary
-13. **Use concise relevant public docs links** — every Documentation bullet must contain an inline Markdown link with descriptive link text and an absolute HTTPS target to the closest relevant published page. Every qualifying feature, enhancement, bug-fix, breaking-change, or example bullet should use the same concise Markdown-link style when a page exists, using a fragment identifier when the page has a matching section. Do not expose bare URLs in prose or use bare URLs as the only link form. Do not require the page to have changed in the range. If no trustworthy public URL exists, omit Documentation entirely.
+13. **Attach documentation locally** — end each outcome's bullet with its closest verified public HTTPS Markdown link. Do not repeat it in Documentation; that section is only for independent documentation-only changes. Do not invent URLs or fragments.
 14. **Run the final audience review** — inspect every bullet and remove anything about CI, workflows, release tooling, Git evidence, validation, governance, contributor or agent guidance, repository housekeeping, changed files, or maintainer process. Remove the entire section if that leaves it empty. Also remove Documentation bullets whose links target contributor, governance, engineering, or maintainer material.
-15. **Run the final format review** — ensure every `https://` occurrence is inside `[visible text](https://target)`, with no bare URL in prose, and remove `## Maintenance` whenever another qualifying section exists.
+15. **Run the final format review** — ensure every `https://` occurrence is inside `[visible text](https://target)`, with no bare URL in prose, remove duplicate outcomes and empty sections, and remove `## Maintenance` whenever another qualifying section exists.
 
 ---
 
@@ -357,8 +426,8 @@ Start directly with the release-note section instead:
 
 ```markdown
 ## New Features
-- Added dark mode toggle in settings
-- New PDF export option
+- Added a dark mode toggle in settings. [Appearance guide](https://docs.example.com/settings#dark-mode).
+- Export reports as PDF from the File menu. [Export guide](https://docs.example.com/export).
 
 ## Enhancements
 - Improved search performance (supports partial matches)
@@ -369,15 +438,10 @@ Start directly with the release-note section instead:
 - Resolved crash when uploading 10MB+ files
 
 ## Breaking Changes
-- Database schema updated — run migration before upgrading
-
-## Examples
-- Enable dark mode from Settings → Appearance → Theme
-- Export a report as PDF from the File → Export menu
+- Run the database migration before upgrading. [Migration guide](https://docs.example.com/upgrade#database).
 
 ## Documentation
-- [Dark mode guide](https://docs.example.com/settings#dark-mode)
-- [Upgrade instructions](https://docs.example.com/upgrade#database)
+- New [account recovery guide](https://docs.example.com/accounts/recovery).
 ```
 
 **Key Rules:**
@@ -391,9 +455,9 @@ Start directly with the release-note section instead:
 	for maintenance-only releases
 - Use public documentation URLs; never use repo-relative paths like `docs/...` or `README.md`
 - For each user-facing bullet, search existing documentation for the closest page about the impacted behavior and link it inline with descriptive Markdown text when available, even when the documentation file was unchanged
-- Use fragment identifiers (`#section-name`) to point to specific docs sections
-- Add a concrete **Examples** section for every added or changed CLI command, public API call, configuration option, or user-visible before/after behavior. Derive syntax from the project's public help, API docs, README, or supported usage examples; do not invent it
-- Add a **Documentation** section only when at least one trustworthy public documentation URL exists; every bullet in that section must contain an absolute HTTPS Markdown link with descriptive link text. If no public URL can be established, omit the section and do not emit a text-only documentation bullet
+- Use fragment identifiers (`#section-name`) only for verified section anchors
+- Prefer short inline examples in the relevant bullet; use **Examples** only for a distinct useful workflow, never to repeat a feature
+- Use **Documentation** only for independent documentation-only changes with a verified HTTPS link; never repeat links or outcomes already covered elsewhere
 - Prefer concise inline Markdown links in every section, such as `See the [pricing reference for details](https://example.com/pricing)`, rather than exposing a full URL after a colon or in parentheses
 - Multiple links OK if they point to different topics
 - Omit any section that has no bullets
@@ -409,18 +473,22 @@ Start directly with the release-note section instead:
 
 ## Non-interactive automation mode
 
-When this skill is invoked by a CI job with an explicit output-file request:
+When invoked by the bundled generator or a CI job using structured output:
 
 - Honor the requested tag range and repository path exactly.
-- Treat the requested output file as mandatory. Writing it is the only successful completion condition.
-- Replace the pre-created handoff file with the final Markdown using the `edit` file tool.
-- After writing, use the `read` file tool to verify that the requested file exists and contains the final release-note Markdown.
-- Do not modify, commit, or push any other repository files.
-- The output file must contain only the final release-note Markdown, without an explanation, title heading, or code fence.
+- Return only the complete release-note Markdown in the final answer. The Python
+	caller selects its structured event, validates it, and writes the requested file.
+- Do not create, edit, commit, or push any repository files. There is no model-side
+	output-file handoff or file verification step.
+- Use `view`, `glob`, `grep`, and read-only Git commands to inspect the evidence,
+	skill instructions, public syntax, and documentation destinations as needed.
+- The final answer must contain only release-note Markdown, without an
+	explanation, title heading, or code fence.
 - The first line must be exactly one of: `## New Features`, `## Enhancements`, `## Bug Fixes`, `## Breaking Changes`, `## Examples`, `## Documentation`, or `## Maintenance`.
 - Do not write a preamble, tool-call transcript, title, code fence, or explanatory text before the first release-note section.
-- Never use the Copilot response stream as output. The caller may discard it after the file is written.
-- Do not report the release notes only in the response. If the file cannot be written or verified, the task has failed.
+- Do not add progress prose, an explanation, or a tool trace to the final answer.
+- Never infer "no user-facing changes" because writing, authentication, or
+	generation failed. Maintenance requires evidence about the requested range.
 - Preserve the user-impact categories, concrete examples, evidence-based breaking-change detection, and repository-derived public documentation links described above.
 
 ## How to Use This Skill in a Session
@@ -451,9 +519,9 @@ Generate release notes from v2.1.0 to v2.2.0 for /path/to/my-app
 - Include breaking changes prominently
 - Omit the entire Breaking Changes section when no breaking change is evidenced
 - Group related changes
-- Add a concrete example for every changed CLI command, public API, configuration option, or before/after workflow, drawing syntax from README, public docs, or CLI/API help
+- Add verified inline syntax only when useful; do not require an Examples section or repeat the same outcome
 - Discover and link to the project's public documentation when a trustworthy page is available
-- Link each qualifying user-facing change to the closest relevant public documentation page when one exists, whether or not that page changed in the release
+- End each qualifying change's bullet with its closest verified public documentation link when available; never move these links into a bottom-of-notes collection
 - Omit empty sections
 - If a candidate cannot pass the normal-user audience test, omit it rather than placing it under Maintenance or Documentation
 
@@ -494,8 +562,8 @@ Generate release notes from v2.1.0 to v2.2.0 for /path/to/my-app
 
 ## Limitations
 
-- Requires a git repository with proper tags
+- Requires a Git repository with available ancestor refs; tags are optional
 - Complex changes may need human interpretation
 - Very large diffs should be reduced to their evidenced user impact; never summarize them by file count
-- Works best with semantic versioning (v1.0.0 format)
+- Accepts tags, branches, or commit IDs; no version naming convention is required
 - Needs meaningful commit messages for best results, but commit messages alone are never evidence of user impact
