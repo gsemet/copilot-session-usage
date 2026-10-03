@@ -1,7 +1,7 @@
 {
-  "_captured": "2026-10-01T08:59:01.906808+00:00",
+  "_captured": "2026-10-03T08:09:35.698747+00:00",
   "_source": "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/models-and-pricing.yml",
   "_yaml_path": "/home/runner/work/copilot-session-usage/copilot-session-usage/src/copilot_session_usage/data/models-and-pricing.yml",
-  "model_count": 47,
-  "checksum": "8d4b6405761ceef4"
+  "model_count": 43,
+  "checksum": "eaab874e5781f974"
 }
