@@ -101,7 +101,16 @@ Path-based analysis requires choosing one provider.
 ## Skill-aware analysis
 
 When a session invokes a skill (for example `/compendium-generic get-session-costs`),
-you can attribute costs and tool calls to that skill.
+you can group VS Code request tokens, costs, and tool calls under that skill.
+
+:::{note}
+Skill token and cost attribution is limited to the latest explicit slash-command
+invocation. It assigns the whole request context, not just the skill text or usage
+caused by that skill. Automatically loaded skills, overlapping skills, and later
+unrelated work cannot be reliably separated; requests before any invocation are
+grouped under `unknown`. CLI/App per-skill tokens and costs remain unavailable.
+See [How cost estimation works](../explanation/how-cost-estimation-works.md).
+:::
 
 ```bash
 # Per-skill cost breakdown for a session

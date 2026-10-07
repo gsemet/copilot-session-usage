@@ -184,9 +184,24 @@ available.
 
 ## Skill-Aware Analysis
 
-The tool automatically detects and attributes costs to **skills** (e.g., `/skill-name`, `/namespace:skill-name`)
-by analyzing user messages, discovery events, and LLM call history. Use these commands
-to understand how skills are impacting your session costs.
+Use skill breakdowns as limited timeline-based attribution, not a measurement of
+tokens or cost caused by a skill. For VS Code sessions, each request's full token
+counts and cost are assigned to the most recently invoked slash-command skill
+(e.g., `/skill-name`, `/namespace:skill-name`) until the next invocation.
+
+Distinguish skill detection from attribution: discovery events can identify
+available skills without establishing which skill caused a request. Automatically
+loaded or read skills and overlapping skills are not independently attributed.
+Assigned tokens include the entire request context, such as conversation history,
+instructions, and tool results, not just the skill text. Later unrelated work can
+remain attributed to the last invoked skill; requests before an invocation are
+assigned to `unknown`.
+
+When reporting per-skill tokens or costs, include this limitation even if the
+underlying billed request costs are exact. For CLI/App sessions, report per-skill
+tokens and costs as unavailable: cumulative usage does not provide a validated
+request-level skill split. Detected skills and attributed tool counts do not
+establish token or cost attribution.
 
 ### Single-session skill analysis
 

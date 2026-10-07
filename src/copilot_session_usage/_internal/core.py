@@ -750,10 +750,12 @@ def _get_model_rates(model: str, input_tok: int, pricing: dict[str, Any]) -> dic
     models = pricing.get("models", {})
     tiers = models.get(model)
     if tiers is None:
-        for key in models:
-            if key != "default" and model.startswith(key):
-                tiers = models[key]
-                break
+        matching_key = max(
+            (key for key in models if key != "default" and model.startswith(key)),
+            key=len,
+            default="",
+        )
+        tiers = models.get(matching_key)
     if tiers is None:
         tiers = models.get("default", [{}])
 
@@ -927,7 +929,7 @@ def estimate_cost(
     Threshold-aware: the correct pricing tier is selected automatically based
     on ``input_tok`` so long-context requests use the higher rate.
 
-    For models with a ``cache_write_per_m`` rate (Anthropic only), the
+    For any model with a ``cache_write_per_m`` premium, the
     incremental cache-creation cost is approximated as::
 
         fresh_input * (cache_write_per_m - input_per_m) / 1_000_000
@@ -935,8 +937,10 @@ def estimate_cost(
     VS Code debug logs do not expose ``cacheCreationTokens`` directly; fresh
     input (``inputTokens - cachedTokens``) is used as a proxy.  For typical
     Anthropic sessions the full context prefix is cached, so this closely
-    matches the billed amount.  Models without ``cache_write`` (OpenAI,
-    Google) have ``cache_write_per_m == 0``, so the delta is zero for them.
+    matches the billed amount. This also applies to GPT-5.6 and later
+    OpenAI families. Models without ``cache_write`` have no premium.
+    Without billed telemetry or exact cache-creation counts, this remains
+    an estimate, not a guarantee of parity with VS Code billing.
     """
     rates = _get_model_rates(model, input_tok, pricing)
     billable_input = max(0, input_tok - cached_tok)
@@ -945,10 +949,6 @@ def estimate_cost(
         + cached_tok * rates.get("cache_per_m", 0.0) / 1_000_000
         + output_tok * rates.get("output_per_m", 0.0) / 1_000_000
     )
-    # Approximate incremental cache-creation cost for Anthropic models.
-    # OTel DB (agent-traces.db) has the exact field but is not always present
-    # and VS Code does not yet populate it; this proxy is accurate when the
-    # full context prefix is cached, which is the common case.
     cache_write_per_m = rates.get("cache_write_per_m", 0.0)
     input_per_m = rates.get("input_per_m", 0.0)
     if cache_write_per_m > input_per_m:
@@ -956,16 +956,26 @@ def estimate_cost(
     return cost  # type: ignore[no-any-return]
 
 
-def estimate_cost_for_file(per_model: dict[str, dict[str, int]], pricing: dict[str, Any]) -> float:
+def estimate_cost_for_file(per_model: dict[str, dict[str, Any]], pricing: dict[str, Any]) -> float:
     """Sum costs per-model bucket.
 
-    Prefers ``copilotUsageNanoAiu`` (VS Code's own billing figure, converted
-    from nano-AIC to USD) when the field is populated.  Falls back to
-    ``estimate_cost`` (token-based) for models that do not report it (e.g.
-    Kimi, older VS Code versions).
+    For parsed VS Code requests, prefer ``copilotUsageNanoAiu`` (including
+    zero), converted from nano-AIC to USD. Estimate only requests without
+    billing telemetry, selecting their pricing tiers independently.
+    Aggregate-only buckets retain the legacy token-based fallback.
     """
     total = 0.0
     for model, v in per_model.items():
+        if "requests" in v:
+            for request in v["requests"]:
+                nano = request.get("nano_aiu")
+                if nano is not None:
+                    total += nano / 1e11
+                else:
+                    total += estimate_cost(
+                        request["input"], request["output"], request["cached"], model, pricing
+                    )
+            continue
         nano = v.get("nano_aiu", 0)
         if nano:
             # 1 nanoAiu = 1e-9 AIC = 1e-11 USD
@@ -1046,6 +1056,13 @@ def parse_jsonl_file(path: Path, skill_timeline: list[tuple[int, str]] | None = 
                     bucket["cached"] += cch
                     bucket["calls"] += 1
                     bucket["nano_aiu"] += attrs.get("copilotUsageNanoAiu") or 0
+                    request = {
+                        "input": inp,
+                        "output": out,
+                        "cached": cch,
+                        "nano_aiu": attrs.get("copilotUsageNanoAiu"),
+                    }
+                    bucket.setdefault("requests", []).append(request)
 
                     if skill_timeline and ts is not None:
                         skill = active_skill_at_ts(ts, skill_timeline) or "unknown"
@@ -1059,12 +1076,14 @@ def parse_jsonl_file(path: Path, skill_timeline: list[tuple[int, str]] | None = 
                     skill_bucket["cached"] += cch
                     skill_bucket["calls"] += 1
                     skill_model_bucket = skill_bucket["per_model"].setdefault(
-                        model, {"input": 0, "output": 0, "cached": 0, "calls": 0}
+                        model, {"input": 0, "output": 0, "cached": 0, "calls": 0, "nano_aiu": 0}
                     )
                     skill_model_bucket["input"] += inp
                     skill_model_bucket["output"] += out
                     skill_model_bucket["cached"] += cch
                     skill_model_bucket["calls"] += 1
+                    skill_model_bucket["nano_aiu"] += attrs.get("copilotUsageNanoAiu") or 0
+                    skill_model_bucket.setdefault("requests", []).append(request)
 
                     if ts is not None:
                         if stats["first_llm_ts"] is None or ts < stats["first_llm_ts"]:
@@ -1408,6 +1427,7 @@ def analyze_session(session_dir: Path, pricing: dict) -> dict:
             global_per_model[model]["cached"] += tokens["cached"]
             global_per_model[model]["calls"] += tokens["calls"]
             global_per_model[model]["nano_aiu"] += tokens.get("nano_aiu", 0)
+            global_per_model[model].setdefault("requests", []).extend(tokens["requests"])
 
     global_per_skill: dict[str, dict] = {}
     for stats in file_results:
@@ -1426,12 +1446,14 @@ def analyze_session(session_dir: Path, pricing: dict) -> dict:
             global_per_skill[skill]["calls"] += tokens["calls"]
             for model, mtokens in tokens.get("per_model", {}).items():
                 skill_model = global_per_skill[skill]["per_model"].setdefault(
-                    model, {"input": 0, "output": 0, "cached": 0, "calls": 0}
+                    model, {"input": 0, "output": 0, "cached": 0, "calls": 0, "nano_aiu": 0}
                 )
                 skill_model["input"] += mtokens["input"]
                 skill_model["output"] += mtokens["output"]
                 skill_model["cached"] += mtokens["cached"]
                 skill_model["calls"] += mtokens["calls"]
+                skill_model["nano_aiu"] += mtokens.get("nano_aiu", 0)
+                skill_model.setdefault("requests", []).extend(mtokens["requests"])
 
     subagents: list[dict] = []
     total_usd = 0.0
@@ -1551,7 +1573,9 @@ def analyze_session(session_dir: Path, pricing: dict) -> dict:
             "tool_breakdown": tool_breakdown,
         },
         "pricing_note": (
-            "Cost estimates are approximations. Update rates in data/models-and-pricing.yml. "
+            "Requests with copilotUsageNanoAiu use VS Code's billed cost, including zero. "
+            "Requests without billing telemetry use per-request token estimates; "
+            "cache-write costs use fresh input as a proxy and may differ from billing. "
             "Models listed in fallback_pricing_models were priced with the generic "
             "'default' rate and may be inaccurate. "
             "Custom pricing for non-Copilot models can be added to data/custom-models-pricing.yml."
