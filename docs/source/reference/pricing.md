@@ -67,6 +67,19 @@ Checksum         4d0edb1c05af21c5
 
 ## Cost formula
 
+For each VS Code request, `copilotUsageNanoAiu` takes precedence over token
+pricing whenever present, including an explicit zero:
+
+```text
+cost_usd = copilotUsageNanoAiu / 100_000_000_000
+```
+
+This is the billed amount used by VS Code and already includes cache writes,
+pricing tiers, and any billing adjustments. No token-based surcharge is added.
+The same request costs feed session, model, subagent, and skill breakdowns.
+Only requests without billing telemetry use the fallback below; a billed request
+does not suppress estimates for other requests of the same model.
+
 The VS Code debug log reports three token counts per LLM call:
 
 | Field in log | Meaning |
@@ -86,7 +99,8 @@ cost_usd = (
 ) / 1_000_000
 ```
 
-Results are summed across all models called in the session.
+Fallback costs are calculated per request before aggregation, so pricing tiers
+depend on each request's context size, not accumulated session tokens.
 
 The equivalent statement using Anthropic-style variable names
 (where `input` already excludes cached tokens) is:
@@ -100,17 +114,16 @@ cost_usd = (
 ) / 1_000_000
 ```
 
-VS Code debug logs do not expose `cache_creation` tokens directly.
-For Anthropic models, the tool approximates the incremental cache-creation
+VS Code JSONL debug logs do not expose `cache_creation` tokens directly.
+For any model with a cache-write premium, the tool approximates the incremental cache-creation
 cost using fresh input as a proxy (see note below).
 
 :::{note}
-**Anthropic `cache_write` — approximated via fresh input.**
+**Cache-write fallback: Anthropic and newer GPT models.**
 
-Anthropic models have a `cache_write` rate for tokens written to the provider's
-cache for the first time. VS Code JSONL logs do not expose `cacheCreationTokens`;
-`agent-traces.db` has the schema column but VS Code does not populate it for
-Claude models (verified: 0 rows, VS Code 1.103+).
+The official rate card includes `cache_write` for Anthropic models and GPT-5.6
+and later OpenAI families. The fallback is driven by the model's selected rate,
+not its provider name. VS Code JSONL logs do not expose `cacheCreationTokens`.
 
 The tool approximates the incremental cost as:
 
@@ -118,13 +131,15 @@ The tool approximates the incremental cost as:
 delta = (inputTokens - cachedTokens) × (cache_write_per_m - input_per_m) / 1_000_000
 ```
 
-Verified on a real 92-call Claude Sonnet 4.6 session: this matches the VS Code
-AIC panel exactly ($5.9037 both ways). Models without `cache_write` (OpenAI,
-Google) are unaffected — the delta is zero.
+The premium is added only when `cache_write_per_m > input_per_m`.
+Models without a cache-write rate are unaffected.
 
-`agent_traces_db_paths()` in `vscode.py` locates `agent-traces.db` on all
-platforms. When VS Code starts populating `gen_ai.usage.cache_creation.input_tokens`,
-reading the exact value from the DB will replace this proxy without API changes.
+The approximation matched an earlier 92-call Claude session, but that does not
+establish exactness for every request or model. Fresh input is not necessarily
+all written to cache. Missing cache-creation counts, stale rates, BYOK billing,
+or billing discounts prevent a universal dollar-accuracy guarantee for fallback
+estimates. The package does not currently join JSONL requests to OTel cache-write
+counts in `agent-traces.db`.
 :::
 
 ## AI Credits and USD
@@ -163,12 +178,15 @@ Some models have two pricing tiers based on input token count:
 
 | Model | Threshold | Effect |
 |-------|-----------|--------|
-| GPT-5.4 | > 272K tokens | Input/cached/output prices double |
-| GPT-5.5 | > 272K tokens | Input/cached/output prices double |
-| Gemini 3.1 Pro | > 200K tokens | Input/cached/output prices increase |
+| GPT-5.4 / GPT-5.5 | > 272K tokens | Input/cache-read double; output increases 1.5x |
+| GPT-5.6 Luna | > 200K tokens | Input/cache-read/cache-write double; output increases 1.5x |
+| GPT-5.6 Sol / Terra and GPT-6 families | > 272K tokens | Input/cache-read/cache-write double; output increases 1.5x |
+| Grok 4.x | > 200K tokens | Input/cache-read/output double |
 
 `copilot-session-usage` selects the correct tier automatically based on
-the session's total input tokens per model.
+each VS Code request's input tokens. Versioned model names use the most specific
+matching pricing prefix. Aggregate-only CLI summaries cannot recover individual
+request context sizes and retain aggregate-based estimates.
 
 ## Custom pricing
 

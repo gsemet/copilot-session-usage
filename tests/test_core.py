@@ -45,14 +45,136 @@ def test_estimate_cost_output_only():
     assert abs(cost - 1.00) < 1e-9
 
 
+def test_billed_cost_is_preserved_in_every_breakdown(tmp_path):
+    events = [
+        {"type": "user_message", "ts": 1, "attrs": {"content": "/audit"}},
+        {
+            "type": "llm_request",
+            "ts": 2,
+            "attrs": {
+                "model": "gpt-5.6-sol",
+                "inputTokens": 1000,
+                "outputTokens": 100,
+                "cachedTokens": 500,
+                "copilotUsageNanoAiu": 12_345_000_000,
+            },
+        },
+    ]
+    (tmp_path / "main.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in events), encoding="utf-8"
+    )
+    result = core.analyze_session(tmp_path, PRICING)
+    assert result["total"]["estimated_usd"] == pytest.approx(0.1235)
+    assert result["model_breakdown"][0]["estimated_usd"] == pytest.approx(0.12345)
+    assert result["subagents"][0]["estimated_usd"] == pytest.approx(0.12345)
+    assert result["skills"]["breakdown"][0]["estimated_usd"] == pytest.approx(0.12345)
+
+
 def test_get_model_rates_exact_match():
     rates = core._get_model_rates("gpt-4o", 0, PRICING)
     assert rates["input_per_m"] == 0.25
 
 
+@pytest.mark.parametrize("billing", [None, 0, 10_000_000_000])
+def test_request_costs_use_billing_and_individual_context_tiers(tmp_path, billing):
+    pricing = core.load_pricing(Path(core.__file__).parents[1] / "data")
+    events = [{"type": "user_message", "ts": 1, "attrs": {"content": "/audit"}}]
+    expected = 0.0
+    for timestamp, input_tokens in enumerate([150_000, 150_000, 300_000], start=2):
+        attrs = {
+            "model": "gpt-5.6-sol",
+            "inputTokens": input_tokens,
+            "outputTokens": 1000,
+            "cachedTokens": 100_000,
+        }
+        if timestamp == 2 and billing is not None:
+            attrs["copilotUsageNanoAiu"] = billing
+            expected += billing / 1e11
+        else:
+            expected += core.estimate_cost(input_tokens, 1000, 100_000, "gpt-5.6-sol", pricing)
+        events.append({"type": "llm_request", "ts": timestamp, "attrs": attrs})
+    (tmp_path / "main.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in events), encoding="utf-8"
+    )
+    result = core.analyze_session(tmp_path, pricing)
+    assert result["total"]["estimated_usd"] == pytest.approx(round(expected, 4))
+    for breakdown in [
+        result["model_breakdown"],
+        result["subagents"],
+        result["skills"]["breakdown"],
+    ]:
+        assert breakdown[0]["estimated_usd"] == pytest.approx(round(expected, 6))
+
+
 def test_get_model_rates_prefix_match():
     rates = core._get_model_rates("claude-haiku-4.6", 0, PRICING)
     assert rates["input_per_m"] == 0.08
+
+
+def test_versioned_model_uses_most_specific_pricing():
+    pricing = core.load_pricing(Path(core.__file__).parents[1] / "data")
+    rates = core._get_model_rates("gpt-5.4-mini-2026-10-01", 100_000, pricing)
+    assert rates == pricing["models"]["gpt-5.4-mini"][0]
+
+
+def test_request_costs_reconcile_across_files_and_skills(tmp_path):
+    main = [
+        {"type": "user_message", "ts": 1, "attrs": {"content": "/first"}},
+        {
+            "type": "llm_request",
+            "ts": 2,
+            "attrs": {"model": "claude-sonnet-4.6", "copilotUsageNanoAiu": 10_000_000_000},
+        },
+        {"type": "user_message", "ts": 3, "attrs": {"content": "/second"}},
+    ]
+    child = [
+        {
+            "type": "llm_request",
+            "ts": 4,
+            "attrs": {"model": "claude-sonnet-4.6", "inputTokens": 100_000},
+        },
+        {
+            "type": "llm_request",
+            "ts": 5,
+            "attrs": {"model": "gpt-5.6-sol", "copilotUsageNanoAiu": 20_000_000_000},
+        },
+    ]
+    for filename, events in [("main.jsonl", main), ("runSubagent-worker.jsonl", child)]:
+        (tmp_path / filename).write_text(
+            "\n".join(json.dumps(event) for event in events), encoding="utf-8"
+        )
+    result = core.analyze_session(tmp_path, PRICING)
+    assert result["total"]["estimated_usd"] == pytest.approx(0.33)
+    for breakdown in [
+        result["model_breakdown"],
+        result["subagents"],
+        result["skills"]["breakdown"],
+    ]:
+        assert sum(row["estimated_usd"] for row in breakdown) == pytest.approx(0.33)
+    assert {row["skill"]: row["estimated_usd"] for row in result["skills"]["breakdown"]} == {
+        "/first": pytest.approx(0.1),
+        "/second": pytest.approx(0.23),
+    }
+
+
+def test_cache_write_fallback_for_every_bundled_model_tier():
+    pricing = core.load_pricing(Path(core.__file__).parents[1] / "data")
+    for model, tiers in pricing["models"].items():
+        previous_threshold = 0
+        for tier in tiers:
+            input_tokens = max(tier["threshold_tokens"] or 1000, previous_threshold + 1)
+            cached_tokens = input_tokens // 2
+            output_tokens = 1000
+            fresh_rate = max(tier["input_per_m"], tier["cache_write_per_m"])
+            expected = (
+                (input_tokens - cached_tokens) * fresh_rate
+                + cached_tokens * tier["cache_per_m"]
+                + output_tokens * tier["output_per_m"]
+            ) / 1e6
+            assert core.estimate_cost(
+                input_tokens, output_tokens, cached_tokens, model, pricing
+            ) == pytest.approx(expected), (model, tier["tier"])
+            previous_threshold = input_tokens
 
 
 def test_get_model_rates_fallback():

@@ -56,8 +56,8 @@ token-count events emitted by the Copilot extension for each LLM call:
 - `model` — the model name as reported by the provider
 
 A single session may call multiple models (e.g., Claude Sonnet for the main
-request and Claude Haiku for a subagent). Each model's tokens are summed
-separately, then costs are computed per model and aggregated.
+request and Claude Haiku for a subagent). Each request is priced separately,
+then its tokens and cost are aggregated by model, subagent, and active skill.
 
 ### Utility models
 
@@ -78,21 +78,20 @@ The VS Code debug log reports `inputTokens` as the **total** prompt sent
 (cached + non-cached combined). `cachedTokens` is the subset served from
 the provider's cache. The non-cached portion is `inputTokens − cachedTokens`.
 
-Each `llm_request` event also carries `copilotUsageNanoAiu` — VS Code's own
-cost for that call in nano-AI Credits (nanoAIU). It is present for all
-Copilot-plan models (Claude, GPT, and others). It is absent for Azure-hosted
-models not billed via Copilot AIC — `Kimi-K2.6-azure` is one such model:
-it is billed through Azure separately and correctly reports $0 AIC.
+An `llm_request` event can also carry `copilotUsageNanoAiu` — VS Code's own
+cost for that call in nano-AI Credits (nanoAIU). Recent logs expose it for
+Copilot-plan models (Claude, GPT, and others), but it can be missing.
+Absence alone does not establish a zero bill or identify an external provider.
 
-When `copilotUsageNanoAiu` is present and non-zero, the tool uses it directly:
+When `copilotUsageNanoAiu` is present, including zero, the tool uses it directly:
 
 ```
 cost_usd = copilotUsageNanoAiu / 100_000_000_000   (1 nanoAIU = 1e-11 USD)
 ```
 
-For models that do not report `copilotUsageNanoAiu` — Azure-hosted models billed
-outside the Copilot plan — the tool falls back to token-based computation
-(or $0 when the model has no Copilot pricing entry):
+For individual requests without `copilotUsageNanoAiu`, the tool falls back to
+token-based computation. An unknown model uses the generic fallback rate and is
+listed in `fallback_pricing_models`; it is not automatically treated as free:
 
 ```
 cost_usd = (
@@ -102,10 +101,18 @@ cost_usd = (
 ) / 1_000_000
 ```
 
-plus the Anthropic cache-write approximation when applicable.
+plus the cache-write premium approximation when the rate card defines one,
+including Anthropic and GPT-5.6 and later models. Fallback tiers are selected
+from each request's input tokens, not a model's accumulated session tokens.
+Billed and estimated requests can coexist without either being dropped.
 
-Verified on a real session: `copilotUsageNanoAiu`-based cost matches the
-VS Code AIC panel at **0.000% error** for Claude models.
+On 2026-10-07, an audit of 34 fully billed local sessions matched the sum of
+VS Code's billed nano-credit telemetry at the output's four-decimal USD precision.
+The inspected VS Code 1.140.0 debug-summary implementation sums this same field.
+The audit included GPT and Claude requests; it did not verify every model against
+an invoice. Exact parity requires complete billing telemetry. Token-only cache
+estimates cannot guarantee it. Breakdowns round to six decimals, so their sums
+can differ slightly from the four-decimal session total.
 
 ---
 
@@ -132,6 +139,20 @@ Each `llm_request` and `tool_call` is attributed to the most recently invoked
 skill at that timestamp. The result is included in the session report under the
 `skills` key and can be surfaced with `--skill-breakdown`, `--tool-breakdown`,
 or `--skill <name>`.
+
+Skill costs preserve the same billed request amounts as the other breakdowns,
+but **skill token and cost attribution is limited**. Each request's full token
+counts and cost are assigned to the latest slash-command skill until another
+invocation occurs. These tokens include conversation history, instructions, and
+tool results, not just the skill's own text or incremental token consumption.
+
+Detection does not establish attribution: discovery events identify skills but
+do not independently assign request usage to them. Automatically loaded or read
+skills and overlapping skill use cannot be separated. Unrelated work after a
+skill invocation can remain attributed to that skill, while requests before any
+invocation belong to `unknown`. Exact billed request costs do not make the skill
+assignment causal or exact. CLI/App cumulative usage does not provide a validated
+per-skill token or cost split; those breakdowns remain unavailable.
 
 ---
 
