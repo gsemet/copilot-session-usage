@@ -99,16 +99,86 @@ def _as_number(value: Any) -> int | float | None:
     return None
 
 
-def _priced_bucket(v: dict[str, int | None]) -> dict[str, int]:
-    """Narrow a per-model token bucket to concrete ``int``s for the shared pricing calculation.
+def _cli_model_cost(model: str, v: dict[str, Any], pricing: dict[str, Any]) -> float | None:
+    """Return one model's USD cost from Copilot CLI/App evidence.
 
-    Only call this after confirming ``input``/``output``/``cached`` are all
-    non-``None`` (see ``global_per_model`` completeness checks in
-    :func:`analyze_cli_session`) — the ``or 0`` here is just a type
-    narrowing, not a fallback for genuinely missing evidence: a reported
-    ``0`` stays ``0``, and a real value is never replaced.
+    Prefer the provider-billed per-model ``totalNanoAiu`` (1 nanoAiu = 1e-11
+    USD), which reconciles exactly with the GitHub rate card. Otherwise price
+    the reported tokens with the exact ``cacheWriteTokens`` count. The pricing
+    tier is chosen from the average request size, never the session sum.
+    Returns ``None`` when neither billing nor complete token evidence exists.
     """
-    return {"input": v["input"] or 0, "output": v["output"] or 0, "cached": v["cached"] or 0}
+    nano = v.get("nano_aiu")
+    if nano is not None:
+        return float(nano) / 1e11
+    if v["input"] is None or v["output"] is None or v["cached"] is None:
+        return None
+    calls = v.get("calls")
+    tier_input = v["input"] // calls if calls else 0
+    return core.estimate_cost(
+        v["input"],
+        v["output"],
+        v["cached"],
+        model,
+        pricing,
+        cache_write_tok=v.get("cache_write"),
+        tier_input_tok=tier_input,
+    )
+
+
+def _parse_model_metrics(raw: Any) -> dict[str, dict[str, Any]]:
+    """Normalize a ``modelMetrics`` mapping into per-model token/billing buckets."""
+    buckets: dict[str, dict[str, Any]] = {}
+    for model, metrics in _as_mapping(raw).items():
+        if not isinstance(model, str) or not model or not isinstance(metrics, dict):
+            continue
+        usage = _as_mapping(metrics.get("usage"))
+        requests = _as_mapping(metrics.get("requests"))
+        buckets[model] = {
+            "input": _as_int(usage.get("inputTokens")),
+            "output": _as_int(usage.get("outputTokens")),
+            "cached": _as_int(usage.get("cacheReadTokens")),
+            "cache_write": _as_int(usage.get("cacheWriteTokens")),
+            "calls": _as_int(requests.get("count")),
+            "nano_aiu": _as_number(metrics.get("totalNanoAiu")),
+        }
+    return buckets
+
+
+def _agent_rows(agent_metrics: dict[str, Any], pricing: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build per-agent cost rows (main agent and subagents) from ``agentMetrics``."""
+    rows: list[dict[str, Any]] = []
+    for agent_id, raw in agent_metrics.items():
+        if not isinstance(raw, dict):
+            continue
+        per_model = _parse_model_metrics(raw.get("modelMetrics"))
+        costs = [_cli_model_cost(m, v, pricing) for m, v in per_model.items()]
+        agent_nano = _as_number(raw.get("totalNanoAiu"))
+        if agent_nano is not None:
+            usd: float | None = float(agent_nano) / 1e11
+        elif costs and all(c is not None for c in costs):
+            usd = sum(c for c in costs if c is not None)
+        else:
+            usd = None
+        dominant = max(per_model, key=lambda m: per_model[m]["input"] or 0, default=None)
+        rows.append(
+            {
+                "subagent_id": None if agent_id == "main" else agent_id,
+                "name": "main"
+                if agent_id == "main"
+                else (_clean_str(raw.get("agentDisplayName")) or _clean_str(raw.get("agentName"))),
+                "agent_type": _clean_str(raw.get("agentName")),
+                "model": dominant,
+                "input_tokens": sum(v["input"] or 0 for v in per_model.values()),
+                "output_tokens": sum(v["output"] or 0 for v in per_model.values()),
+                "cached_tokens": sum(v["cached"] or 0 for v in per_model.values()),
+                "cache_write_tokens": sum(v["cache_write"] or 0 for v in per_model.values()),
+                "llm_calls": sum(v["calls"] or 0 for v in per_model.values()),
+                "estimated_usd": round(usd, 6) if usd is not None else None,
+            }
+        )
+    rows.sort(key=lambda r: (r["name"] != "main", -(r["estimated_usd"] or 0.0)))
+    return rows
 
 
 # ─── Session-state root discovery ───────────────────────────────────────────
@@ -575,7 +645,8 @@ def analyze_cli_session(source: Path, pricing: dict[str, Any]) -> dict[str, Any]
     shutdown = stats["shutdown_events"][-1] if stats["shutdown_events"] else None
     checkpoint = stats["checkpoint_events"][-1] if stats["checkpoint_events"] else None
 
-    global_per_model: dict[str, dict[str, int | None]] = {}
+    global_per_model: dict[str, dict[str, Any]] = {}
+    agent_metrics: dict[str, Any] = {}
     total_premium_requests: int | float | None = None
     total_nano_aiu: int | float | None = None
     shutdown_type: str | None = None
@@ -599,15 +670,9 @@ def analyze_cli_session(source: Path, pricing: dict[str, Any]) -> dict[str, Any]
                     "fabricated."
                 )
                 continue
-            usage = _as_mapping(metrics.get("usage"))
-            requests = _as_mapping(metrics.get("requests"))
-            global_per_model[model] = {
-                "input": _as_int(usage.get("inputTokens")),
-                "output": _as_int(usage.get("outputTokens")),
-                "cached": _as_int(usage.get("cacheReadTokens")),
-                "calls": _as_int(requests.get("count")),
-            }
+            global_per_model.update(_parse_model_metrics({model: metrics}))
             models_from_evidence.add(model)
+        agent_metrics = _as_mapping(shutdown.get("agentMetrics"))
         total_premium_requests = _as_number(shutdown.get("totalPremiumRequests"))
         total_nano_aiu = _as_number(shutdown.get("totalNanoAiu"))
         shutdown_type = _clean_str(shutdown.get("shutdownType"))
@@ -672,32 +737,22 @@ def analyze_cli_session(source: Path, pricing: dict[str, Any]) -> dict[str, Any]
         else:
             cache_ratio = None
 
-        # Shared estimated_usd comes only from the shared model/pricing
-        # calculation over evidence-backed tokens — never from provider-native
-        # nanoAiu, which is kept separate under provider_usage. Pricing only
-        # runs for a model whose input/output/cached tokens are all present:
-        # partial evidence for a model excludes it from the priced total
-        # (with a diagnostic) rather than crashing or fabricating a cost from
-        # a missing field treated as zero.
-        priceable_models = {
-            model: v
-            for model, v in global_per_model.items()
-            if v["input"] is not None and v["output"] is not None and v["cached"] is not None
+        # estimated_usd prefers the provider-billed per-model totalNanoAiu and
+        # otherwise prices tokens with exact cache-write counts. A model with
+        # neither billing nor complete token evidence is excluded (with a
+        # diagnostic) rather than priced from fields treated as zero.
+        model_costs = {
+            model: _cli_model_cost(model, v, pricing) for model, v in global_per_model.items()
         }
-        unpriceable_models = sorted(set(global_per_model) - set(priceable_models))
+        unpriceable_models = sorted(m for m, c in model_costs.items() if c is None)
         if unpriceable_models:
             diagnostics.append(
                 f"model(s) {unpriceable_models} reported incomplete token usage in "
                 "modelMetrics; their cost is excluded from the session total (other available "
                 "fields, such as call counts, are still reported)."
             )
-        total_usd: float | None = (
-            core.estimate_cost_for_file(
-                {model: _priced_bucket(v) for model, v in priceable_models.items()}, pricing
-            )
-            if priceable_models
-            else None
-        )
+        priced = [c for c in model_costs.values() if c is not None]
+        total_usd: float | None = sum(priced) if priced else None
     else:
         # No per-model token evidence (active/interrupted session, or only a
         # checkpoint). Preserve the absence instead of reporting zero.
@@ -705,10 +760,39 @@ def analyze_cli_session(source: Path, pricing: dict[str, Any]) -> dict[str, Any]
         cache_ratio = None
         total_usd = None
 
-    def _model_row_cost(model: str, v: dict[str, int | None]) -> float | None:
-        if v["input"] is None or v["output"] is None or v["cached"] is None:
-            return None
-        return round(core.estimate_cost_for_file({model: _priced_bucket(v)}, pricing), 6)
+    # Session-level totalNanoAiu is cumulative across resumes and is the
+    # billed session total. Per-model/agent metrics omit segments that ended
+    # without a session.shutdown (crash or kill), so any remainder is
+    # reported as unattributed rather than silently dropped.
+    cumulative_nano = max(
+        (
+            n
+            for n in (
+                _as_number(shutdown.get("totalNanoAiu")) if shutdown else None,
+                _as_number(checkpoint.get("totalNanoAiu")) if checkpoint else None,
+            )
+            if n is not None
+        ),
+        default=None,
+    )
+    unattributed_usd: float | None = None
+    if cumulative_nano is not None:
+        billed_total = float(cumulative_nano) / 1e11
+        attributed = total_usd or 0.0
+        if billed_total - attributed > 5e-7:
+            unattributed_usd = round(billed_total - attributed, 6)
+            diagnostics.append(
+                f"${unattributed_usd:.4f} of billed usage (cumulative totalNanoAiu) is not "
+                "covered by per-model/agent metrics, typically from session segments that "
+                "ended without a session.shutdown event; it is included in the total but "
+                "cannot be attributed to a model, agent, or skill."
+            )
+        total_usd = billed_total
+        total_nano_aiu = cumulative_nano
+
+    def _model_row_cost(model: str, v: dict[str, Any]) -> float | None:
+        cost = _cli_model_cost(model, v, pricing)
+        return round(cost, 6) if cost is not None else None
 
     model_breakdown = sorted(
         (
@@ -802,6 +886,7 @@ def analyze_cli_session(source: Path, pricing: dict[str, Any]) -> dict[str, Any]
             "cached_tokens": total_cached,
             "llm_calls": total_calls,
             "estimated_usd": round(total_usd, 4) if total_usd is not None else None,
+            "unattributed_usd": unattributed_usd,
             "cache_ratio": cache_ratio,
         },
         "models": sorted(models_from_evidence)
@@ -809,11 +894,10 @@ def analyze_cli_session(source: Path, pricing: dict[str, Any]) -> dict[str, Any]
         else [m["model"] for m in model_breakdown],
         "fallback_pricing_models": fallback_pricing_models,
         "model_breakdown": model_breakdown,
-        # Empty rather than fabricated: subagent.completed reports only a
-        # combined totalTokens figure (see provider_usage["subagents"]), with
-        # no validated input/output/cached split to populate this shared,
-        # per-subagent token/cost contract honestly.
-        "subagents": [],
+        # Built from session.shutdown.agentMetrics (main agent + each
+        # subagent, with per-model usage and billed nanoAiu); empty when the
+        # CLI version does not report it.
+        "subagents": _agent_rows(agent_metrics, pricing),
         "skills": {
             "detected": skill_names,
             "active": active_skill,
@@ -823,11 +907,11 @@ def analyze_cli_session(source: Path, pricing: dict[str, Any]) -> dict[str, Any]
         "provider_usage": provider_usage,
         "diagnostics": diagnostics,
         "pricing_note": (
-            "Cost estimates use the shared token-based pricing calculation from "
-            "data/models-and-pricing.yml, the same as the VS Code provider. GitHub Copilot's "
-            "own nanoAiu billing figure is kept separate under provider_usage.total_nano_aiu "
-            "and never replaces the shared calculation. Models listed in "
-            "fallback_pricing_models were priced with the generic 'default' rate."
+            "Costs use Copilot's billed per-model totalNanoAiu when reported (1 nanoAiu = "
+            "1e-11 USD), as the VS Code provider does with copilotUsageNanoAiu. Otherwise "
+            "tokens are priced from data/models-and-pricing.yml using the exact cache-write "
+            "token count. Models listed in fallback_pricing_models were priced with the "
+            "generic 'default' rate when no billed figure was available."
         ),
     }
 

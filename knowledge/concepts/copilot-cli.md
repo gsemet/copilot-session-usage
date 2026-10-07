@@ -28,16 +28,15 @@ branch, and timestamps.
 | Debug panel | Built into VS Code | No equivalent cost panel |
 | Final shared totals | Per-request evidence | Final `session.shutdown` cumulative usage |
 
-The provider uses the final `session.shutdown` event for shared token and
-estimated-cost totals. Active or interrupted sessions can expose only
-provider-native checkpoint counters, so shared totals remain unavailable
-instead of being represented as zero. Copilot-native counters such as
-`totalNanoAiu` and premium-request counts are preserved separately.
+The session-level `totalNanoAiu` is cumulative across resumes and is the
+billed session total. Per-model and per-agent (`agentMetrics`) metrics carry
+their own billed `totalNanoAiu` and exact `cacheWriteTokens`, but omit
+segments that ended without `session.shutdown`; that remainder is reported as
+unattributed. Active sessions expose only checkpoint totals, so their cost is
+entirely unattributed.
 
-Per-skill cost and validated per-subagent cost attribution require per-request
-token evidence. CLI/App logs may provide skill detection, tool-call
-attribution, and raw subagent counters without enough evidence to populate
-those shared cost breakdowns.
+Per-skill cost attribution requires per-request evidence, which CLI/App logs
+do not provide. Subagent cost comes from `agentMetrics`.
 
 Use `--agent cli` for CLI/App discovery, or `--agent all` for explicit
 combined discovery. Missing provider roots are ignored in combined mode.

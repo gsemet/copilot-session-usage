@@ -186,7 +186,24 @@ Some models have two pricing tiers based on input token count:
 `copilot-session-usage` selects the correct tier automatically based on
 each VS Code request's input tokens. Versioned model names use the most specific
 matching pricing prefix. Aggregate-only CLI summaries cannot recover individual
-request context sizes and retain aggregate-based estimates.
+request context sizes; without a billed figure, their tier is chosen from the
+average request size.
+
+## Copilot CLI/App limitations
+
+CLI/App costs use Copilot's billed `totalNanoAiu` (session, per model, per
+agent), so totals are dollar-accurate. The event log has only cumulative
+usage, so:
+
+- **No per-skill cost.** There is no per-request usage to split by skill;
+  `skills.breakdown` is empty. Detected skills and tool counts remain.
+- **Unattributed remainder.** Per-model and per-agent metrics omit session
+  segments that ended without `session.shutdown` (crash or kill before a
+  resume). That cost is in `total.unattributed_usd`, not in any breakdown.
+- **Active sessions** report only the latest checkpoint total, entirely
+  unattributed.
+- **Token fallback** (no billed figure) cannot see per-request long-context
+  tiers or discounts and is an estimate.
 
 ## Custom pricing
 

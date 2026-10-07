@@ -922,7 +922,14 @@ def build_session_usage_aic_trailer(result: dict[str, Any]) -> str:
 
 
 def estimate_cost(
-    input_tok: int, output_tok: int, cached_tok: int, model: str, pricing: dict[str, Any]
+    input_tok: int,
+    output_tok: int,
+    cached_tok: int,
+    model: str,
+    pricing: dict[str, Any],
+    *,
+    cache_write_tok: int | None = None,
+    tier_input_tok: int | None = None,
 ) -> float:
     """Compute estimated USD cost.
 
@@ -941,8 +948,27 @@ def estimate_cost(
     OpenAI families. Models without ``cache_write`` have no premium.
     Without billed telemetry or exact cache-creation counts, this remains
     an estimate, not a guarantee of parity with VS Code billing.
+
+    When ``cache_write_tok`` is known exactly (Copilot CLI/App), ``input_tok``
+    is treated as fresh + cache-read + cache-write tokens and only the
+    reported cache-write tokens are charged at ``cache_write_per_m`` (or the
+    input rate when the model has no cache-write price).
+    ``tier_input_tok`` overrides the token count used to select the pricing
+    tier; aggregate-only usage should pass a per-request-sized value rather
+    than the session sum.
     """
-    rates = _get_model_rates(model, input_tok, pricing)
+    rates = _get_model_rates(
+        model, input_tok if tier_input_tok is None else tier_input_tok, pricing
+    )
+    if cache_write_tok is not None:
+        fresh = max(0, input_tok - cached_tok - cache_write_tok)
+        write_rate = rates.get("cache_write_per_m") or rates.get("input_per_m", 0.0)
+        return (  # type: ignore[no-any-return]
+            fresh * rates.get("input_per_m", 0.0)
+            + cached_tok * rates.get("cache_per_m", 0.0)
+            + cache_write_tok * write_rate
+            + output_tok * rates.get("output_per_m", 0.0)
+        ) / 1_000_000
     billable_input = max(0, input_tok - cached_tok)
     cost = (
         billable_input * rates.get("input_per_m", 0.0) / 1_000_000
@@ -2354,12 +2380,12 @@ def render_table_single(data: dict) -> str:
         headers = ("Name", "Model", "Input", "Cached", "Output", "Cost")
         rows = [
             (
-                sub["name"],
-                sub["model"],
+                sub["name"] or "",
+                sub["model"] or "",
                 f"{sub['input_tokens']:,}",
                 f"{sub['cached_tokens']:,}",
                 f"{sub['output_tokens']:,}",
-                f"${sub['estimated_usd']:.2f}",
+                f"${sub['estimated_usd']:.2f}" if sub["estimated_usd"] is not None else "n/a",
             )
             for sub in subs
         ]

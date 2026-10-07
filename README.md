@@ -52,7 +52,7 @@ Copilot CLI/App event logs and turns them into repeatable reports. It provides:
 | Estimated cost (`$`) **per model** | ❌ No accurate cost per breakdown | ✅ |
 | Tokens **per subagent** | ⚠️ LLM digging each time; consumes tokens | ✅ |
 | Estimated cost (`$`) **per subagent** | ❌ No accurate cost per breakdown | ✅ |
-| Cost attribution to skills | ❌ Cannot provide cost per breakdown | ✅ |
+| Cost attribution to skills | ❌ Cannot provide cost per breakdown | ✅ Limited timeline attribution (VS Code) |
 | Tool-call counts by skill and subagent | ⚠️ LLM digging each time | ✅ |
 | Batch analysis, filtering, and aggregation | Limited/conversational | ✅ |
 | Stable JSON, table, and detailed output | No stable contract | ✅ |
@@ -63,6 +63,13 @@ Copilot CLI/App event logs and turns them into repeatable reports. It provides:
 In the table, `⚠️` means that Chronicle may answer the question in a particular
 environment or with additional analysis, but does not guarantee a stable, reproducible
 breakdown for it.
+
+Skill token and cost attribution is limited: VS Code requests are grouped under
+the latest explicit slash-command skill, including the whole request context and
+later work until another invocation. This is not an isolated measurement of tokens
+or cost caused by the skill; automatically loaded and overlapping skills cannot be
+separated. CLI/App per-skill tokens and costs are unavailable. See
+[Skill attribution](docs/source/explanation/how-cost-estimation-works.md#skill-attribution).
 
 Use Chronicle for **“What did I do?”** and use this project for **“How much did it cost,
 which model or subagent consumed it, and can I export the evidence?”**
