@@ -202,10 +202,8 @@ def test_analyze_cli_session_full_shutdown(write_cli_session, tmp_path, pricing)
     assert result["total"]["llm_calls"] == 1
     assert result["models"] == ["gpt-5.6-luna"]
     assert result["model_breakdown"][0]["model"] == "gpt-5.6-luna"
-    # Shared token-based pricing (input 0.20 + output 1.20 + cache-write delta
-    # per data/models-and-pricing.yml for gpt-5.6-luna, ≤200K tier), not the
-    # provider-native nanoAiu figure (which is kept separate, see below).
-    assert result["total"]["estimated_usd"] == pytest.approx(0.0004, abs=1e-6)
+    # Billed per-model totalNanoAiu (100_000_000 nano = $0.001) is used directly.
+    assert result["total"]["estimated_usd"] == pytest.approx(0.001, abs=1e-9)
     assert result["active_duration_seconds"] == 5
     assert result["skills"]["detected"] == ["my-skill"]
     assert result["skills"]["active"] == "my-skill"
@@ -217,6 +215,89 @@ def test_analyze_cli_session_full_shutdown(write_cli_session, tmp_path, pricing)
     assert result["provider_usage"]["total_nano_aiu"] == 100_000_000
     assert result["provider_usage"]["shutdown_type"] == "routine"
     assert result["provider_usage"]["subagents"] == []
+
+
+def _shutdown_session(model_metrics: dict, agent_metrics: dict | None = None) -> list[dict]:
+    data: dict = {"shutdownType": "routine", "modelMetrics": model_metrics}
+    if agent_metrics is not None:
+        data["agentMetrics"] = agent_metrics
+    return [
+        {
+            "type": "session.start",
+            "data": {"sessionId": SID, "version": 1, "startTime": "2026-01-01T00:00:00.000Z"},
+            "id": "e1",
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "parentId": None,
+        },
+        {
+            "type": "session.shutdown",
+            "data": data,
+            "id": "e2",
+            "timestamp": "2026-01-01T00:05:00.000Z",
+            "parentId": "e1",
+        },
+    ]
+
+
+def test_cli_cost_uses_exact_cache_write_tokens_without_billing(
+    write_cli_session, tmp_path, pricing
+):
+    # Real gpt-6-luna shutdown: inputTokens = 12 fresh + 51330 read + 25394 write,
+    # billed 406_325_000 nanoAiu. Without the billed figure, tokens reproduce it.
+    usage = {
+        "inputTokens": 76736,
+        "outputTokens": 749,
+        "cacheReadTokens": 51330,
+        "cacheWriteTokens": 25394,
+    }
+    events = _shutdown_session({"gpt-6-luna": {"requests": {"count": 3}, "usage": usage}})
+    session_dir = write_cli_session(tmp_path, SID, events=events, workspace={})
+    result = copilot_cli.analyze_cli_session(session_dir, pricing)
+    assert result["model_breakdown"][0]["estimated_usd"] == pytest.approx(0.004063, abs=1e-6)
+
+
+def test_cli_subagents_from_agent_metrics(write_cli_session, tmp_path, pricing):
+    def metrics(nano: int) -> dict:
+        return {
+            "requests": {"count": 1},
+            "usage": {
+                "inputTokens": 10,
+                "outputTokens": 1,
+                "cacheReadTokens": 0,
+                "cacheWriteTokens": 0,
+            },
+            "totalNanoAiu": nano,
+        }
+
+    agents = {
+        "main": {"totalNanoAiu": 300_000_000, "modelMetrics": {"gpt-6-luna": metrics(300_000_000)}},
+        "abc": {
+            "agentName": "explore",
+            "agentDisplayName": "find-things",
+            "totalNanoAiu": 700_000_000,
+            "modelMetrics": {"gpt-6-luna": metrics(700_000_000)},
+        },
+    }
+    events = _shutdown_session({"gpt-6-luna": metrics(1_000_000_000)}, agents)
+    session_dir = write_cli_session(tmp_path, SID, events=events, workspace={})
+    result = copilot_cli.analyze_cli_session(session_dir, pricing)
+    subs = result["subagents"]
+    assert [s["name"] for s in subs] == ["main", "find-things"]
+    assert subs[1]["agent_type"] == "explore"
+    assert sum(s["estimated_usd"] for s in subs) == pytest.approx(0.01)
+
+
+def test_cli_unattributed_billing_from_cumulative_total(write_cli_session, tmp_path, pricing):
+    usage = {"inputTokens": 10, "outputTokens": 1, "cacheReadTokens": 0, "cacheWriteTokens": 0}
+    events = _shutdown_session(
+        {"gpt-6-luna": {"requests": {"count": 1}, "usage": usage, "totalNanoAiu": 100_000_000}}
+    )
+    events[1]["data"]["totalNanoAiu"] = 300_000_000
+    session_dir = write_cli_session(tmp_path, SID, events=events, workspace={})
+    result = copilot_cli.analyze_cli_session(session_dir, pricing)
+    assert result["total"]["estimated_usd"] == pytest.approx(0.003)
+    assert result["total"]["unattributed_usd"] == pytest.approx(0.002)
+    assert result["model_breakdown"][0]["estimated_usd"] == pytest.approx(0.001)
 
 
 def test_analyze_cli_session_no_shutdown_falls_back_to_checkpoint(
@@ -258,10 +339,13 @@ def test_analyze_cli_session_no_shutdown_falls_back_to_checkpoint(
     assert result["total"]["cached_tokens"] is None
     assert result["total"]["llm_calls"] is None
     assert result["total"]["cache_ratio"] is None
-    assert result["total"]["estimated_usd"] is None
+    # Cumulative billed nanoAiu still yields a dollar-accurate session total,
+    # entirely unattributed because no per-model metrics exist yet.
+    assert result["total"]["estimated_usd"] == pytest.approx(0.00042, abs=1e-4)
+    assert result["total"]["unattributed_usd"] == pytest.approx(0.00042, abs=1e-6)
     assert result["model_breakdown"] == []
     assert result["models"] == ["gpt-5.6-luna"]
-    assert len(result["diagnostics"]) == 1
+    assert len(result["diagnostics"]) == 2
     assert "no session.shutdown event found" in result["diagnostics"][0]
     # Provider-native nanoAiu is preserved separately and never used to
     # populate the shared estimated_usd.
@@ -726,7 +810,7 @@ def test_analyze_cli_session_checkpoint_non_list_model_cache_state(
     ]
     session_dir = write_cli_session(tmp_path, SID, events=events, workspace={})
     result = copilot_cli.analyze_cli_session(session_dir, pricing)
-    assert result["total"]["estimated_usd"] is None
+    assert result["total"]["estimated_usd"] == pytest.approx(0.0, abs=1e-9)
     assert result["models"] == []
     assert any("modelCacheState was not a list" in d for d in result["diagnostics"])
 

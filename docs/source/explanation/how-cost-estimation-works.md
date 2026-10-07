@@ -223,28 +223,40 @@ added to `diagnostics` explaining what was skipped.
 
 ### Cost calculation
 
-The shared, token-based pricing calculation (the same as the VS Code
-provider's, described above) is applied to the per-model `usage` reported in
-`session.shutdown`. Copilot CLI's own per-model billing figure,
-`totalNanoAiu`, is *not* used for this calculation: it is reported separately
-under `provider_usage.total_nano_aiu` and never substituted for or blended
-into `total.estimated_usd` or `model_breakdown[].estimated_usd`, since it is
-not validated to carry the same USD-billing meaning as VS Code's own
-`copilotUsageNanoAiu` field.
+Copilot CLI's billed figures are used first, mirroring the VS Code
+provider's use of `copilotUsageNanoAiu` (1 nanoAIU = 1e-11 USD):
+
+- `total.estimated_usd` is the session-level `totalNanoAiu`, which is
+  cumulative across resumes (the largest value from the last
+  `session.shutdown` or `session.usage_checkpoint`).
+- Each `model_breakdown` row uses that model's `totalNanoAiu`. Without it, the
+  model's tokens are priced exactly: `inputTokens` includes cache reads and
+  cache writes, so fresh input is `inputTokens - cacheReadTokens -
+  cacheWriteTokens`, and only `cacheWriteTokens` are charged at the
+  cache-write rate. The pricing tier is chosen from the average request size,
+  not the session sum.
+- `subagents` lists the main agent and each subagent from
+  `session.shutdown.agentMetrics`, with their own billed `totalNanoAiu`.
+- Per-model and per-agent metrics omit segments that ended without a
+  `session.shutdown` (a crash or kill before a resume). That remainder is
+  reported as `total.unattributed_usd`, with a diagnostic, so
+  breakdowns plus `unattributed_usd` always equal the total.
+
+Across 101 local CLI/App sessions, totals matched the billed `totalNanoAiu`
+exactly and breakdowns reconciled with it. Pricing tokens with the exact
+cache-write count reproduced per-model billed amounts for 89 of 96 models;
+the rest included long-context requests or discounts invisible in aggregates.
 
 ### When usage is unavailable
 
 A session that is still active, or that was interrupted before shutting down,
 has no `session.shutdown` event. In that case:
 
-- Per-model token totals, the model breakdown, skill cost breakdown, and the
-  shared `total` block (tokens, cost, cache ratio) are all unavailable — they
-  are represented as `null`/missing, **never** as a fabricated zero.
-- If a `session.usage_checkpoint` exists, its cumulative `totalNanoAiu` and
-  `totalPremiumRequests` are still reported under `provider_usage` (separate
-  from the shared token/cost calculation), but the shared `total` block stays
-  unavailable — there is no per-model token breakdown at checkpoint
-  granularity to price.
+- Per-model token totals, the model breakdown, and skill cost breakdown are
+  unavailable — they are represented as `null`/missing, **never** as a
+  fabricated zero.
+- If a `session.usage_checkpoint` exists, its cumulative `totalNanoAiu`
+  provides `total.estimated_usd`, entirely reported as `unattributed_usd`.
 - `diagnostics` explains exactly what is unavailable and why.
 - Batch/aggregate operations exclude sessions with unavailable evidence from
   their sums (rather than counting them as zero) and report how many were
@@ -282,18 +294,16 @@ to:
   and duration — all evidence taken directly from `subagent.started`/
   `subagent.completed`.
 
-The shared, per-subagent `subagents` block (the same contract VS Code
-populates with a validated input/output/cached split per subagent) stays
-empty for `cli` sessions: `subagent.completed` reports only a single combined
-`totalTokens` figure, with no validated split to populate that contract
-without fabricating it.
+The shared, per-subagent `subagents` block is built from
+`session.shutdown.agentMetrics`: one row for `main` and one per subagent,
+with per-model tokens (including `cache_write_tokens`) and the agent's billed
+`totalNanoAiu`. CLI versions that do not emit `agentMetrics` leave it empty.
 
 ### Provider-native counters
 
-`provider_usage` always carries Copilot CLI's own counters — `total_nano_aiu`,
-`total_premium_requests`, `shutdown_type`, `resume_count`, and `code_changes`
-— separately from the shared `total` block. These are never substituted for
-the shared token/estimated-USD calculation.
+`provider_usage` carries Copilot CLI's own counters — `total_nano_aiu`,
+`total_premium_requests`, `shutdown_type`, `resume_count`, and `code_changes`.
+`total_nano_aiu` is the same cumulative figure used for `total.estimated_usd`.
 
 ---
 

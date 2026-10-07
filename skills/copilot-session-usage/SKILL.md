@@ -174,13 +174,15 @@ copilot-session-usage --agent cli id <session-id> --format table
 copilot-session-usage --agent all list --format table
 ```
 
-The CLI/App provider uses the final `session.shutdown` event for shared token
-and estimated-cost totals. Active or interrupted sessions can expose only
-provider-native checkpoint counters; shared totals are then reported as
-unavailable rather than zero. Per-skill cost and validated per-subagent cost
-breakdowns are unavailable when the event log contains only cumulative session
-totals, although detected skills, tool calls, and raw provider evidence remain
-available.
+The CLI/App provider uses Copilot's billed `totalNanoAiu` for the session
+total (cumulative across resumes), each model, and each agent in `subagents`
+(main + subagents, from `agentMetrics`). Limitations to report:
+
+- Per-skill cost is unavailable: the log has no per-request usage.
+- Segments that ended without `session.shutdown` cannot be attributed to a
+  model or agent; report `total.unattributed_usd` alongside breakdowns.
+- Active sessions expose only a checkpoint total, fully unattributed.
+- Without billed figures, token pricing is an estimate (no per-request tiers).
 
 ## Skill-Aware Analysis
 

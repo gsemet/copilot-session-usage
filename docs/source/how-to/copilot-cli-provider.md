@@ -99,10 +99,9 @@ Diagnostics:
 ```
 
 When a `session.usage_checkpoint` is available (a periodic cumulative
-counter), its provider-native counters (`total_nano_aiu`,
-`total_premium_requests`) are still reported under `provider_usage`, but the
-shared `total` block (tokens, cost, cache ratio) stays unavailable — there is
-no per-model token breakdown at checkpoint granularity to price. See
+counter), its billed `totalNanoAiu` provides `total.estimated_usd`, reported
+entirely as `total.unattributed_usd` because there is no per-model breakdown
+at checkpoint granularity. See
 [How cost estimation works](../explanation/how-cost-estimation-works.md)
 (Copilot CLI / Copilot App provider section) for the full breakdown of what
 is and isn't available at each stage.
@@ -121,10 +120,9 @@ everything into `main`. `--tool-breakdown` shows the resolved subagent name
 (or the raw `agentId` when a `subagent.started` event wasn't captured) in its
 `subagent` column. `provider_usage.subagents` separately preserves the raw
 per-subagent evidence available from the event log (name, model, tool-call
-count, a combined `total_tokens_reported`, and duration) — this is kept
-apart from the shared, per-subagent `subagents` cost contract, which stays
-empty for `cli` sessions because `subagent.completed` reports only a single
-combined token count, not a validated input/output/cached split.
+count, a combined `total_tokens_reported`, and duration). The shared
+`subagents` cost block is built from `session.shutdown.agentMetrics` (main
+agent plus each subagent, with billed `totalNanoAiu`).
 
 ## What's different from the VS Code provider
 
@@ -132,14 +130,10 @@ combined token count, not a validated input/output/cached split.
   `cli` sessions: `events.jsonl` only exposes cumulative session-level token
   totals, not per-request ones. `skills.detected` and `--tool-breakdown` are
   still fully populated, including subagent attribution (see above).
-- The shared, per-subagent `subagents` block (cost split by subagent) is
-  always empty for `cli` sessions — see "Subagent and skill attribution"
-  above for the separate, evidence-preserving `provider_usage.subagents`.
-- Provider-native counters (`total_nano_aiu`, `total_premium_requests`, and
-  similar) are reported separately under `provider_usage` and never replace
-  the shared token/estimated-USD calculation — including nanoAiu, which is
-  informational only for this provider and is never used to compute
-  `total.estimated_usd`.
+- Costs use Copilot's billed `totalNanoAiu` (session, per model, per agent).
+  Without it, tokens are priced with the exact `cacheWriteTokens` count.
+  Usage from segments that ended without `session.shutdown` appears as
+  `total.unattributed_usd`.
 - Pricing lookups for `cli`/`all` are local-only by default (no runtime
   pricing refresh attempt), unlike the `vscode` provider's default daily
   refresh attempt. Run `copilot-session-usage pricing refresh` to update
