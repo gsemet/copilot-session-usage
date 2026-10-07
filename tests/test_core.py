@@ -1693,6 +1693,48 @@ def test_extract_skills_from_generic_details():
     assert core._extract_skills_from_generic_details(details) == ["skill-a", "skill-b"]
 
 
+def test_detect_session_skills_from_system_prompt_and_tools(tmp_path):
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    system_prompt = [{"type": "text", "content": "<skill><name>loaded-skill</name></skill>"}]
+    (session_dir / "system_prompt_0.json").write_text(
+        json.dumps({"content": json.dumps(system_prompt)}), encoding="utf-8"
+    )
+    tools = [
+        {
+            "type": "function",
+            "name": "skill",
+            "description": "Invoke /namespace on-demand-skill",
+            "parameters": {"properties": {"skills": {"enum": ["parameter-skill"]}}},
+        },
+        {
+            "type": "function",
+            "name": "run_terminal",
+            "description": "Run commands such as /absolute/path",
+        },
+    ]
+    (session_dir / "tools_0.json").write_text(
+        json.dumps({"content": json.dumps(tools)}), encoding="utf-8"
+    )
+
+    detected = core.detect_session_skills(session_dir)
+
+    assert set(detected["detected"]) == {
+        "loaded-skill",
+        "/namespace on-demand-skill",
+        "parameter-skill",
+    }
+
+
+def test_detect_session_skills_ignores_malformed_artifacts(tmp_path):
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
+    (session_dir / "system_prompt_0.json").write_text("not json", encoding="utf-8")
+    (session_dir / "tools_0.json").write_text("not json", encoding="utf-8")
+
+    assert core.detect_session_skills(session_dir) == {"detected": []}
+
+
 def test_build_skill_timeline_from_user_messages(tmp_path):
     session_dir = tmp_path / "sess"
     session_dir.mkdir()

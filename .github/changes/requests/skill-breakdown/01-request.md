@@ -130,16 +130,16 @@ Cache session metadata (title, created_at, has_debug_logs, debug_log_dir) in a s
 
 ## Acceptance criteria
 
-- [ ] `copilot-session-usage id <uuid> --skill-breakdown` prints a per-skill cost table.
-- [ ] `copilot-session-usage list --title <substring>` returns only matching sessions.
-- [ ] `copilot-session-usage analyze --title <substring> --latest` analyzes the most recent matching session.
-- [ ] `copilot-session-usage id <uuid> --skill "<name>"` filters the report to that skill.
-- [ ] Subagents spawned by `runSubagent` show their real name, not `unknown`.
-- [ ] `copilot-session-usage id <uuid> --tool-breakdown` prints per-skill/per-subagent tool-call counts.
-- [ ] `copilot-session-usage id <uuid> --format json --minimal` returns a small, stable JSON object.
-- [ ] `copilot-session-usage skills --last 7d` lists skills with aggregated cost.
-- [ ] All new features are covered by unit tests.
-- [ ] `just preflight` passes.
+- [x] `copilot-session-usage id <uuid> --skill-breakdown` prints a per-skill cost table.
+- [x] `copilot-session-usage list --title <substring>` returns only matching sessions.
+- [x] `copilot-session-usage analyze --title <substring> --latest` analyzes the most recent matching session.
+- [x] `copilot-session-usage id <uuid> --skill "<name>"` filters the report to that skill.
+- [x] Subagents spawned by `runSubagent` show their real name, not `unknown`.
+- [x] `copilot-session-usage id <uuid> --tool-breakdown` prints per-skill/per-subagent tool-call counts.
+- [x] `copilot-session-usage id <uuid> --format json --minimal` returns a small, stable JSON object.
+- [x] `copilot-session-usage skills --last 7d` lists skills with aggregated cost.
+- [x] All new features are covered by unit tests.
+- [x] `just preflight` passes.
 
 ## Non-goals
 

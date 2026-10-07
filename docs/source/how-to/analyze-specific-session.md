@@ -122,8 +122,11 @@ copilot-session-usage id 3a91c012-1b4e-4c8a-9f72-ab12cd34ef56 --tool-breakdown
 # Concise cost for a single skill
 copilot-session-usage id 3a91c012-1b4e-4c8a-9f72-ab12cd34ef56 \
   --skill "/compendium-generic get-session-costs" \
-  --format json --detail minimal
+  --format json --minimal
 ```
+
+`--minimal` is an alias for `--detail minimal`; both forms return the stable
+single-skill fields without the full session breakdown.
 
 ## List skills across sessions
 

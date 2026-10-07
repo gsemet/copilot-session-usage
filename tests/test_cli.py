@@ -684,6 +684,46 @@ def test_id_command_skill_filter(runner, sample_session_dir, mocker):
     assert data["skill"] == "/my-skill"
 
 
+def test_id_command_minimal_alias(runner, sample_session_dir, mocker):
+    mock_find = mocker.patch("copilot_session_usage._internal.vscode.find_session_dir_by_id")
+    mock_meta = mocker.patch("copilot_session_usage._internal.vscode.find_session_metadata_by_id")
+    mock_find.return_value = sample_session_dir
+    mock_meta.return_value = {"session_id": "abc-123", "title": "My Title"}
+
+    result = runner.invoke(cli, ["id", "abc-123", "--format", "json", "--minimal"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["session_id"] == "sess-abc"
+    assert "model_breakdown" not in data
+    assert "skills" not in data
+
+
+def test_id_command_skill_minimal_alias(runner, sample_session_dir, mocker):
+    mock_find = mocker.patch("copilot_session_usage._internal.vscode.find_session_dir_by_id")
+    mock_meta = mocker.patch("copilot_session_usage._internal.vscode.find_session_metadata_by_id")
+    mock_find.return_value = sample_session_dir
+    mock_meta.return_value = {"session_id": "abc-123", "title": "My Title"}
+
+    result = runner.invoke(
+        cli,
+        [
+            "id",
+            "abc-123",
+            "--skill",
+            "/my-skill",
+            "--format",
+            "json",
+            "--minimal",
+        ],
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["skill"] == "/my-skill"
+    assert "model_breakdown" not in data
+
+
 def test_analyze_command_title_filter(runner, sample_session_dir, mocker):
     mock_list = mocker.patch("copilot_session_usage._internal.vscode.list_recent_sessions")
     mock_list.return_value = [
@@ -721,6 +761,19 @@ def test_skills_command(runner, sample_session_dir, mocker):
     result = runner.invoke(cli, ["skills", "--format", "table"])
     assert result.exit_code == 0
     assert "Skills across" in result.output
+
+
+def test_skills_command_title_filter(runner, sample_session_dir, mocker):
+    mock_list = mocker.patch("copilot_session_usage._internal.vscode.list_recent_sessions")
+    mock_list.return_value = [
+        {"session_id": "s1", "title": "Matching", "debug_log_dir": str(sample_session_dir)},
+        {"session_id": "s2", "title": "Other", "debug_log_dir": str(sample_session_dir)},
+    ]
+
+    result = runner.invoke(cli, ["skills", "--title", "matching", "--format", "table"])
+
+    assert result.exit_code == 0
+    assert "Skills across 1 sessions" in result.output
 
 
 # ─── amend-commit command ─────────────────────────────────────────────────────

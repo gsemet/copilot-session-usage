@@ -6,13 +6,17 @@ session directory resolution for the VS Code Copilot extension.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
+
+from platformdirs import user_cache_dir
 
 # Note: VSCODE_TARGET_SESSION_LOG is a VS Code Copilot *context/template*
 # variable, not an environment variable. Do not read it from os.environ.
@@ -20,7 +24,62 @@ from typing import Any
 
 # ─── Workspace DB cache ─────────────────────────────────────────────────────
 
-_WS_DB_CACHE: dict[str, list[dict]] = {}
+_METADATA_CACHE_FILENAME = "workspace-session-metadata.json"
+_WS_DB_CACHE: dict[str, tuple[int, list[dict]]] = {}
+
+
+def _metadata_cache_path() -> Path:
+    """Return the local cache path for workspace session metadata."""
+    return Path(user_cache_dir("copilot-session-usage")) / _METADATA_CACHE_FILENAME
+
+
+def _read_metadata_cache() -> dict[str, dict[str, Any]]:
+    """Read the persistent metadata index, ignoring unavailable or invalid data."""
+    try:
+        payload = json.loads(_metadata_cache_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    entries = payload.get("workspaces") if isinstance(payload, dict) else None
+    return entries if isinstance(entries, dict) else {}
+
+
+def _write_metadata_cache(entries: dict[str, dict[str, Any]]) -> None:
+    """Atomically persist metadata without storing raw log or message content."""
+    path = _metadata_cache_path()
+    temporary_path: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f"{path.name}.",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            json.dump({"version": 1, "workspaces": entries}, temporary, separators=(",", ":"))
+        os.replace(temporary_path, path)
+        temporary_path = None
+    except OSError:
+        pass
+    finally:
+        if temporary_path is not None:
+            with contextlib.suppress(OSError):
+                temporary_path.unlink()
+
+
+def _cache_key(ws_dir: Path) -> str:
+    """Return the workspace hash used as the persistent cache key."""
+    return ws_dir.name or str(ws_dir.resolve())
+
+
+def _cache_sessions(ws_dir: Path, mtime_ns: int, sessions: list[dict]) -> None:
+    """Cache one workspace's metadata in memory and on disk."""
+    key = _cache_key(ws_dir)
+    _WS_DB_CACHE[key] = (mtime_ns, sessions)
+    entries = _read_metadata_cache()
+    entries[key] = {"state_vscdb_mtime_ns": mtime_ns, "sessions": sessions}
+    _write_metadata_cache(entries)
 
 
 # ─── Workspace storage path resolution (cross-platform) ─────────────────────
@@ -154,15 +213,31 @@ def get_sessions_from_workspace(ws_dir: Path, use_cache: bool = True) -> list[di
     """Return session metadata from a workspace's state.vscdb.
 
     When ``use_cache`` is True (the default), results are cached per
-    workspace directory so batch operations only read each DB once.
+    workspace hash so repeated processes only read unchanged DBs.
     """
-    cache_key = str(ws_dir.resolve())
-    if use_cache and cache_key in _WS_DB_CACHE:
-        return _WS_DB_CACHE[cache_key]
-
     db_path = ws_dir / "state.vscdb"
     if not db_path.exists():
         return []
+    try:
+        db_mtime_ns = db_path.stat().st_mtime_ns
+    except OSError:
+        return []
+
+    cache_key = _cache_key(ws_dir)
+    if use_cache:
+        memory_entry = _WS_DB_CACHE.get(cache_key)
+        if memory_entry and memory_entry[0] == db_mtime_ns:
+            return memory_entry[1]
+
+        disk_entry = _read_metadata_cache().get(cache_key)
+        if isinstance(disk_entry, dict) and disk_entry.get("state_vscdb_mtime_ns") == db_mtime_ns:
+            sessions = disk_entry.get("sessions")
+            if isinstance(sessions, list) and all(
+                isinstance(session, dict) for session in sessions
+            ):
+                _WS_DB_CACHE[cache_key] = (db_mtime_ns, sessions)
+                return sessions
+
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         cur = conn.execute("SELECT value FROM ItemTable WHERE key = 'chat.ChatSessionStore.index'")
@@ -198,7 +273,7 @@ def get_sessions_from_workspace(ws_dir: Path, use_cache: bool = True) -> list[di
         )
 
     if use_cache:
-        _WS_DB_CACHE[cache_key] = sessions
+        _cache_sessions(ws_dir, db_mtime_ns, sessions)
     return sessions
 
 
