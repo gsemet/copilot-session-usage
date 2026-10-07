@@ -1242,6 +1242,95 @@ def _extract_skills_from_generic_details(details: str) -> list[str]:
     return [item.strip().strip("'\"") for item in items if item.strip()]
 
 
+def _iter_json_text(value: Any, depth: int = 0) -> Iterator[str]:
+    """Yield text values from nested JSON or JSON-encoded string payloads."""
+    if isinstance(value, str):
+        yield value
+        if depth < 3:
+            try:
+                decoded = json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                return
+            if decoded != value:
+                yield from _iter_json_text(decoded, depth + 1)
+    elif isinstance(value, dict):
+        for child in value.values():
+            yield from _iter_json_text(child, depth)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_json_text(child, depth)
+
+
+def _load_json_artifact(path: Path) -> Any | None:
+    """Load an optional session artifact, returning ``None`` on malformed input."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _extract_skills_from_system_prompt(path: Path) -> list[str]:
+    """Extract skill names from ``system_prompt_*.json`` skill blocks."""
+    payload = _load_json_artifact(path)
+    if payload is None:
+        return []
+    text = "\n".join(_iter_json_text(payload))
+    skills: list[str] = []
+    for block in re.findall(r"<skill\b[^>]*>(.*?)</skill>", text, re.IGNORECASE | re.DOTALL):
+        match = re.search(r"<name>\s*([^<]+?)\s*</name>", block, re.IGNORECASE | re.DOTALL)
+        if match:
+            skill = match.group(1).strip()
+            if skill:
+                skills.append(skill)
+    return skills
+
+
+def _extract_skills_from_tool_definition(path: Path) -> list[str]:
+    """Extract skill names and slash commands from a ``tools_*.json`` artifact."""
+    payload = _load_json_artifact(path)
+    if payload is None:
+        return []
+
+    skills: list[str] = []
+
+    def collect_named_values(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key.lower() in {"skill", "skills", "skill_name", "skillname"}:
+                    skills.extend(item for item in _iter_json_text(child) if item.strip())
+                collect_named_values(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect_named_values(child)
+
+    for value in _iter_json_text(payload):
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if decoded != value:
+            payload = decoded
+
+    def iter_objects(value: Any) -> Iterator[dict[str, Any]]:
+        if isinstance(value, dict):
+            yield value
+            for child in value.values():
+                yield from iter_objects(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from iter_objects(child)
+
+    for definition in iter_objects(payload):
+        name = definition.get("name")
+        if not isinstance(name, str) or "skill" not in name.lower():
+            continue
+        collect_named_values(definition)
+        for value in _iter_json_text(definition):
+            for match in re.finditer(r"(?<![\w/])(/[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)?)", value):
+                skills.append(match.group(1).rstrip(".,:;)]}"))
+    return skills
+
+
 def detect_session_skills(session_dir: Path) -> dict[str, list[str]]:
     """Detect skills available in a session from multiple sources.
 
@@ -1249,8 +1338,18 @@ def detect_session_skills(session_dir: Path) -> dict[str, list[str]]:
     - ``user_message`` events containing slash commands
     - ``discovery`` events of type ``Skill Discovery``
     - ``generic`` events named ``Custom Instructions`` with on-demand skill lists
+    - ``system_prompt_*.json`` skill blocks
+    - ``tools_*.json`` skill definitions and slash commands
     """
     detected: set[str] = set()
+    for artifact in sorted(session_dir.glob("system_prompt_*.json")):
+        detected.update(
+            _normalize_skill_name(skill) for skill in _extract_skills_from_system_prompt(artifact)
+        )
+    for artifact in sorted(session_dir.glob("tools_*.json")):
+        detected.update(
+            _normalize_skill_name(skill) for skill in _extract_skills_from_tool_definition(artifact)
+        )
     main = session_dir / "main.jsonl"
     if main.exists():
         try:
@@ -2924,7 +3023,7 @@ def skill_filter_option(f: Any) -> Any:
         "--skill",
         "skill_name",
         metavar="NAME",
-        help="Filter the report to a single skill (exact or substring match).",
+        help="Filter the report to a single skill (exact normalized match).",
     )(f)
 
 
@@ -2947,6 +3046,11 @@ def latest_option(f: Any) -> Any:
 
 def analysis_options(f: Any) -> Any:
     """Combine --detail, --format, --output for single/batch analysis commands."""
+    f = click.option(
+        "--minimal",
+        is_flag=True,
+        help="Alias for --detail minimal.",
+    )(f)
     f = output_option(f)
     f = format_option(f)
     f = detail_option(f)

@@ -332,6 +332,7 @@ def _shape_analysis_result(
     result: dict,
     *,
     detail: str,
+    minimal: bool,
     format_: str,
     summary: bool,
     skill_breakdown: bool,
@@ -351,7 +352,7 @@ def _shape_analysis_result(
         if shaped is None:
             raise click.ClickException(f"skill {skill_name!r} not found in session.")
         return shaped
-    detail = core.resolve_detail(detail, format_)
+    detail = "minimal" if minimal else core.resolve_detail(detail, format_)
     return core.shape_session(result, detail)
 
 
@@ -402,6 +403,7 @@ def analyze(
     ctx: click.Context,
     log_dir: str | None,
     detail: str,
+    minimal: bool,
     format_: str,
     output_path: str | None,
     skill_breakdown: bool,
@@ -450,6 +452,7 @@ def analyze(
         shaped = _shape_analysis_result(
             result,
             detail=detail,
+            minimal=minimal,
             format_=format_,
             summary=summary,
             skill_breakdown=skill_breakdown,
@@ -524,6 +527,7 @@ def latest(
     ctx: click.Context,
     workspace: str | None,
     detail: str,
+    minimal: bool,
     format_: str,
     output_path: str | None,
 ) -> None:
@@ -541,7 +545,7 @@ def latest(
         ws_roots = vscode.resolve_ws_roots(ctx.obj.get("workspace_storage"))
         meta = vscode.find_session_metadata_by_id(session_dir.name, ws_roots)
         result["title"] = meta.get("title") if meta else result.get("title")
-    detail = core.resolve_detail(detail, format_)
+    detail = "minimal" if minimal else core.resolve_detail(detail, format_)
     out_path = Path(output_path) if output_path else None
     core.emit(
         core.shape_session(result, detail),
@@ -564,6 +568,7 @@ def find_by_title(
     title: str,
     workspace: str | None,
     detail: str,
+    minimal: bool,
     format_: str,
     output_path: str | None,
 ) -> None:
@@ -592,7 +597,7 @@ def find_by_title(
         raise click.ClickException(msg)
     pricing = _load_pricing_for_agent(ctx.obj.get("agent", "vscode"))
     result = _analyze_session_record(match, pricing)
-    detail = core.resolve_detail(detail, format_)
+    detail = "minimal" if minimal else core.resolve_detail(detail, format_)
     out_path = Path(output_path) if output_path else None
     core.emit(
         core.shape_session(result, detail),
@@ -612,6 +617,7 @@ def analyze_by_id(
     ctx: click.Context,
     session_id: str,
     detail: str,
+    minimal: bool,
     format_: str,
     output_path: str | None,
     skill_breakdown: bool,
@@ -635,6 +641,7 @@ def analyze_by_id(
     shaped = _shape_analysis_result(
         result,
         detail=detail,
+        minimal=minimal,
         format_=format_,
         summary=False,
         skill_breakdown=skill_breakdown,
@@ -788,6 +795,7 @@ def batch(
     name: str | None,
     title_filter: str | None,
     detail: str,
+    minimal: bool,
     format_: str,
     output_path: str | None,
 ) -> None:
@@ -819,7 +827,7 @@ def batch(
         if not session_dir.exists():
             continue
         results.append(_analyze_session_record(session, pricing))
-    detail = core.resolve_detail(detail, format_)
+    detail = "minimal" if minimal else core.resolve_detail(detail, format_)
     out_path = Path(output_path) if output_path else None
     core.emit(core.shape_batch(results, detail), core.normalize_format(format_), out_path)
 
@@ -1040,6 +1048,7 @@ def amend_commit(
 @cli.command(name="skills")
 @core.format_option
 @core.output_option
+@core.title_filter_option
 @click.option(
     "--last",
     "last_window",
@@ -1060,6 +1069,7 @@ def skills_command(
     ctx: click.Context,
     format_: str,
     output_path: str | None,
+    title_filter: str | None,
     last_window: str | None,
     since: str | None,
     until: str | None,
@@ -1084,6 +1094,8 @@ def skills_command(
         until_ms = core.parse_since_to_ms(until)
         if until_ms is not None:
             sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
+    if title_filter:
+        sessions = [s for s in sessions if title_filter.lower() in (s.get("title") or "").lower()]
     if not sessions:
         raise click.ClickException("no sessions matched the given filters.")
 

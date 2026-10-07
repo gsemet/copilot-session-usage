@@ -191,6 +191,12 @@ tokens or cost caused by a skill. For VS Code sessions, each request's full toke
 counts and cost are assigned to the most recently invoked slash-command skill
 (e.g., `/skill-name`, `/namespace:skill-name`) until the next invocation.
 
+Skill detection also reads `system_prompt_*.json` skill blocks and
+`tools_*.json` definitions when present. These artifacts identify available
+skills; only timestamped slash-command user messages establish which skill is
+active for token and tool attribution. Ordinary tool paths are not treated as
+skills.
+
 Distinguish skill detection from attribution: discovery events can identify
 available skills without establishing which skill caused a request. Automatically
 loaded or read skills and overlapping skills are not independently attributed.
@@ -223,6 +229,9 @@ copilot-session-usage id <session-id> --skill /my-skill --tool-breakdown
 # Minimal JSON output (skill, cost_usd, tokens, llm_calls only)
 copilot-session-usage id <session-id> --skill /my-skill --format json --minimal
 ```
+
+`--minimal` is an alias for `--detail minimal` and returns only the stable
+single-skill cost fields.
 
 ### Aggregate skills across sessions
 

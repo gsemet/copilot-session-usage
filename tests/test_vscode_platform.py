@@ -154,6 +154,8 @@ def test_get_sessions_from_workspace_clear_cache(monkeypatch, tmp_path):
     import sqlite3
 
     db_path = ws_dir / "state.vscdb"
+    cache_path = tmp_path / "workspace-session-metadata.json"
+    monkeypatch.setattr(vscode, "_metadata_cache_path", lambda: cache_path)
     conn = sqlite3.connect(str(db_path))
     conn.execute("CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value TEXT)")
     payload = json.dumps(
@@ -173,6 +175,48 @@ def test_get_sessions_from_workspace_clear_cache(monkeypatch, tmp_path):
     s2 = vscode.get_sessions_from_workspace(ws_dir, use_cache=True)
     assert s1 == s2
     assert s1 is not s2  # Different list objects since cache was cleared
+
+
+def test_get_sessions_from_workspace_invalidates_cache_when_db_changes(monkeypatch, tmp_path):
+    ws_dir = tmp_path / "ws"
+    ws_dir.mkdir()
+    cache_path = tmp_path / "workspace-session-metadata.json"
+    monkeypatch.setattr(vscode, "_metadata_cache_path", lambda: cache_path)
+    import json
+    import sqlite3
+
+    db_path = ws_dir / "state.vscdb"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value TEXT)")
+    payload = json.dumps(
+        {"entries": {"s1": {"sessionId": "s1", "title": "Before", "timing": {"created": 1}}}}
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)",
+        ("chat.ChatSessionStore.index", payload),
+    )
+    conn.commit()
+    conn.close()
+
+    first = vscode.get_sessions_from_workspace(ws_dir, use_cache=True)
+    assert first[0]["title"] == "Before"
+
+    conn = sqlite3.connect(str(db_path))
+    updated = json.dumps(
+        {"entries": {"s1": {"sessionId": "s1", "title": "After", "timing": {"created": 1}}}}
+    )
+    conn.execute(
+        "UPDATE ItemTable SET value = ? WHERE key = ?",
+        (updated, "chat.ChatSessionStore.index"),
+    )
+    conn.commit()
+    conn.close()
+
+    vscode._WS_DB_CACHE.clear()
+    second = vscode.get_sessions_from_workspace(ws_dir, use_cache=True)
+
+    assert second[0]["title"] == "After"
+    assert cache_path.exists()
 
 
 # ─── find_session_dir_by_id edge cases ────────────────────────────────────────

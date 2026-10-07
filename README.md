@@ -154,9 +154,11 @@ copilot-session-usage list --dir /path/to/debug-logs --format table
 - **Session filtering** — regex match by name, date-range filtering
 - **Aggregation** — roll up costs across many sessions in one command
 - **Skill-aware cost attribution** — detect skills, attribute LLM and tool calls to the active skill
+- **Skill-source detection** — inspect slash commands, discovery events, system prompts, and skill tools
 - **Skill cost breakdown** — per-skill token counts and estimated cost (VS Code provider)
 - **Tool-call attribution** — per-skill/per-subagent tool-call counts
 - **Title filtering** — find sessions by title substring
+- **Metadata cache** — reuse session indexes until the workspace database changes
 - **Efficiency summaries** — cache ratio, model split, cost per 1M tokens
 - **Field extraction** — pull specific values with `--query`
 
@@ -170,9 +172,17 @@ copilot-session-usage list --dir /path/to/debug-logs --format table
 `~/.config/Code/User/workspaceStorage/` (Linux).
 
 Each session directory contains a `GitHub.copilot-chat/debug-logs/` folder with
-JSONL files. The tool parses these files, extracts token counts per model,
-applies per-model pricing (including cache-hit discounts and long-context tier
-switching), and estimates the session cost in USD.
+JSONL files plus optional `system_prompt_*.json` and `tools_*.json` artifacts.
+The tool parses the JSONL files, extracts token counts per model, applies
+per-model pricing (including cache-hit discounts and long-context tier
+switching), and estimates the session cost in USD. Skill detection also reads
+the optional system-prompt skill list and skill tool definitions. Those artifacts
+identify available skills; only timestamped slash-command user messages drive
+the active-skill attribution timeline.
+
+Session metadata from `state.vscdb` is cached in a small local index keyed by
+workspace hash. The index stores metadata only, never raw logs or message
+content, and is invalidated when the source database mtime changes.
 
 Subagent calls (`runSubagent`) are tracked separately so you can see how much
 token usage was delegated to helper agents.
@@ -251,6 +261,7 @@ just knowledge-validate
 | `--workspace PATH` | Only sessions from this workspace folder |
 | `--aggregate` | Aggregate all matching sessions into one summary |
 | `--summary` | Output a cost-efficiency summary |
+| `--minimal` | Alias for `--detail minimal` on analysis commands |
 | `--skill-breakdown` | Emit a per-skill cost breakdown |
 | `--tool-breakdown` | Emit a per-skill/per-subagent tool-call count breakdown |
 | `--skill NAME` | Filter the report to a single skill |

@@ -128,17 +128,24 @@ Subagent names are extracted from the JSONL filename
 
 ## Skill attribution
 
-Skills are detected from three sources in the debug logs:
+Skills are detected from four sources in the debug logs:
 
 - `user_message` events containing slash commands such as `/skill-name` or
   `/namespace skill-name`.
 - `discovery` events of type `Skill Discovery` that list loaded skills.
 - `generic` events named `Custom Instructions` that enumerate on-demand skills.
+- `system_prompt_*.json` skill blocks and `tools_*.json` skill definitions.
 
 Each `llm_request` and `tool_call` is attributed to the most recently invoked
 skill at that timestamp. The result is included in the session report under the
 `skills` key and can be surfaced with `--skill-breakdown`, `--tool-breakdown`,
 or `--skill <name>`.
+
+System-prompt and tool artifacts establish detected or available skills only;
+timestamped slash-command user messages establish the active-skill timeline.
+Session metadata discovery uses a local workspace-hash index keyed by the
+`state.vscdb` mtime. The cache contains metadata such as titles and log paths,
+not raw debug logs or user message content.
 
 Skill costs preserve the same billed request amounts as the other breakdowns,
 but **skill token and cost attribution is limited**. Each request's full token
