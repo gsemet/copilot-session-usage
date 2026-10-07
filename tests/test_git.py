@@ -170,6 +170,35 @@ def test_amend_commit_replaces_session_id_trailer(empty_repo):
     assert "Copilot-Session-Usage-AIC: 123" not in msg
 
 
+@pytest.mark.parametrize("key", ["Session-Name", "Session-Type"])
+@pytest.mark.parametrize("replacement", [None, "new value"])
+def test_amend_commit_refreshes_client_metadata(empty_repo, key, replacement):
+    prefix = f"Copilot-Session-Usage-{key}:"
+    _run_git(
+        "commit",
+        "--amend",
+        "-m",
+        f"title\n\n{prefix} old value\nSigned-off-by: Test User <test@example.com>",
+        cwd=str(empty_repo),
+    )
+    original_tree = _run_git("rev-parse", "HEAD^{tree}", cwd=str(empty_repo))
+    trailers = ["Copilot-Session-Usage-AIC: 123"]
+    if replacement is not None:
+        trailers.insert(0, f"{prefix} {replacement}")
+
+    git.amend_commit_with_trailers(trailers, cwd=empty_repo)
+    git.amend_commit_with_trailers(trailers, cwd=empty_repo)
+
+    lines = git.get_head_commit_message(cwd=empty_repo).rstrip().splitlines()
+    assert f"{prefix} old value" not in lines
+    if replacement is None:
+        assert not any(line.startswith(prefix) for line in lines)
+    else:
+        assert lines.count(f"{prefix} {replacement}") == 1
+    assert lines[-1] == "Signed-off-by: Test User <test@example.com>"
+    assert _run_git("rev-parse", "HEAD^{tree}", cwd=str(empty_repo)) == original_tree
+
+
 def test_amend_commit_with_no_trailers_does_nothing(empty_repo):
     original = git.get_head_commit_message(cwd=empty_repo)
     git.amend_commit_with_trailers([], cwd=empty_repo)

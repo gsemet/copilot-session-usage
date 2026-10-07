@@ -32,9 +32,9 @@ and model names keep the casing from `data/models-and-pricing.yml`.
 Token counts are expressed in millions of tokens with two decimals. The
 `aic` value and the `Copilot-Session-Usage-AIC` line show the cost in AI
 credits (1 AIC = $0.01) with two decimals. If the commit already contains
-`Copilot-Session-Usage-Acc` or `Copilot-Session-Usage-AIC` trailers, they are
-replaced so the values stay fresh. Other trailers, such as `Signed-off-by`,
-are preserved and kept at the end of the message.
+usage trailers, they are replaced so the values stay fresh. Optional session ID,
+name, and type trailers are removed when their options are omitted on a later amendment.
+Other trailers, such as `Signed-off-by`, are preserved and kept at the end of the message.
 
 ## From VS Code Copilot context
 
@@ -109,6 +109,40 @@ Copilot-Session-Usage-AIC: 232
 
 This will allow another process, not done by Copilot-Session-Cost, to later rewrite
 the commit chain with commit-accurate costs.
+
+## Add client metadata
+
+Pass either or both of these optional parameters:
+
+- `--session-type TEXT`: the name of the tool, process, or framework that uses
+  `copilot-session-usage` to set commit trailers.
+- `--session-name TEXT`: the name of the current change, PRD folder, or identifier
+  of the whole coding session. It usually corresponds to one session ID, but the
+  same name can span several session IDs.
+
+These fields are for clients to consume. `copilot-session-usage` writes them as
+trailers but does not use them for session discovery, grouping, or cost analysis.
+They do not require `--with-session-id`.
+
+```bash
+copilot-session-usage amend-commit \
+  --session-id "abc-123" \
+  --session-id "def-456" \
+  --with-session-id \
+  --session-type "MyFrameWork" \
+  --session-name "auth-refactor"
+```
+
+The command adds one trailer for each supplied metadata value, regardless of the
+number of session IDs:
+
+```text
+Copilot-Session-Usage-Session-Name: auth-refactor
+Copilot-Session-Usage-Session-Type: MyFrameWork
+```
+
+Use the same name across commits for the same change, even when the session ID changes.
+Supply the metadata options on each amendment to retain them.
 
 ## Preview before amending
 

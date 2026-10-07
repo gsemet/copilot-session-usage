@@ -69,7 +69,8 @@ def amend_commit_with_trailers(trailers: list[str], cwd: Path | None = None) -> 
     """Amend HEAD by appending trailer lines to the commit message.
 
     Existing trailers with the same keys (``Copilot-Session-Usage-Acc``,
-    ``Copilot-Session-Usage-AIC``, or ``Copilot-Session-Usage-Session-ID``)
+    ``Copilot-Session-Usage-AIC``, ``Copilot-Session-Usage-Session-ID``,
+    ``Copilot-Session-Usage-Session-Name``, or ``Copilot-Session-Usage-Session-Type``)
     are replaced; all other lines are preserved. ``Signed-off-by`` and other
     conventional Git trailers are kept at the very end of the message, after
     the injected cost trailers. The commit is amended in-place without
@@ -88,6 +89,8 @@ def amend_commit_with_trailers(trailers: list[str], cwd: Path | None = None) -> 
         "Copilot-Session-Usage-Acc:",
         "Copilot-Session-Usage-AIC:",
         "Copilot-Session-Usage-Session-ID:",
+        "Copilot-Session-Usage-Session-Name:",
+        "Copilot-Session-Usage-Session-Type:",
     )
     lines = [line for line in lines if not line.startswith(copilot_keys)]
 

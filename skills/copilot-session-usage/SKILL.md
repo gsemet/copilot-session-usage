@@ -281,6 +281,31 @@ as one trailer block. Add `--with-session-id` to also burn one
 `Copilot-Session-Usage-Session-ID` trailer per session ID, which makes it
 possible to rewrite the commit chain with commit-accurate costs later.
 
+Add client metadata when the calling workflow supplies it:
+
+- `--session-type TEXT`: name the tool, process, or framework setting the trailers.
+- `--session-name TEXT`: identify the current change, PRD folder, or whole coding session.
+  Reuse the name across session IDs when the same change spans several sessions.
+
+Treat both values as client-owned labels, not session lookup or cost-analysis inputs.
+Pass either option independently; neither requires `--with-session-id`.
+Do not invent values when the calling workflow has not supplied them.
+
+```bash
+copilot-session-usage amend-commit \
+  --session-id "abc-123" \
+  --session-id "def-456" \
+  --with-session-id \
+  --session-type "MyFrameWork" \
+  --session-name "auth-refactor"
+```
+
+Expect one `Copilot-Session-Usage-Session-Name: auth-refactor` trailer and
+one `Copilot-Session-Usage-Session-Type: MyFrameWork` trailer, not one per session ID.
+Supply the options on each amendment to retain these labels: existing session ID,
+name, and type trailers are replaced, or removed when their options are omitted.
+Use `--dry-run` to preview metadata alongside usage trailers.
+
 ### Finding the current session ID
 
 `VSCODE_TARGET_SESSION_LOG` is provided in the Copilot agent context as a
