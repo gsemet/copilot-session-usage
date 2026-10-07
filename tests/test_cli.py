@@ -754,6 +754,53 @@ def test_amend_commit_dry_run(runner, sample_session_dir, tmp_path, mocker):
     mock_git_amend.assert_not_called()
 
 
+@pytest.mark.parametrize("dry_run", [True, False])
+@pytest.mark.parametrize(
+    ("session_type", "session_name"),
+    [
+        (None, None),
+        ("MyFrameWork", None),
+        (None, "PRD/auth change"),
+        ("MyFrameWork", "PRD/auth change"),
+    ],
+)
+def test_amend_commit_client_metadata(
+    runner, sample_session_dir, mocker, dry_run, session_type, session_name
+):
+    mocker.patch("copilot_session_usage._internal.git.is_git_repository", return_value=True)
+    mock_find = mocker.patch(
+        "copilot_session_usage._internal.vscode.find_session_dir_by_id",
+        return_value=sample_session_dir,
+    )
+    mock_amend = mocker.patch("copilot_session_usage._internal.git.amend_commit_with_trailers")
+    args = ["amend-commit", "--session-id", "abc-123", "--session-id", "def-456"]
+    if dry_run:
+        args.append("--dry-run")
+    if session_type is not None:
+        args.extend(["--session-type", session_type])
+    if session_name is not None:
+        args.extend(["--session-name", session_name])
+
+    result = runner.invoke(cli, args)
+
+    assert result.exit_code == 0
+    assert [call.args[0] for call in mock_find.call_args_list] == ["abc-123", "def-456"]
+    for key, value in [("Session-Type", session_type), ("Session-Name", session_name)]:
+        prefix = f"Copilot-Session-Usage-{key}:"
+        if value is None:
+            assert prefix not in result.output
+        else:
+            assert result.output.splitlines().count(f"{prefix} {value}") == 1
+    assert "Copilot-Session-Usage-Acc:" in result.output
+    assert "Copilot-Session-Usage-AIC:" in result.output
+    if dry_run:
+        mock_amend.assert_not_called()
+    else:
+        mock_amend.assert_called_once()
+        for trailer in mock_amend.call_args.args[0]:
+            assert trailer in result.output.splitlines()
+
+
 def test_amend_commit_no_session_id(runner):
     result = runner.invoke(cli, ["amend-commit"])
     assert result.exit_code != 0

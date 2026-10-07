@@ -922,6 +922,16 @@ def span(
     help="Also inject a Copilot-Session-Usage-Session-ID trailer per session ID.",
 )
 @click.option(
+    "--session-type",
+    metavar="TEXT",
+    help="Client metadata: tool, process, or framework setting the commit trailers.",
+)
+@click.option(
+    "--session-name",
+    metavar="TEXT",
+    help="Client metadata: change name, PRD folder, or coding-session identifier; may span IDs.",
+)
+@click.option(
     "--repo",
     "repo_path",
     metavar="PATH",
@@ -937,6 +947,8 @@ def amend_commit(
     ctx: click.Context,
     session_ids: tuple[str, ...],
     with_session_id: bool,
+    session_type: str | None,
+    session_name: str | None,
     repo_path: str | None,
     dry_run: bool,
 ) -> None:
@@ -954,6 +966,11 @@ def amend_commit(
     Pass ``--with-session-id`` to also burn one
     ``Copilot-Session-Usage-Session-ID`` trailer per session ID. This makes
     it easier to rewrite commit history with commit-accurate costs later.
+
+    Pass ``--session-type`` and/or ``--session-name`` to record client metadata
+    as trailers. The type names the calling tool, process, or framework; the
+    name identifies a change or coding session that may span several session
+    IDs. These values are not used for discovery or cost analysis.
 
     The current session ID is available to Copilot agents through the
     ``VSCODE_TARGET_SESSION_LOG`` template variable in the editor context
@@ -1001,6 +1018,10 @@ def amend_commit(
     trailers: list[str] = []
     if with_session_id:
         trailers.extend(f"Copilot-Session-Usage-Session-ID: {sid}" for sid in session_ids)
+    if session_name is not None:
+        trailers.append(f"Copilot-Session-Usage-Session-Name: {session_name}")
+    if session_type is not None:
+        trailers.append(f"Copilot-Session-Usage-Session-Type: {session_type}")
     trailers.extend(acc_trailers)
     trailers.append(aic_trailer)
 
