@@ -109,7 +109,7 @@ invocation. It assigns the whole request context, not just the skill text or usa
 caused by that skill. Automatically loaded skills, overlapping skills, and later
 unrelated work cannot be reliably separated; requests before any invocation are
 grouped under `unknown`. CLI/App per-skill tokens and costs remain unavailable.
-See [How cost estimation works](../explanation/how-cost-estimation-works.md).
+See [Skill attribution](../explanation/how-cost-estimation-works.md#skill-attribution).
 :::
 
 ```bash

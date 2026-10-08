@@ -304,31 +304,46 @@ def test_threshold_aware_pricing_exact_boundary():
     assert rates["input_per_m"] == 2.50
 
 
-def test_threshold_aware_pricing_is_order_independent():
-    pricing = core._build_pricing_from_yaml(
-        [
-            {
-                "model": "Claude Haiku 4.5",
-                "threshold": "> 100K",
-                "tier": "Long context",
-                "input": "$2.00",
-                "cached_input": "$0.20",
-                "output": "$8.00",
-            },
-            {
-                "model": "Claude Haiku 4.5",
-                "threshold": "<= 100K",
-                "tier": "Default",
-                "input": "$1.00",
-                "cached_input": "$0.10",
-                "output": "$5.00",
-            },
-        ],
-        "test",
-    )
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    ("upper", "lower", "boundary"),
+    [
+        ("≤ 272K", "> 272K", 272_000),
+        ("<= 272K", "> 272K", 272_000),
+        ("<= 271999", ">= 272K", 271_999),
+        ("≤ 271999", "≥ 272K", 271_999),
+    ],
+)
+def test_threshold_aware_pricing_is_order_independent(reverse, upper, lower, boundary):
+    text = core._read_data_file("models-and-pricing.yml")
+    assert text is not None
+    rows = [
+        row
+        for row in core._parse_pricing_entries(text, "test")
+        if core._normalize_model_name(row.get("model", "")) == "gpt-5.4"
+    ]
+    assert len(rows) == 2
+    rows = [{**rows[0], "threshold": upper}, {**rows[1], "threshold": lower}]
+    pricing = core._build_pricing_from_yaml(list(reversed(rows)) if reverse else rows, "test")
+    pricing["models"]["gpt-5.4"].reverse()
+    for tokens in [0, boundary - 1, boundary, boundary + 1, 500_000]:
+        expected = rows[0] if tokens <= boundary else rows[1]
+        assert core._get_model_rates("gpt-5.4", tokens, pricing)["tier"] == expected["tier"]
+        cached = tokens // 2
+        expected_cost = (
+            (tokens - cached) * core._parse_price(expected["input"])
+            + cached * core._parse_price(expected["cached_input"])
+            + 1000 * core._parse_price(expected["output"])
+        ) / 1e6
+        assert core.estimate_cost(tokens, 1000, cached, "gpt-5.4", pricing) == pytest.approx(
+            expected_cost
+        )
 
-    assert core._get_model_rates("claude-haiku-4.5", 100_000, pricing)["tier"] == "Default"
-    assert core._get_model_rates("claude-haiku-4.5", 100_001, pricing)["tier"] == "Long context"
+
+def test_threshold_aware_pricing_does_not_ignore_lower_bound():
+    pricing = core._build_pricing_from_yaml([{"model": "Test", "threshold": ">= 100K"}], "test")
+    with pytest.raises(ValueError, match="no pricing tier"):
+        core._get_model_rates("test", 99_999, pricing)
 
 
 def test_estimate_cost_with_threshold():
