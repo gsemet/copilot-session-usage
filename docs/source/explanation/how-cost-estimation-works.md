@@ -126,6 +126,7 @@ Subagent names are extracted from the JSONL filename
 (`runSubagent-<Name>-functions.runSubagent:<id>.jsonl`) and from
 `child_session_ref` events in `main.jsonl`.
 
+(skill-attribution)=
 ## Skill attribution
 
 Skills are detected from four sources in the debug logs:
@@ -237,22 +238,25 @@ provider's use of `copilotUsageNanoAiu` (1 nanoAIU = 1e-11 USD):
   cumulative across resumes (the largest value from the last
   `session.shutdown` or `session.usage_checkpoint`).
 - Each `model_breakdown` row uses that model's `totalNanoAiu`. Without it, the
-  model's tokens are priced exactly: `inputTokens` includes cache reads and
-  cache writes, so fresh input is `inputTokens - cacheReadTokens -
-  cacheWriteTokens`, and only `cacheWriteTokens` are charged at the
-  cache-write rate. The pricing tier is chosen from the average request size,
-  not the session sum.
+  model's tokens are priced using the reported cache-write count:
+  `inputTokens` includes cache reads and cache writes, so fresh input is
+  `inputTokens - cacheReadTokens - cacheWriteTokens`, and only
+  `cacheWriteTokens` are charged at the cache-write rate. The pricing tier is
+  chosen from the average request size, not the session sum. This fallback
+  remains an estimate because individual request sizes and discounts are absent.
 - `subagents` lists the main agent and each subagent from
   `session.shutdown.agentMetrics`, with their own billed `totalNanoAiu`.
-- Per-model and per-agent metrics omit segments that ended without a
-  `session.shutdown` (a crash or kill before a resume). That remainder is
-  reported as `total.unattributed_usd`, with a diagnostic, so
-  breakdowns plus `unattributed_usd` always equal the total.
+- Per-model and per-agent metrics can omit segments that ended without a
+  `session.shutdown` (a crash or kill before a resume). A positive remainder
+  between session billing and attributed model costs is reported as
+  `total.unattributed_usd`, with a diagnostic. Displayed totals and breakdowns
+  are rounded to different precisions.
 
-Across 101 local CLI/App sessions, totals matched the billed `totalNanoAiu`
-exactly and breakdowns reconciled with it. Pricing tokens with the exact
-cache-write count reproduced per-model billed amounts for 89 of 96 models;
-the rest included long-context requests or discounts invisible in aggregates.
+A local investigation on 2026-10-07 found that billed totals and breakdowns
+reconciled across 101 CLI/App sessions. Pricing tokens with the reported
+cache-write count at the base tier reproduced per-model billed amounts for
+89 of 96 model entries. These are dated observations, not guarantees for future
+sessions; see the [recorded finding](https://github.com/gsemet/copilot-session-usage/blob/5142026b2ec4c46432c4ff037ebea37030f3b56f/knowledge/findings/2026.10.07-17.30-cli-billed-nanoaiu-and-cache-write.md).
 
 ### When usage is unavailable
 
@@ -264,6 +268,7 @@ has no `session.shutdown` event. In that case:
   fabricated zero.
 - If a `session.usage_checkpoint` exists, its cumulative `totalNanoAiu`
   provides `total.estimated_usd`, entirely reported as `unattributed_usd`.
+  Token totals and cache ratio remain unavailable.
 - `diagnostics` explains exactly what is unavailable and why.
 - Batch/aggregate operations exclude sessions with unavailable evidence from
   their sums (rather than counting them as zero) and report how many were

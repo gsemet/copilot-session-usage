@@ -13,18 +13,53 @@ from copilot_session_usage._internal import core
 
 
 def test_parse_threshold_not_applicable():
-    assert core._parse_threshold("Not applicable") is None
-    assert core._parse_threshold("n/a") is None
-    assert core._parse_threshold("") is None
-    assert core._parse_threshold(None) is None
+    assert core._parse_threshold("Not applicable") == (0, None)
+    assert core._parse_threshold("n/a") == (0, None)
+    assert core._parse_threshold("") == (0, None)
+    assert core._parse_threshold(None) == (0, None)
 
 
 def test_parse_threshold_unbounded():
-    assert core._parse_threshold("> 272K") is None
+    assert core._parse_threshold("> 272K") == (272_001, None)
 
 
 def test_parse_threshold_no_match():
-    assert core._parse_threshold("abc") is None
+    with pytest.raises(ValueError, match="threshold"):
+        core._parse_threshold("abc")
+
+
+@pytest.mark.parametrize(
+    ("threshold", "expected"),
+    [
+        ("<= 100K", (0, 100_000)),
+        (">= 100K", (100_000, None)),
+        ("  > 100k  ", (100_001, None)),
+        ("≤ 100K", (0, 100_000)),
+        ("≥ 100K", (100_000, None)),
+        ("<= 1M", (0, 1_000_000)),
+    ],
+)
+def test_parse_threshold_conditions(threshold, expected):
+    assert core._parse_threshold(threshold) == expected
+
+
+@pytest.mark.parametrize(
+    "threshold",
+    [
+        "garbage 100K",
+        ">=",
+        "100K trailing",
+        "200K-100K",
+        "< 0",
+        "> 2 and < 3",
+        ">= 0.5M",
+        100_000,
+        True,
+    ],
+)
+def test_parse_threshold_invalid_conditions(threshold):
+    with pytest.raises(ValueError, match="threshold"):
+        core._parse_threshold(threshold)
 
 
 # ─── _parse_price edge cases ──────────────────────────────────────────────────

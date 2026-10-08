@@ -189,21 +189,27 @@ matching pricing prefix. Aggregate-only CLI summaries cannot recover individual
 request context sizes; without a billed figure, their tier is chosen from the
 average request size.
 
+Pricing row order does not affect tier selection, including at the boundary.
+Supported thresholds are the current `≤`/`<=` and `>` comparisons, plus inclusive
+`≥`/`>=`, with integer token counts and optional `K` or `M` suffixes.
+Missing or `Not applicable` thresholds remain unbounded. Other syntax is rejected;
+range expressions and future multi-tier formats are not inferred.
+
 ## Copilot CLI/App limitations
 
-CLI/App costs use Copilot's billed `totalNanoAiu` (session, per model, per
-agent), so totals are dollar-accurate. The event log has only cumulative
-usage, so:
+When reported, Copilot CLI/App costs use `totalNanoAiu` for the session, each
+model, and each agent rather than token-based estimates. The event log has
+cumulative usage rather than per-request token counts:
 
 - **No per-skill cost.** There is no per-request usage to split by skill;
   `skills.breakdown` is empty. Detected skills and tool counts remain.
-- **Unattributed remainder.** Per-model and per-agent metrics omit session
+- **Unattributed remainder.** Per-model and per-agent metrics can omit session
   segments that ended without `session.shutdown` (crash or kill before a
   resume). That cost is in `total.unattributed_usd`, not in any breakdown.
-- **Active sessions** report only the latest checkpoint total, entirely
-  unattributed.
+- **Active sessions** report the latest checkpoint total when available,
+  entirely unattributed, with token totals remaining unavailable.
 - **Token fallback** (no billed figure) cannot see per-request long-context
-  tiers or discounts and is an estimate.
+  tiers or discounts and is an estimate. Reported costs are rounded.
 
 ## Custom pricing
 

@@ -151,25 +151,22 @@ def _clean_model_display_name(name: str) -> str:
     return cleaned.strip()
 
 
-def _parse_threshold(threshold: str) -> int | None:
-    """Parse a threshold string from the YAML into a token count.
-
-    Examples:
-        "≤ 272K" → 272_000
-        "> 272K" → None  (unbounded / long-context tier)
-        "Not applicable" → None
-    """
-    if not threshold or threshold.lower() in ("not applicable", "n/a", ""):
-        return None
-    if re.match(r"^\s*>\s*", threshold):
-        return None
-    match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([KM]?)", threshold)
-    if not match:
-        return None
-    value = float(match.group(1))
-    suffix = match.group(2).upper()
-    multiplier = {"K": 1_000, "M": 1_000_000}.get(suffix, 1)
-    return int(value * multiplier)
+def _parse_threshold(threshold: str | None) -> tuple[int, int | None]:
+    """Parse current pricing comparisons into inclusive integer-token bounds."""
+    if threshold is None:
+        return 0, None
+    if not isinstance(threshold, str):
+        raise ValueError(f"unsupported pricing threshold: {threshold!r}")
+    if threshold.strip().lower() in ("not applicable", "n/a", ""):
+        return 0, None
+    match = re.fullmatch(r"\s*(<=|≤|>=|≥|>)\s*([0-9]+)\s*([KM]?)\s*", threshold, re.IGNORECASE)
+    if match is None:
+        raise ValueError(f"unsupported pricing threshold: {threshold!r}")
+    operator, amount, suffix = match.groups()
+    tokens = int(amount) * {"K": 1_000, "M": 1_000_000}.get(suffix.upper(), 1)
+    if operator in ("<=", "≤"):
+        return 0, tokens
+    return tokens + (operator == ">"), None
 
 
 def _parse_price(price: str) -> float:
@@ -384,13 +381,15 @@ def _build_pricing_from_yaml(entries: list[dict], source: str) -> dict:
             continue
         name = _normalize_model_name(raw_name)
         display_name = _clean_model_display_name(raw_name)
+        lower, upper = _parse_threshold(entry.get("threshold", ""))
         tier = {
             "input_per_m": _parse_price(entry.get("input", "0")),
             "output_per_m": _parse_price(entry.get("output", "0")),
             "cache_per_m": _parse_price(entry.get("cached_input", "0")),
             "cache_write_per_m": _parse_price(entry.get("cache_write", "0")),
             "tier": entry.get("tier", "Default"),
-            "threshold_tokens": _parse_threshold(entry.get("threshold", "")),
+            "threshold_tokens": upper,
+            "min_threshold_tokens": lower,
             "provider": entry.get("provider", "unknown"),
             "display_name": display_name,
         }
@@ -761,14 +760,22 @@ def _get_model_rates(model: str, input_tok: int, pricing: dict[str, Any]) -> dic
     if tiers is None:
         tiers = models.get("default", [{}])
 
-    if len(tiers) == 1:
-        return tiers[0]  # type: ignore[no-any-return]
-
-    for tier in tiers:
-        threshold = tier.get("threshold_tokens")
-        if threshold is not None and input_tok <= threshold:
-            return tier  # type: ignore[no-any-return]
-    return tiers[-1]  # type: ignore[no-any-return]
+    matches = [
+        tier
+        for tier in tiers
+        if input_tok >= tier.get("min_threshold_tokens", 0)
+        and (tier.get("threshold_tokens") is None or input_tok <= tier["threshold_tokens"])
+    ]
+    if not matches:
+        raise ValueError(f"no pricing tier for {model} at {input_tok} input tokens")
+    return min(  # type: ignore[no-any-return]
+        matches,
+        key=lambda tier: (
+            tier.get("threshold_tokens") is None,
+            tier.get("threshold_tokens") or 0,
+            -tier.get("min_threshold_tokens", 0),
+        ),
+    )
 
 
 def model_uses_fallback_pricing(model: str, pricing: dict[str, Any]) -> bool:
