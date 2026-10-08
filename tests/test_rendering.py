@@ -20,8 +20,7 @@ def test_parse_threshold_not_applicable():
 
 
 def test_parse_threshold_unbounded():
-    # "> 272K" is parsed as 272000 by the regex; the docstring is aspirational
-    assert core._parse_threshold("> 272K") == 272_000
+    assert core._parse_threshold("> 272K") is None
 
 
 def test_parse_threshold_no_match():

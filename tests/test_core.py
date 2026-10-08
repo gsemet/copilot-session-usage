@@ -304,6 +304,33 @@ def test_threshold_aware_pricing_exact_boundary():
     assert rates["input_per_m"] == 2.50
 
 
+def test_threshold_aware_pricing_is_order_independent():
+    pricing = core._build_pricing_from_yaml(
+        [
+            {
+                "model": "Claude Haiku 4.5",
+                "threshold": "> 100K",
+                "tier": "Long context",
+                "input": "$2.00",
+                "cached_input": "$0.20",
+                "output": "$8.00",
+            },
+            {
+                "model": "Claude Haiku 4.5",
+                "threshold": "<= 100K",
+                "tier": "Default",
+                "input": "$1.00",
+                "cached_input": "$0.10",
+                "output": "$5.00",
+            },
+        ],
+        "test",
+    )
+
+    assert core._get_model_rates("claude-haiku-4.5", 100_000, pricing)["tier"] == "Default"
+    assert core._get_model_rates("claude-haiku-4.5", 100_001, pricing)["tier"] == "Long context"
+
+
 def test_estimate_cost_with_threshold():
     pricing = {
         "models": {
