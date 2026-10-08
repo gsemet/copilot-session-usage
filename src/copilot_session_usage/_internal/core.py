@@ -161,6 +161,8 @@ def _parse_threshold(threshold: str) -> int | None:
     """
     if not threshold or threshold.lower() in ("not applicable", "n/a", ""):
         return None
+    if re.match(r"^\s*>\s*", threshold):
+        return None
     match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([KM]?)", threshold)
     if not match:
         return None
