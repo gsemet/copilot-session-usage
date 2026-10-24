@@ -111,8 +111,29 @@ def test_get_model_rates_prefix_match():
     assert rates["input_per_m"] == 0.08
 
 
+def _gpt_54_row(model, threshold, tier, input_, cached, output):
+    return {
+        "model": model,
+        "threshold": threshold,
+        "tier": tier,
+        "input": input_,
+        "cached_input": cached,
+        "output": output,
+        "cache_write": "Not applicable",
+    }
+
+
+GPT_54_ROWS = [
+    _gpt_54_row("GPT-5.4", "≤ 272K", "Default", "$2.50", "$0.25", "$15.00"),
+    _gpt_54_row("GPT-5.4", "> 272K", "Long context", "$5.00", "$0.50", "$22.50"),
+]
+
+
 def test_versioned_model_uses_most_specific_pricing():
-    pricing = core.load_pricing(Path(core.__file__).parents[1] / "data")
+    rows = GPT_54_ROWS + [
+        _gpt_54_row("GPT-5.4 mini", "Not applicable", "Default", "$0.75", "$0.075", "$4.50")
+    ]
+    pricing = core._build_pricing_from_yaml(rows, "test")
     rates = core._get_model_rates("gpt-5.4-mini-2026-10-01", 100_000, pricing)
     assert rates == pricing["models"]["gpt-5.4-mini"][0]
 
@@ -315,15 +336,7 @@ def test_threshold_aware_pricing_exact_boundary():
     ],
 )
 def test_threshold_aware_pricing_is_order_independent(reverse, upper, lower, boundary):
-    text = core._read_data_file("models-and-pricing.yml")
-    assert text is not None
-    rows = [
-        row
-        for row in core._parse_pricing_entries(text, "test")
-        if core._normalize_model_name(row.get("model", "")) == "gpt-5.4"
-    ]
-    assert len(rows) == 2
-    rows = [{**rows[0], "threshold": upper}, {**rows[1], "threshold": lower}]
+    rows = [{**GPT_54_ROWS[0], "threshold": upper}, {**GPT_54_ROWS[1], "threshold": lower}]
     pricing = core._build_pricing_from_yaml(list(reversed(rows)) if reverse else rows, "test")
     pricing["models"]["gpt-5.4"].reverse()
     for tokens in [0, boundary - 1, boundary, boundary + 1, 500_000]:
