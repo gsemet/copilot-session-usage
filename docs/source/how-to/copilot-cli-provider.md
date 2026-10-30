@@ -82,59 +82,55 @@ one list cannot unambiguously apply to two different discovery layouts.
 
 ## Missing or partial evidence
 
-A session that is still active, or was interrupted before it could shut down
-cleanly, has no final usage summary yet. Rather than reporting zero tokens
-and zero cost as if that were measured, the report says so explicitly with
-`null`/`n/a`:
+Totals come from the per-call `session.usage_record` events plus
+`session.compaction_complete` events, so a session that is still active, was
+interrupted, or continued after its last `session.shutdown` is fully analyzed.
+`session.shutdown`/`session.usage_checkpoint` snapshots are incomplete and are
+used only for reconciliation: `reconciliation.snapshot_usd` and
+`snapshot_delta_usd` show the gap, and a diagnostic is added when the snapshot
+exceeds the records total by more than $0.005 (records are authoritative).
 
-```bash
-$ copilot-session-usage --agent cli latest --format table
-Session:   c3bda2f6-fc42-4959-9672-8e087225f251
-Provider:  cli
-...
-Input:     n/a
-...
-Diagnostics:
-  - no session.shutdown or session.usage_checkpoint event found in this session; usage totals and cost are unavailable.
-```
-
-When a `session.usage_checkpoint` is available (a periodic cumulative
-counter), its billed `totalNanoAiu` provides `total.estimated_usd`, reported
-entirely as `total.unattributed_usd` because there is no per-model breakdown
-at checkpoint granularity. See
+Only a session with neither usage records nor compaction usage has no totals.
+Rather than reporting zero tokens and zero cost as if that were measured, the
+report says so explicitly with `null`/`n/a` and a diagnostic. See
 [How cost estimation works](../explanation/how-cost-estimation-works.md)
-(Copilot CLI / Copilot App provider section) for the full breakdown of what
-is and isn't available at each stage.
+(Copilot CLI / Copilot App provider section) for details.
 
 Batch and aggregate operations (`batch`, `--aggregate`) exclude sessions with
 unavailable cost evidence from their totals rather than counting them as
 zero; `summary.sessions_with_unavailable_cost` reports how many were
 excluded.
 
+## Export every call
+
+`calls` emits one JSON object per LLM call (JSONL), including compactions
+(`kind: "compaction"`). Every total this tool reports is a sum of these records:
+
+```bash
+copilot-session-usage --agent cli calls --last 7d --output calls.jsonl
+```
+
 ## Subagent and skill attribution
 
 `subagent.started`/`subagent.completed` events and each event's top-level
-`agentId` field are used to attribute tool calls (and the skill active at
+`agentId` field attribute tool calls and LLM calls (and the skill active at
 that moment) to the subagent that actually made them, instead of collapsing
 everything into `main`. `--tool-breakdown` shows the resolved subagent name
 (or the raw `agentId` when a `subagent.started` event wasn't captured) in its
-`subagent` column. `provider_usage.subagents` separately preserves the raw
-per-subagent evidence available from the event log (name, model, tool-call
-count, a combined `total_tokens_reported`, and duration). The shared
-`subagents` cost block is built from `session.shutdown.agentMetrics` (main
-agent plus each subagent, with billed `totalNanoAiu`).
+`subagent` column. The `subagents` cost block and `skills.breakdown` are
+summed from the per-call records (`session.usage_record` carries the
+`agentId`; skills are attributed per agent at the call timestamp).
+`initiator_breakdown` groups calls by `user`/`agent`/`sub-agent`/`compaction`.
 
 ## What's different from the VS Code provider
 
-- Per-skill **cost** breakdown (`--skill-breakdown`) has no data to report for
-  `cli` sessions: `events.jsonl` only exposes cumulative session-level token
-  totals, not per-request ones. `skills.detected` and `--tool-breakdown` are
-  still fully populated, including subagent attribution (see above).
-- Costs use Copilot's billed `totalNanoAiu` (session, per model, per agent).
-  Without it, tokens are priced with the exact `cacheWriteTokens` count.
-  Usage from segments that ended without `session.shutdown` appears as
-  `total.unattributed_usd`.
-- Pricing lookups for `cli`/`all` are local-only by default (no runtime
-  pricing refresh attempt), unlike the `vscode` provider's default daily
-  refresh attempt. Run `copilot-session-usage pricing refresh` to update
-  pricing explicitly.
+- Calls carry a real `cache_write_tokens` count (`null` on VS Code), and
+  compactions are separate billed events that are included in the totals.
+- Costs use Copilot's billed per-call `totalNanoAiu`; a call without it is
+  priced from the table using the exact `cacheWriteTokens` count and a tier
+  chosen from that call's own input size.
+- `--since`/`--until`/`--last` select calls by timestamp; see
+  [How cost estimation works](../explanation/how-cost-estimation-works.md#dont-recompute-costs-yourself)
+  before recomputing any figure yourself.
+- Analysis never refreshes pricing over the network for either provider. Run
+  `copilot-session-usage pricing refresh` to update pricing explicitly.

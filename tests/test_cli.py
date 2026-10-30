@@ -379,9 +379,9 @@ def test_span_command_emits_compact_report(runner, sample_session_dir, mocker):
         [
             "span",
             "--since",
-            "2026-07-01",
+            "1970-01-01",
             "--until",
-            "2026-07-02",
+            "1970-01-02",
             "--format",
             "json",
         ],
@@ -389,7 +389,8 @@ def test_span_command_emits_compact_report(runner, sample_session_dir, mocker):
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["report"] == "span"
-    assert payload["period"]["since"] == "2026-07-01"
+    assert payload["period"]["since"] == "1970-01-01"
+    assert payload["schema_version"] == 2
     assert payload["total"]["session_count"] == 1
     assert payload["sessions"][0]["provider"] == "vscode"
     assert "skills" not in payload["sessions"][0]
@@ -430,7 +431,8 @@ def test_analyze_command_summary(runner, sample_session_dir):
     )
     assert result.exit_code == 0
     assert "Cache ratio" in result.output
-    assert "Cost per 1M tokens" in result.output
+    assert "Cost per 1M tokens" not in result.output
+    assert "Input tokens" in result.output
 
 
 def test_analyze_command_query(runner, sample_session_dir):
@@ -556,7 +558,7 @@ def test_list_command_dir_with_costs(runner, sample_session_dir, tmp_path):
     result = runner.invoke(cli, ["list", "--dir", str(debug_dir), "--format", "table"])
     assert result.exit_code == 0
     assert sample_session_dir.name in result.output
-    assert "Tokens" in result.output
+    assert "Input" in result.output
     assert "Cost" in result.output
 
 
@@ -573,7 +575,7 @@ def test_list_command_costs_from_workspace(runner, sample_session_dir, mocker):
     ]
     result = runner.invoke(cli, ["list", "--costs", "--format", "table"])
     assert result.exit_code == 0
-    assert "Tokens" in result.output
+    assert "Input" in result.output
     assert "Cost" in result.output
 
 
@@ -605,6 +607,9 @@ def test_list_command_until(runner, mocker):
             "created_ms": 2_000_000_000_000,
         },
     ]
+    mocker.patch(
+        "copilot_session_usage._internal.core.session_has_calls_in_window", return_value=True
+    )
     result = runner.invoke(cli, ["list", "--until", "2026-07-01T00:00:00Z"])
     assert result.exit_code == 0
     assert "Old" in result.output
@@ -1267,11 +1272,182 @@ def test_agent_all_list_is_local_only_by_default(runner, cli_root, tmp_path, moc
     load_pricing.assert_called_once_with(auto_refresh=False)
 
 
-def test_agent_vscode_analyze_keeps_default_auto_refresh(runner, sample_session_dir, mocker):
-    """The default `vscode` provider preserves its historical auto-refresh attempt."""
+def test_agent_vscode_analyze_defaults_to_offline_pricing(runner, sample_session_dir, mocker):
+    """Analysis is offline by default for every provider, vscode included."""
     load_pricing = mocker.patch(
         "copilot_session_usage.cli.core.load_pricing", return_value={"models": {}}
     )
     result = runner.invoke(cli, ["analyze", str(sample_session_dir)])
     assert result.exit_code == 0
-    load_pricing.assert_called_once_with(auto_refresh=True)
+    load_pricing.assert_called_once_with(auto_refresh=False)
+
+
+# ─── calls command ────────────────────────────────────────────────────────────
+
+
+def _write_vscode_session(root, name, stamps):
+    d = root / name
+    d.mkdir()
+    lines = [
+        json.dumps(
+            {
+                "ts": ts,
+                "type": "llm_request",
+                "attrs": {
+                    "model": "claude-sonnet-4.6",
+                    "inputTokens": 100 + i,
+                    "outputTokens": 10,
+                    "cachedTokens": 40,
+                },
+            }
+        )
+        for i, ts in enumerate(stamps)
+    ]
+    (d / "main.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"session_id": name, "title": name, "provider": "vscode", "debug_log_dir": str(d)}
+
+
+@pytest.fixture
+def two_sessions(tmp_path, mocker):
+    sessions = [
+        _write_vscode_session(tmp_path, "sess-b", [3_000_000, 1_000_000]),
+        _write_vscode_session(tmp_path, "sess-a", [1_000_000, 2_000_000]),
+    ]
+    mocker.patch(
+        "copilot_session_usage._internal.vscode.default_workspace_storage_roots",
+        return_value=[tmp_path],
+    )
+    mocker.patch(
+        "copilot_session_usage._internal.vscode.list_recent_sessions", return_value=sessions
+    )
+    return sessions
+
+
+def test_calls_command_emits_sorted_jsonl(runner, two_sessions):
+    result = runner.invoke(cli, ["calls"])
+    assert result.exit_code == 0
+    lines = result.output.splitlines()
+    rows = [json.loads(line) for line in lines]
+    assert len(rows) == 4
+    assert [(r["ts_ms"], r["session_id"]) for r in rows] == [
+        (1_000_000, "sess-a"),
+        (1_000_000, "sess-b"),
+        (2_000_000, "sess-a"),
+        (3_000_000, "sess-b"),
+    ]
+    assert all(line == json.dumps(json.loads(line), sort_keys=True) for line in lines)
+    assert result.output == runner.invoke(cli, ["calls"]).output
+    first = rows[0]
+    assert set(first) == {
+        "session_id",
+        "provider",
+        "ts_ms",
+        "ts",
+        "model",
+        "input_tokens",
+        "cached_tokens",
+        "cache_write_tokens",
+        "uncached_input_tokens",
+        "output_tokens",
+        "llm_calls",
+        "nano_aiu",
+        "estimated_usd",
+        "cost_source",
+        "agent",
+        "agent_id",
+        "initiator",
+        "kind",
+        "skill",
+    }
+    assert first["provider"] == "vscode"
+    assert first["cost_source"] == "estimated"
+    assert first["uncached_input_tokens"] == first["input_tokens"] - first["cached_tokens"]
+
+
+def test_calls_command_since_until_window(runner, two_sessions):
+    result = runner.invoke(
+        cli, ["calls", "--since", "1970-01-01T00:20:00Z", "--until", "1970-01-01T00:40:00Z"]
+    )
+    assert result.exit_code == 0
+    rows = [json.loads(line) for line in result.output.splitlines()]
+    assert [(r["session_id"], r["ts_ms"]) for r in rows] == [("sess-a", 2_000_000)]
+
+
+def test_calls_command_last_window_excludes_old_calls(runner, two_sessions):
+    result = runner.invoke(cli, ["calls", "--last", "1h"])
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+def test_calls_command_invalid_last_is_error(runner, two_sessions):
+    result = runner.invoke(cli, ["calls", "--last", "bogus"])
+    assert result.exit_code != 0
+    assert "invalid --last" in result.output
+
+
+def test_calls_command_output_file(runner, two_sessions, tmp_path):
+    out = tmp_path / "calls.jsonl"
+    result = runner.invoke(cli, ["calls", "--output", str(out)])
+    assert result.exit_code == 0
+    assert result.output == ""
+    assert len(out.read_text(encoding="utf-8").splitlines()) == 4
+
+
+def test_calls_command_title_and_name_filters(runner, two_sessions):
+    by_title = runner.invoke(cli, ["calls", "--title", "SESS-A"])
+    assert {json.loads(x)["session_id"] for x in by_title.output.splitlines()} == {"sess-a"}
+    by_name = runner.invoke(cli, ["calls", "--name", "^sess-b$"])
+    assert {json.loads(x)["session_id"] for x in by_name.output.splitlines()} == {"sess-b"}
+    bad = runner.invoke(cli, ["calls", "--name", "("])
+    assert bad.exit_code != 0
+
+
+def test_calls_command_agent_cli(runner, write_cli_session, tmp_path, mocker):
+    cli_root = tmp_path / "cli-root"
+    cli_root.mkdir()
+    write_cli_session(cli_root, "11111111-1111-1111-1111-111111111111")
+    mocker.patch(
+        "copilot_session_usage._internal.copilot_cli.default_session_state_roots",
+        return_value=[cli_root],
+    )
+    result = runner.invoke(cli, ["--agent", "cli", "calls"])
+    assert result.exit_code == 0
+    rows = [json.loads(line) for line in result.output.splitlines()]
+    assert rows
+    assert {r["provider"] for r in rows} == {"cli"}
+    assert {r["cost_source"] for r in rows} == {"billed"}
+
+
+def test_span_command_total_reconciles_with_model_rows(runner, two_sessions):
+    result = runner.invoke(cli, ["span", "--since", "1970-01-01", "--format", "json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["schema_version"] == 2
+    assert payload["total"]["llm_calls"] == 4
+    assert payload["total"]["input_tokens"] == 100 + 101 + 100 + 101
+    assert payload["total"]["cached_tokens"] == 160
+    assert payload["total"]["cache_ratio"] == pytest.approx(160 / 402, abs=1e-3)
+    assert payload["total"]["cost_source"] == "estimated"
+    assert sum(m["estimated_usd"] for m in payload["models"]) == pytest.approx(
+        payload["total"]["estimated_usd"], abs=1e-9
+    )
+    assert payload["reconciliation"]["calls_without_billing"] == 4
+    assert payload["reconciliation"]["billed_usd"] == 0.0
+
+
+def test_span_command_window_drops_session_with_no_in_window_calls(runner, two_sessions):
+    result = runner.invoke(cli, ["span", "--since", "1970-01-01T00:41:00Z", "--format", "json"])
+    payload = json.loads(result.output)
+    assert [s["session_id"] for s in payload["sessions"]] == ["sess-b"]
+    assert payload["total"]["llm_calls"] == 1
+    assert payload["total"]["session_count"] == 1
+
+
+def test_batch_command_schema_version_and_summary(runner, two_sessions):
+    result = runner.invoke(cli, ["batch", "5", "--format", "json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["schema_version"] == 2
+    assert payload["summary"]["session_count"] == 2
+    assert payload["summary"]["llm_calls"] == 4
+    assert "total_tokens" not in payload["summary"]

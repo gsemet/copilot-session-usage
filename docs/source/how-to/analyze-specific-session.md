@@ -88,10 +88,10 @@ copilot-session-usage --agent cli analyze /path/to/session/events.jsonl
 ```
 
 The source must contain recognizable Copilot CLI event records and a canonical
-session UUID. CLI/App pricing uses the bundled or user-cached model catalog
-locally; it does not perform the VS Code provider's automatic runtime pricing
-refresh. Active or interrupted sessions can retain provider-native checkpoint
-counters while shared token and cost totals remain unavailable.
+session UUID. Pricing is loaded offline (user cache or bundled catalog) for
+every provider; analysis never refreshes it over the network. Active or
+interrupted sessions are analyzed from their per-call usage records; snapshot
+counters only feed the `reconciliation` diagnostic.
 
 To opt into a combined report across both providers, use `--agent all` with
 discovery commands such as `list`, `latest`, `batch`, or `analyze --name`.

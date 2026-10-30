@@ -353,17 +353,37 @@ def find_latest_session_dir(
     return latest
 
 
+def _newest_mtime_ms(session: dict) -> float | None:
+    """Return the newest ``*.jsonl`` modification time (ms) of a session's debug logs."""
+    log_dir = session.get("debug_log_dir")
+    if not log_dir:
+        return None
+    newest: float | None = None
+    try:
+        for path in Path(log_dir).glob("*.jsonl"):
+            mtime = path.stat().st_mtime * 1000
+            if newest is None or mtime > newest:
+                newest = mtime
+    except OSError:
+        return None
+    return newest
+
+
 def list_recent_sessions(
     ws_roots: list[Path],
     limit: int = 20,
     since_ms: int | None = None,
     workspace_filter: str | None = None,
     require_logs: bool = False,
+    active_since_ms: int | None = None,
 ) -> list[dict]:
     """List sessions from ws_roots, sorted most-recent first.
 
     When ``require_logs`` is True, only sessions with existing debug logs
-    are returned (useful for batch analysis).
+    are returned (useful for batch analysis). ``since_ms`` filters on session
+    creation time; ``active_since_ms`` instead keeps every session whose
+    newest log file was modified at or after that instant, so a session
+    created earlier but still receiving calls is not missed by a call window.
     """
     from copilot_session_usage._internal import core
 
@@ -381,6 +401,10 @@ def list_recent_sessions(
                     continue
                 if require_logs and not session.get("has_debug_logs"):
                     continue
+                if active_since_ms is not None:
+                    newest = _newest_mtime_ms(session)
+                    if newest is None or newest < active_since_ms:
+                        continue
                 session["created_at"] = core.ts_to_iso(session.get("created_ms"))
                 session["last_activity_at"] = core.ts_to_iso(session.get("last_message_ms"))
                 all_sessions.append(session)

@@ -113,6 +113,25 @@ def _write_cli_session(
                 "parentId": "e3",
             },
             {
+                "type": "session.usage_record",
+                "data": {
+                    "usage": {
+                        "model": "gpt-5.6-luna",
+                        "inputTokens": 1000,
+                        "cacheReadTokens": 0,
+                        "cacheWriteTokens": 0,
+                        "outputTokens": 100,
+                        "initiator": "user",
+                        "cost": 0,
+                        "copilotUsage": {"totalNanoAiu": 100_000_000},
+                        "accounting": {"usageId": f"{session_id}-u1"},
+                    }
+                },
+                "id": "e4b",
+                "timestamp": "2026-01-01T00:00:08.000Z",
+                "parentId": "e4",
+            },
+            {
                 "type": "session.shutdown",
                 "data": {
                     "shutdownType": "routine",

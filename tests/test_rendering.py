@@ -143,23 +143,25 @@ def test_build_pricing_skips_non_dict_entries(tmp_path):
 # ─── parse_jsonl_file edge cases ──────────────────────────────────────────────
 
 
-def test_parse_jsonl_file_missing_file():
-    stats = core.parse_jsonl_file(Path("/nonexistent/file.jsonl"))
-    assert stats["llm_calls"] == 0
+def _parse(path):
+    return core.parse_vscode_calls(path, agent=None, agent_id=None)
 
 
-def test_parse_jsonl_file_oserror(tmp_path):
+def test_parse_vscode_calls_missing_file():
+    assert _parse(Path("/nonexistent/file.jsonl"))["calls"] == []
+
+
+def test_parse_vscode_calls_oserror(tmp_path):
     f = tmp_path / "unreadable.jsonl"
     f.write_text("{}", encoding="utf-8")
     f.chmod(0o000)
     try:
-        stats = core.parse_jsonl_file(f)
-        assert stats["llm_calls"] == 0
+        assert _parse(f)["calls"] == []
     finally:
         f.chmod(0o644)
 
 
-def test_parse_jsonl_file_no_ts_events(tmp_path):
+def test_parse_vscode_calls_no_ts_events(tmp_path):
     f = tmp_path / "test_no_ts.jsonl"
     f.write_text(
         json.dumps(
@@ -175,10 +177,10 @@ def test_parse_jsonl_file_no_ts_events(tmp_path):
         + "\n",
         encoding="utf-8",
     )
-    stats = core.parse_jsonl_file(f)
-    assert stats["llm_calls"] == 1
-    assert stats["first_ts"] is None
-    assert stats["first_llm_ts"] is None
+    parsed = _parse(f)
+    assert len(parsed["calls"]) == 1
+    assert parsed["calls"][0]["ts_ms"] is None
+    assert parsed["first_ts"] is None
 
 
 # ─── get_subagent_names edge cases ────────────────────────────────────────────
@@ -264,7 +266,7 @@ def test_analyze_session_no_llm_events(tmp_path):
             }
         },
     )
-    assert result["total"]["llm_calls"] == 0
+    assert result["total"]["llm_calls"] is None
     assert result["subagents"] == []
     assert result["model_breakdown"] == []
 
@@ -356,7 +358,7 @@ def test_render_table_single_unavailable_evidence_shows_na():
     assert "Output:    n/a" in text
     assert "Cached:    n/a (n/a)" in text
     assert "LLM calls: n/a" in text
-    assert "Est. cost: n/a" in text
+    assert "Cost:      n/a" in text
 
 
 def test_render_table_single_no_active_duration():
@@ -711,26 +713,28 @@ def test_render_summary():
         "session_id": "s1",
         "title": "Test",
         "cache_ratio": 0.5,
-        "total_tokens": 1_700,
-        "total_input_tokens": 1_000,
-        "total_output_tokens": 200,
-        "total_cached_tokens": 500,
+        "input_tokens": 1_000,
+        "cached_tokens": 500,
+        "uncached_input_tokens": 500,
+        "output_tokens": 200,
         "llm_calls": 5,
         "estimated_usd": 0.42,
-        "cost_per_1m_tokens": 247.06,
         "model_split": [
             {
                 "model": "gpt-4o",
                 "input_tokens": 1_000,
-                "split_ratio": 1.0,
+                "cached_tokens": 500,
+                "output_tokens": 200,
                 "estimated_usd": 0.42,
-                "cost_per_1m_input_tokens": 0.42,
             }
         ],
     }
     text = core.render(summary, "table")
     assert "Cache ratio: 50%" in text
-    assert "Cost per 1M tokens: $247.06" in text
+    assert "Input tokens: 1,000 (incl. cache)" in text
+    assert "Uncached input: 500" in text
+    assert "Cost: $0.4200" in text
+    assert "Cost per 1M" not in text
     assert "Model split:" in text
 
 
@@ -739,20 +743,18 @@ def test_render_summary_unavailable_evidence_shows_na():
         "session_id": "s1",
         "title": "Test",
         "cache_ratio": None,
-        "total_tokens": None,
-        "total_input_tokens": None,
-        "total_output_tokens": None,
-        "total_cached_tokens": None,
+        "input_tokens": None,
+        "cached_tokens": None,
+        "uncached_input_tokens": None,
+        "output_tokens": None,
         "llm_calls": None,
         "estimated_usd": None,
-        "cost_per_1m_tokens": None,
         "model_split": [],
     }
     text = core.render(summary, "table")
     assert "Cache ratio: n/a" in text
-    assert "Total tokens: n/a" in text
-    assert "Est. cost: n/a" in text
-    assert "Cost per 1M tokens: n/a" in text
+    assert "Input tokens: n/a" in text
+    assert "Cost: n/a" in text
 
 
 def test_render_summary_partial_model_split_shows_na_without_crash():
@@ -761,20 +763,19 @@ def test_render_summary_partial_model_split_shows_na_without_crash():
         "session_id": "s1",
         "title": "Test",
         "cache_ratio": None,
-        "total_tokens": None,
-        "total_input_tokens": None,
-        "total_output_tokens": None,
-        "total_cached_tokens": None,
+        "input_tokens": None,
+        "cached_tokens": None,
+        "uncached_input_tokens": None,
+        "output_tokens": None,
         "llm_calls": 2,
         "estimated_usd": None,
-        "cost_per_1m_tokens": None,
         "model_split": [
             {
                 "model": "gpt-partial",
                 "input_tokens": None,
-                "split_ratio": 0.0,
+                "cached_tokens": None,
+                "output_tokens": None,
                 "estimated_usd": None,
-                "cost_per_1m_input_tokens": 0.0,
             }
         ],
     }
@@ -787,28 +788,28 @@ def test_render_summary_partial_model_split_shows_na_without_crash():
 def test_render_aggregate():
     aggregate = {
         "session_count": 2,
-        "total_tokens": 3_400,
-        "total_input_tokens": 2_000,
-        "total_output_tokens": 400,
-        "total_cached_tokens": 1_000,
-        "total_llm_calls": 10,
-        "total_estimated_usd": 0.84,
-        "avg_cache_ratio": 0.5,
-        "cost_per_1m_tokens": 247.06,
-        "total_duration_seconds": 1_200,
+        "input_tokens": 2_000,
+        "cached_tokens": 1_000,
+        "uncached_input_tokens": 1_000,
+        "output_tokens": 400,
+        "llm_calls": 10,
+        "estimated_usd": 0.84,
+        "cost_source": "billed",
+        "cache_ratio": 0.5,
         "model_split": [
             {
                 "model": "gpt-4o",
                 "input_tokens": 2_000,
-                "split_ratio": 1.0,
+                "cached_tokens": 1_000,
+                "output_tokens": 400,
                 "estimated_usd": 0.84,
-                "cost_per_1m_input_tokens": 0.42,
             }
         ],
     }
     text = core.render(aggregate, "table")
     assert "Aggregate across 2 sessions" in text
-    assert "Cost per 1M tokens: $247.06" in text
+    assert "Cost: $0.8400 (billed)" in text
+    assert "Cached tokens: 1,000 (50% of input)" in text
     assert "Model split:" in text
 
 
@@ -844,7 +845,7 @@ def test_render_costed_list():
     assert "Second" in text
     assert "TOTAL" in text
     assert "Models" in text
-    assert "Tokens" in text
+    assert "Input" in text
 
 
 def test_render_costed_list_empty():
@@ -885,7 +886,7 @@ def test_render_costed_list_unavailable_session_shows_na_row():
     unavailable_line = next(line for line in lines if "Unavailable" in line)
     assert "n/a" in unavailable_line
     total_line = next(line for line in lines if line.startswith("TOTAL"))
-    assert "1,150" in total_line  # only the available session's tokens counted (1000+100+50)
+    assert "1,000" in total_line  # only the available session's input counted
 
 
 def test_emit_costed_list_to_file(tmp_path):

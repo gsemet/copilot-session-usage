@@ -10,6 +10,8 @@ callers must ask for it explicitly.
 
 from __future__ import annotations
 
+import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 from copilot_session_usage._internal import copilot_cli, core, vscode
@@ -34,27 +36,38 @@ def _default_roots(agent: str) -> list[Path]:
     return vscode.default_workspace_storage_roots()
 
 
-def _resolve_auto_refresh(agent: str, auto_refresh: bool | None) -> bool:
-    """Resolve the effective ``auto_refresh`` default from ``agent``.
+def _resolve_auto_refresh(agent: str, auto_refresh: bool | None) -> bool:  # noqa: ARG001
+    """Resolve the effective ``auto_refresh`` value.
 
-    An explicit ``auto_refresh`` always wins. Otherwise, the ``vscode``
-    provider keeps its historical default of attempting a daily runtime
-    pricing refresh; the ``cli`` provider and the combined ``all`` mode
-    default to local-only (no network) since Copilot CLI/App analysis is
-    documented as a purely local integration.
+    Analysis is offline by default for every provider: pricing comes from the
+    bundled table (plus any runtime cache already on disk). Only an explicit
+    ``auto_refresh=True`` attempts the daily network refresh.
     """
-    if auto_refresh is not None:
-        return auto_refresh
-    return agent == "vscode"
+    return bool(auto_refresh)
 
 
-def _analyze_provider_session(session: dict, pricing: dict) -> dict:
-    """Analyze a session-metadata record produced by either provider's discovery."""
+def _analyze_provider_session(
+    session: dict,
+    pricing: dict,
+    since_ms: int | None = None,
+    until_ms: int | None = None,
+) -> dict | None:
+    """Analyze a session-metadata record produced by either provider's discovery.
+
+    When a call window is given, returns ``None`` for a session with no
+    in-window calls (it is not part of that window's report).
+    """
     session_dir = Path(session["debug_log_dir"])
     if session.get("provider") == "cli":
-        result = copilot_cli.analyze_cli_session(session_dir, pricing)
+        result = copilot_cli.analyze_cli_session(
+            session_dir, pricing, since_ms=since_ms, until_ms=until_ms
+        )
     else:
-        result = core.analyze_session(session_dir, pricing)
+        result = core.analyze_session(session_dir, pricing, since_ms=since_ms, until_ms=until_ms)
+    if (since_ms is not None or until_ms is not None) and not (
+        result.get("total", {}).get("llm_calls")
+    ):
+        return None
     result["title"] = session.get("title") or result.get("title")
     return result
 
@@ -66,6 +79,7 @@ def _list_recent(
     since_ms: int | None,
     workspace_filter: str | None,
     require_logs: bool = False,
+    active_since_ms: int | None = None,
 ) -> list[dict]:
     """Dispatch ``list_recent_sessions`` to one or both providers and merge results."""
     if agent == "all":
@@ -81,6 +95,7 @@ def _list_recent(
             since_ms=since_ms,
             workspace_filter=workspace_filter,
             require_logs=require_logs,
+            active_since_ms=active_since_ms,
         )
         for s in vscode_sessions:
             s.setdefault("provider", "vscode")
@@ -90,6 +105,7 @@ def _list_recent(
             since_ms=since_ms,
             workspace_filter=workspace_filter,
             require_logs=require_logs,
+            active_since_ms=active_since_ms,
         )
         merged = core.merge_provider_sessions([vscode_sessions, cli_sessions])
         return merged[:limit]
@@ -102,6 +118,7 @@ def _list_recent(
             since_ms=since_ms,
             workspace_filter=workspace_filter,
             require_logs=require_logs,
+            active_since_ms=active_since_ms,
         )
         for s in sessions:
             s.setdefault("provider", "cli")
@@ -113,6 +130,7 @@ def _list_recent(
         since_ms=since_ms,
         workspace_filter=workspace_filter,
         require_logs=require_logs,
+        active_since_ms=active_since_ms,
     )
     for s in sessions:
         s.setdefault("provider", "vscode")
@@ -125,6 +143,8 @@ def analyze_session(
     agent: str = "vscode",
     *,
     auto_refresh: bool | None = None,
+    since: str | None = None,
+    until: str | None = None,
 ) -> dict:
     """Analyze one session by its session path.
 
@@ -136,8 +156,9 @@ def analyze_session(
         agent: Provider to use, ``vscode`` (default) or ``cli``. ``all`` is
             not applicable here since a path is inherently provider-specific.
         auto_refresh: Attempt the daily runtime pricing refresh before loading
-            pricing. Defaults to True for ``vscode`` (historical behavior)
-            and False (local-only) for ``cli``, unless explicitly set.
+            pricing. Off by default: analysis never touches the network.
+        since: Only count calls at or after this instant (ISO 8601).
+        until: Only count calls at or before this instant (ISO 8601).
 
     Returns:
         Session analysis dict shaped to the requested detail level.
@@ -147,11 +168,109 @@ def analyze_session(
     """
     _check_agent(agent, allow_all=False)
     pricing = core.load_pricing(auto_refresh=_resolve_auto_refresh(agent, auto_refresh))
+    since_ms = core.parse_since_to_ms(since) if since else None
+    until_ms = core.parse_since_to_ms(until) if until else None
     if agent == "cli":
-        result = copilot_cli.analyze_cli_session(Path(path), pricing)
+        result = copilot_cli.analyze_cli_session(
+            Path(path), pricing, since_ms=since_ms, until_ms=until_ms
+        )
     else:
-        result = core.analyze_session(Path(path), pricing)
+        result = core.analyze_session(Path(path), pricing, since_ms=since_ms, until_ms=until_ms)
     return core.shape_session(result, detail)
+
+
+def list_calls(
+    path: Path | None = None,
+    agent: str = "vscode",
+    *,
+    workspace_roots: list[Path] | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    name_pattern: str | None = None,
+    workspace_filter: str | None = None,
+    limit: int = 10_000,
+    auto_refresh: bool | None = None,
+) -> list[dict]:
+    """Return every priced LLM call as a flat list of dicts (the ``calls`` command).
+
+    Each dict has ``session_id``, ``provider``, ``ts``/``ts_ms``, ``model``,
+    ``input_tokens`` (includes cache), ``cached_tokens``, ``cache_write_tokens``,
+    ``uncached_input_tokens``, ``output_tokens``, ``llm_calls``, ``nano_aiu``,
+    ``estimated_usd``, ``cost_source`` (``billed``/``estimated``), ``agent``,
+    ``agent_id``, ``initiator``, ``kind`` (``request``/``compaction``) and
+    ``skill``. Every aggregate this tool reports is a sum of these records.
+
+    Args:
+        path: One session path to export; when omitted, sessions are discovered.
+        agent: ``vscode`` (default), ``cli`` or (discovery only) ``all``.
+        workspace_roots: Override discovery roots (not with ``agent="all"``).
+        since: Only calls at or after this instant (ISO 8601).
+        until: Only calls at or before this instant (ISO 8601).
+        name_pattern: Only sessions whose title or ID matches this regex.
+        workspace_filter: Only sessions from this workspace folder.
+        limit: Maximum sessions to read when discovering.
+        auto_refresh: Opt in to the daily pricing refresh.
+
+    Returns:
+        Calls sorted by ``(ts_ms, session_id)``.
+    """
+    _check_agent(agent, allow_all=path is None)
+    pricing = core.load_pricing(auto_refresh=_resolve_auto_refresh(agent, auto_refresh))
+    since_ms = core.parse_since_to_ms(since) if since else None
+    until_ms = core.parse_since_to_ms(until) if until else None
+
+    if path is not None:
+        sessions = [
+            {
+                "debug_log_dir": str(path),
+                "provider": agent,
+                "session_id": Path(path).name,
+            }
+        ]
+    else:
+        sessions = _list_recent(
+            agent,
+            workspace_roots,
+            limit,
+            None,
+            workspace_filter,
+            require_logs=True,
+            active_since_ms=since_ms,
+        )
+        if until_ms is not None:
+            sessions = [s for s in sessions if int(s.get("created_ms") or 0) <= until_ms]
+        if name_pattern:
+            sessions = core.filter_sessions_by_name(sessions, name_pattern)
+
+    exported: list[dict] = []
+    for session in sessions:
+        session_dir = Path(session["debug_log_dir"])
+        if not session_dir.exists():
+            continue
+        if session.get("provider") == "cli":
+            canonical_id, calls = copilot_cli.collect_cli_calls_with_id(session_dir)
+            session_id = canonical_id
+        else:
+            calls = core.collect_vscode_session_calls(
+                session_dir, core.build_skill_timeline(session_dir)
+            )["calls"]
+            session_id = session.get("session_id") or session_dir.name
+        calls = core.filter_calls_by_window(calls, since_ms, until_ms)
+        exported.extend(
+            core.session_calls_for_export(
+                calls,
+                pricing,
+                session_id=session_id,
+                provider=session.get("provider") or agent,
+            )
+        )
+    exported.sort(key=lambda c: (c["ts_ms"] is None, c["ts_ms"] or 0, c["session_id"] or ""))
+    return exported
+
+
+def iter_calls(*args: object, **kwargs: object) -> Iterator[dict]:
+    """Iterate over :func:`list_calls` results (same arguments)."""
+    yield from list_calls(*args, **kwargs)  # type: ignore[arg-type]
 
 
 def list_sessions(
@@ -171,8 +290,8 @@ def list_sessions(
             ``cli``). Auto-detected if None. Not supported with
             ``agent="all"`` — omit it or call per provider instead.
         limit: Maximum sessions to return.
-        since: Only sessions created after this date (ISO 8601 with timezone).
-        until: Only sessions created before this date (ISO 8601 with timezone).
+        since: Only sessions with a call at or after this instant (ISO 8601 with timezone).
+        until: Only sessions with a call at or before this instant (ISO 8601 with timezone).
         name_pattern: Only sessions whose title or ID matches this regex.
         workspace_filter: Only sessions from this workspace folder.
         agent: Provider to use: ``vscode`` (default), ``cli``, or the
@@ -183,14 +302,29 @@ def list_sessions(
     """
     _check_agent(agent)
     since_ms = core.parse_since_to_ms(since) if since else None
-    sessions = _list_recent(agent, workspace_roots, limit, since_ms, workspace_filter)
-    if until:
-        until_ms = core.parse_since_to_ms(until)
-        if until_ms is not None:
-            sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
+    until_ms = core.parse_since_to_ms(until) if until else None
+    windowed = since_ms is not None or until_ms is not None
+    sessions = _list_recent(
+        agent,
+        workspace_roots,
+        sys.maxsize if windowed else limit,
+        None,
+        workspace_filter,
+        active_since_ms=since_ms,
+    )
+    if until_ms is not None:
+        sessions = [s for s in sessions if int(s.get("created_ms") or 0) <= until_ms]
     if name_pattern:
         sessions = core.filter_sessions_by_name(sessions, name_pattern)
-    return sessions
+    if windowed:
+        matched: list[dict] = []
+        for session in sessions:
+            if len(matched) >= limit:
+                break
+            if core.session_has_calls_in_window(session, since_ms, until_ms):
+                matched.append(session)
+        sessions = matched
+    return sessions[:limit]
 
 
 def find_sessions_by_title(
@@ -252,8 +386,7 @@ def find_session_by_id(
         agent: Provider to use: ``vscode`` (default), ``cli``, or ``all``
             (searches ``vscode`` first, then ``cli``).
         auto_refresh: Attempt the daily runtime pricing refresh before loading
-            pricing. Defaults to True for ``vscode`` (historical behavior)
-            and             False (local-only) for ``cli``/``all``, unless explicitly set.
+            pricing. Off by default: analysis never touches the network.
 
     Returns:
         Session analysis dict, or None if not found.
@@ -313,8 +446,7 @@ def analyze_latest(
         agent: Provider to use: ``vscode`` (default), ``cli``, or ``all``
             (picks whichever provider's latest session is most recent).
         auto_refresh: Attempt the daily runtime pricing refresh before loading
-            pricing. Defaults to True for ``vscode`` (historical behavior)
-            and False (local-only) for ``cli``/``all``, unless explicitly set.
+            pricing. Off by default: analysis never touches the network.
 
     Returns:
         Session analysis dict shaped to the requested detail level.
@@ -373,6 +505,7 @@ def batch_analyze(
     agent: str = "vscode",
     *,
     auto_refresh: bool | None = None,
+    until: str | None = None,
 ) -> dict:
     """Analyze the N most recent sessions.
 
@@ -381,34 +514,47 @@ def batch_analyze(
         workspace_roots: Override discovery roots. Not supported with
             ``agent="all"``.
         detail: ``minimal``, ``compact`` (default), or ``full``.
-        since: Only sessions created after this date.
+        since: Only count calls at or after this instant (ISO 8601). Sessions
+            with no call in the window are omitted.
         workspace_filter: Only sessions from this workspace folder.
         agent: Provider to use: ``vscode`` (default), ``cli``, or the
             explicit opt-in combined mode ``all``.
         auto_refresh: Attempt the daily runtime pricing refresh before loading
-            pricing. Defaults to True for ``vscode`` (historical behavior)
-            and False (local-only) for ``cli``/``all``, unless explicitly set.
+            pricing. Off by default: analysis never touches the network.
+        until: Only count calls at or before this instant (ISO 8601).
 
     Returns:
-        Dict with ``summary`` (aggregate) and ``sessions`` (per-session list).
+        Dict with ``schema_version``, ``summary`` (aggregate) and ``sessions``
+        (per-session list).
     """
     _check_agent(agent)
     since_ms = core.parse_since_to_ms(since) if since else None
+    until_ms = core.parse_since_to_ms(until) if until else None
     sessions = _list_recent(
-        agent, workspace_roots, n, since_ms, workspace_filter, require_logs=True
+        agent,
+        workspace_roots,
+        n,
+        None,
+        workspace_filter,
+        require_logs=True,
+        active_since_ms=since_ms,
     )
+    if until_ms is not None:
+        sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
     pricing = core.load_pricing(auto_refresh=_resolve_auto_refresh(agent, auto_refresh))
     results: list[dict] = []
     for session in sessions:
         session_dir = Path(session["debug_log_dir"])
         if not session_dir.exists():
             continue
-        results.append(_analyze_provider_session(session, pricing))
+        result = _analyze_provider_session(session, pricing, since_ms, until_ms)
+        if result is not None:
+            results.append(result)
     return core.shape_batch(results, detail)
 
 
 def aggregate_sessions(results: list[dict]) -> dict:
-    """Aggregate multiple session analyses into a single efficiency summary.
+    """Aggregate multiple session analyses into a single flat summary.
 
     Args:
         results: Full session analysis dicts (e.g. from ``analyze_session``).
@@ -417,13 +563,17 @@ def aggregate_sessions(results: list[dict]) -> dict:
             them (e.g. via ``agent="all"``).
 
     Returns:
-        Dict with session count, totals, average cache ratio, model split,
-        and cost per 1M tokens.
+        Dict with ``session_count``; token fields (``input_tokens`` includes
+        cache reads and writes, ``cached_tokens``, ``cache_write_tokens``,
+        ``uncached_input_tokens``, ``output_tokens``); ``llm_calls``;
+        ``estimated_usd`` and ``cost_source``; a weighted ``cache_ratio``;
+        ``compaction``; ``reconciliation``; and ``model_split`` whose USD
+        always sums to ``estimated_usd``.
     """
     return core.aggregate_sessions(results)
 
 
-def load_pricing(ref_dir: Path | None = None, *, auto_refresh: bool = True) -> dict:
+def load_pricing(ref_dir: Path | None = None, *, auto_refresh: bool = False) -> dict:
     """Load pricing data.
 
     Args:

@@ -4,6 +4,53 @@
 debug logs (`--agent vscode`, the default) or local Copilot CLI/Copilot App
 session logs (`--agent cli`). This page explains each step for both.
 
+Both providers feed **one per-call pipeline**: each provider turns its logs
+into a list of normalized call records (one per billed LLM call), and every
+total, model row, subagent row, skill row and initiator row is a sum of those
+records. The records are exported as-is by the `calls` command (JSONL) and
+`list_calls`/`iter_calls` in the Python API. JSON reports (`span`, `batch`,
+single-session analysis) carry `"schema_version": 2`.
+
+(dont-recompute-costs)=
+## Don't recompute costs yourself
+
+The tool is the reference calculation. Scripts that re-derive costs from token
+counts usually get one of these wrong, so use `span`, `calls` and the
+`reconciliation` block instead:
+
+- **`input_tokens` already includes cache reads *and* cache writes.**
+  `cached_tokens` (cache read) and `cache_write_tokens` are subsets of it.
+  `uncached_input_tokens = input_tokens − cached_tokens − cache_write_tokens`.
+  Adding `cached_tokens` to `input_tokens` double-counts, which is why the old
+  `total_tokens` field was removed.
+- **Cache writes are billed at a premium** over the base input rate, and cache
+  reads at a discount. A single "input" and "cached" rate misprices Anthropic
+  and GPT-5.6+ models.
+- **VS Code does not log a cache-write count.** `cache_write_tokens` is `null`
+  there, and `uncached_input_tokens` is `input_tokens − cached_tokens`.
+- **CLI compactions are separate events** (`session.compaction_complete`), not
+  `session.usage_record` entries. They are real billed calls and are included
+  as records with `kind: "compaction"`; `total.compaction` reports their
+  `calls` and `estimated_usd`.
+- **CLI shutdown/checkpoint snapshots are incomplete.** They can omit
+  compactions and anything after the last shutdown. They are used only for the
+  `snapshot_usd`/`snapshot_delta_usd` reconciliation diagnostic, never for
+  totals.
+- **Utility models are free** on the VS Code path (GPT-4o, GPT-4.1, GPT-5.4
+  nano) and are excluded from every total.
+- **The long-context tier is chosen per call** from that call's own input
+  size, never from a session or average size.
+- Billed nanoAIU is used whenever the log has it (`cost_source: "billed"`); the
+  price table is only a fallback (`"estimated"`). A `mixed` source means both
+  occurred.
+
+Every session, batch summary and span carries a `reconciliation` block:
+`billed_usd` (sum of billed nanoAIU), `estimated_from_tokens_usd` (the price
+table applied to the same calls, cache-write aware), `delta_pct`, and
+`calls_without_billing`. For CLI it also has `snapshot_usd` and
+`snapshot_delta_usd`. A small `delta_pct` shows the token formula is sound; the
+billed figure remains the one reported as `estimated_usd`.
+
 ---
 
 ## Where the logs live
@@ -58,6 +105,22 @@ token-count events emitted by the Copilot extension for each LLM call:
 A single session may call multiple models (e.g., Claude Sonnet for the main
 request and Claude Haiku for a subagent). Each request is priced separately,
 then its tokens and cost are aggregated by model, subagent, and active skill.
+Requests that failed (`attrs.error`) carry no token fields and are not counted
+as LLM calls. Requests whose debug name starts with
+`summarizeConversationHistory` are flagged `kind: "compaction"`.
+
+Every token field is explicit: `input_tokens` (includes cache), `cached_tokens`,
+`cache_write_tokens` (`null` for VS Code), `uncached_input_tokens`,
+`output_tokens`, plus `llm_calls`, `estimated_usd` and `cost_source`.
+Per-session `cache_ratio` is token-weighted (`cached / input`).
+
+### Time windows
+
+`--since`, `--until` and `--last` select **calls by their own timestamp**, not
+sessions by creation date. A session is included when at least one of its calls
+falls in the window, and its totals then reflect only the in-window calls;
+sessions with no in-window call are dropped. Discovery may skip files not
+modified since `--since` because they cannot hold later calls.
 
 ### Utility models
 
@@ -104,7 +167,8 @@ cost_usd = (
 plus the cache-write premium approximation when the rate card defines one,
 including Anthropic and GPT-5.6 and later models. Fallback tiers are selected
 from each request's input tokens, not a model's accumulated session tokens.
-Billed and estimated requests can coexist without either being dropped.
+Billed and estimated requests can coexist without either being dropped
+(`cost_source` is then `mixed`).
 
 On 2026-10-07, an audit of 34 fully billed local sessions matched the sum of
 VS Code's billed nano-credit telemetry at the output's four-decimal USD precision.
@@ -159,8 +223,10 @@ do not independently assign request usage to them. Automatically loaded or read
 skills and overlapping skill use cannot be separated. Unrelated work after a
 skill invocation can remain attributed to that skill, while requests before any
 invocation belong to `unknown`. Exact billed request costs do not make the skill
-assignment causal or exact. CLI/App cumulative usage does not provide a validated
-per-skill token or cost split; those breakdowns remain unavailable.
+assignment causal or exact. CLI/App calls are attributed to the active skill of
+their own agent (`skill.invoked` events are per `agentId`) at the call timestamp,
+so the CLI provider also has a costed `skills.breakdown`, with the same
+limitations.
 
 ---
 
@@ -213,16 +279,24 @@ Each line is one JSON event with a `type`, a `data` payload, and a
 - `skill.invoked` — skill name and invocation time, used to attribute
   subsequent tool calls to the active skill.
 - `tool.execution_start` / `tool.execution_complete` — per-tool-call counts.
-- `session.shutdown` — the authoritative, cumulative usage summary for the
-  whole session: per-model `usage` (input/output/cache-read/cache-write/
-  reasoning tokens), per-model `totalNanoAiu`, and `totalApiDurationMs`.
-- `session.usage_checkpoint` — a lighter-weight, periodic cumulative counter
-  (`totalNanoAiu`, `totalPremiumRequests`, and the models currently in use)
-  used only as a fallback when no `session.shutdown` event exists yet.
+- `session.usage_record` — **one per LLM call**: model, `inputTokens` (includes
+  cache reads and writes), `cacheReadTokens`, `cacheWriteTokens`,
+  `outputTokens`, `initiator` (`user`/`agent`/`sub-agent`), `agentId` (null for
+  the main agent), `copilotUsage.totalNanoAiu` (billed cost) and
+  `accounting.usageId`, which is used to de-duplicate records.
+- `session.compaction_complete` — a compaction LLM call that is **not** in
+  `session.usage_record`: `compactionTokensUsed` (tokens and nanoAIU) with the
+  model in `behaviorModelId`. Included as `kind: "compaction"`.
+- `session.shutdown` / `session.usage_checkpoint` — cumulative accounting
+  snapshots. They are incomplete (compactions can be omitted, and the tail of a
+  session after the last shutdown is missing), so they are used **only** for the
+  reconciliation diagnostic, never for totals.
 
-Only the **last** `session.shutdown` event is used: Copilot CLI reports it as
-a running total for the whole session, including across resumes, so earlier
-occurrences would double-count.
+Records are authoritative. A diagnostic is added when the last snapshot total
+exceeds the records total by more than $0.005 (`reconciliation.snapshot_usd`,
+`snapshot_delta_usd`). Because totals come from records, a session that never
+shut down (active or interrupted), or whose records continue after the last
+shutdown, is fully analyzed.
 
 Event types this parser does not recognize, and schema versions other than
 the currently validated one, are skipped rather than treated as fatal — the
@@ -232,25 +306,24 @@ added to `diagnostics` explaining what was skipped.
 ### Cost calculation
 
 Copilot CLI's billed figures are used first, mirroring the VS Code
-provider's use of `copilotUsageNanoAiu` (1 nanoAIU = 1e-11 USD):
+provider's use of `copilotUsageNanoAiu` (1 nanoAIU = 1e-11 USD). Each call is
+costed on its own:
 
-- `total.estimated_usd` is the session-level `totalNanoAiu`, which is
-  cumulative across resumes (the largest value from the last
-  `session.shutdown` or `session.usage_checkpoint`).
-- Each `model_breakdown` row uses that model's `totalNanoAiu`. Without it, the
-  model's tokens are priced using the reported cache-write count:
-  `inputTokens` includes cache reads and cache writes, so fresh input is
-  `inputTokens - cacheReadTokens - cacheWriteTokens`, and only
-  `cacheWriteTokens` are charged at the cache-write rate. The pricing tier is
-  chosen from the average request size, not the session sum. This fallback
-  remains an estimate because individual request sizes and discounts are absent.
-- `subagents` lists the main agent and each subagent from
-  `session.shutdown.agentMetrics`, with their own billed `totalNanoAiu`.
-- Per-model and per-agent metrics can omit segments that ended without a
-  `session.shutdown` (a crash or kill before a resume). A positive remainder
-  between session billing and attributed model costs is reported as
-  `total.unattributed_usd`, with a diagnostic. Displayed totals and breakdowns
-  are rounded to different precisions.
+- A call with `copilotUsage.totalNanoAiu` is **billed** (`cost_source:
+  "billed"`); otherwise it is priced from the table (`"estimated"`), using the
+  reported cache-write count: `inputTokens` includes cache reads and cache
+  writes, so fresh input is `inputTokens - cacheReadTokens - cacheWriteTokens`,
+  and only `cacheWriteTokens` are charged at the cache-write rate. The pricing
+  tier is chosen from that call's own input size.
+- `total.estimated_usd` is the sum of all call costs (requests and
+  compactions); `model_breakdown` row USD sums exactly to it.
+- `subagents` rows are built from the calls' `agentId` (name from
+  `subagent.started`; `main` for a null `agentId`): name, model, tokens,
+  `llm_calls`, `estimated_usd`.
+- `initiator_breakdown` groups calls by initiator (`user`, `agent`,
+  `sub-agent`, `compaction`).
+- `reconciliation` compares billed USD with the price table applied to the same
+  calls, and the last cumulative snapshot with the records total.
 
 A local investigation on 2026-10-07 found that billed totals and breakdowns
 reconciled across 101 CLI/App sessions. Pricing tokens with the reported
@@ -260,19 +333,18 @@ sessions; see the [recorded finding](https://github.com/gsemet/copilot-session-u
 
 ### When usage is unavailable
 
-A session that is still active, or that was interrupted before shutting down,
-has no `session.shutdown` event. In that case:
+If a session has neither `session.usage_record` events nor compaction usage,
+its totals are unavailable:
 
-- Per-model token totals, the model breakdown, and skill cost breakdown are
-  unavailable — they are represented as `null`/missing, **never** as a
-  fabricated zero.
-- If a `session.usage_checkpoint` exists, its cumulative `totalNanoAiu`
-  provides `total.estimated_usd`, entirely reported as `unattributed_usd`.
-  Token totals and cache ratio remain unavailable.
-- `diagnostics` explains exactly what is unavailable and why.
-- Batch/aggregate operations exclude sessions with unavailable evidence from
-  their sums (rather than counting them as zero) and report how many were
-  excluded via `sessions_with_unavailable_cost`.
+- Token totals, the model breakdown and the skill cost breakdown are
+  `null`/missing, **never** a fabricated zero.
+- `diagnostics` explains what is unavailable and why.
+- Batch/aggregate operations exclude such sessions from their sums (rather
+  than counting them as zero) and report how many were excluded via
+  `sessions_with_unavailable_cost`.
+
+A session that is merely active or interrupted (no `session.shutdown`) is **not**
+unavailable: its records are summed like any other.
 
 ### Skill and tool attribution
 
@@ -281,12 +353,11 @@ Tool calls are attributed to the most recently invoked skill at that
 timestamp, the same way the VS Code provider attributes LLM calls. Attribution
 is scoped per `agentId` (see "Subagent attribution" below), so a subagent's
 skill invocations never bleed into the main session's tool attribution, or
-vice versa, when their events interleave in the log. Per-skill **cost**
-attribution is not available for this provider: `events.jsonl` only exposes
-cumulative session-level token totals, not per-request ones, so
-`skills.breakdown` is empty and `--skill-breakdown` reports no per-skill cost
-for `cli` sessions even though `skills.detected` and `--tool-breakdown` are
-populated.
+vice versa, when their events interleave in the log. Per-skill **cost** is
+attributed per call: each record carries the active skill of its own agent at
+the call timestamp, so `skills.breakdown` and `--skill-breakdown` report tokens
+and USD for `cli` sessions too (calls before any invocation belong to
+`unknown`).
 
 ### Subagent attribution
 
@@ -301,21 +372,20 @@ to:
 - attribute `--tool-breakdown` rows to the subagent's display name (falling
   back to the raw `agentId` if its `subagent.started` event wasn't captured),
   instead of collapsing every tool call into `main`;
-- populate `provider_usage.subagents`: one row per observed `agentId` with
-  its name, model, total tool-call count, a combined `total_tokens_reported`,
-  and duration — all evidence taken directly from `subagent.started`/
-  `subagent.completed`.
+- name the `subagents` cost rows (each call's `agentId` is mapped to the
+  display name from `subagent.started`).
 
-The shared, per-subagent `subagents` block is built from
-`session.shutdown.agentMetrics`: one row for `main` and one per subagent,
-with per-model tokens (including `cache_write_tokens`) and the agent's billed
-`totalNanoAiu`. CLI versions that do not emit `agentMetrics` leave it empty.
+The `subagents` block has one row for `main` and one per subagent, each with
+the explicit token fields, `llm_calls`, `estimated_usd` and `cost_source`,
+all summed from that agent's calls.
 
 ### Provider-native counters
 
-`provider_usage` carries Copilot CLI's own counters — `total_nano_aiu`,
-`total_premium_requests`, `shutdown_type`, `resume_count`, and `code_changes`.
-`total_nano_aiu` is the same cumulative figure used for `total.estimated_usd`.
+`provider_usage` carries `total_premium_requests` (the sum of
+`session.usage_record` premium-request multipliers), `total_nano_aiu`,
+`shutdown_type`, `resume_count`, and `code_changes`. These are informational;
+they are never used for the cost totals and there is no
+`provider_usage.subagents` block.
 
 ---
 
@@ -347,6 +417,9 @@ output.
 ### Pricing table updates
 
 The bundled pricing table (`data/models-and-pricing.yml`) is updated with each
-release. Run `just refresh-pricing` to pull the latest rates. Stale rates only
-affect the token-based fallback path; `copilotUsageNanoAiu`-based costs are
-unaffected by the table.
+release. The table is a **fallback only**: it is never consulted for a call that
+has billed nanoAIU. Analysis commands load pricing offline (user cache if
+present, else the bundled table) and never touch the network; run
+`copilot-session-usage pricing refresh` (or `just refresh-pricing`) to pull the
+latest rates. Stale rates only affect the token-based fallback path and the
+`reconciliation.estimated_from_tokens_usd` check; billed costs are unaffected.

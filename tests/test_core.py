@@ -64,7 +64,7 @@ def test_billed_cost_is_preserved_in_every_breakdown(tmp_path):
         "\n".join(json.dumps(event) for event in events), encoding="utf-8"
     )
     result = core.analyze_session(tmp_path, PRICING)
-    assert result["total"]["estimated_usd"] == pytest.approx(0.1235)
+    assert result["total"]["estimated_usd"] == pytest.approx(0.12345)
     assert result["model_breakdown"][0]["estimated_usd"] == pytest.approx(0.12345)
     assert result["subagents"][0]["estimated_usd"] == pytest.approx(0.12345)
     assert result["skills"]["breakdown"][0]["estimated_usd"] == pytest.approx(0.12345)
@@ -144,7 +144,11 @@ def test_request_costs_reconcile_across_files_and_skills(tmp_path):
         {
             "type": "llm_request",
             "ts": 2,
-            "attrs": {"model": "claude-sonnet-4.6", "copilotUsageNanoAiu": 10_000_000_000},
+            "attrs": {
+                "model": "claude-sonnet-4.6",
+                "inputTokens": 1000,
+                "copilotUsageNanoAiu": 10_000_000_000,
+            },
         },
         {"type": "user_message", "ts": 3, "attrs": {"content": "/second"}},
     ]
@@ -157,7 +161,11 @@ def test_request_costs_reconcile_across_files_and_skills(tmp_path):
         {
             "type": "llm_request",
             "ts": 5,
-            "attrs": {"model": "gpt-5.6-sol", "copilotUsageNanoAiu": 20_000_000_000},
+            "attrs": {
+                "model": "gpt-5.6-sol",
+                "inputTokens": 1000,
+                "copilotUsageNanoAiu": 20_000_000_000,
+            },
         },
     ]
     for filename, events in [("main.jsonl", main), ("runSubagent-worker.jsonl", child)]:
@@ -486,50 +494,208 @@ def test_custom_model_not_flagged_as_fallback():
 # ─── Per-model cost helpers ───────────────────────────────────────────────────
 
 
-def test_estimate_cost_for_file_single_model():
-    per_model = {
-        "claude-sonnet-4.6": {"input": 1_000_000, "output": 0, "cached": 0},
-    }
-    cost = core.estimate_cost_for_file(per_model, PRICING)
-    assert abs(cost - 0.30) < 1e-9
+def _call(model, inp, out, cached=0, nano=None, write=None, **kw):
+    return core.make_call(
+        ts_ms=kw.pop("ts_ms", 1000),
+        model=model,
+        input_tokens=inp,
+        cached_tokens=cached,
+        output_tokens=out,
+        cache_write_tokens=write,
+        nano_aiu=nano,
+        **kw,
+    )
 
 
-def test_estimate_cost_for_file_multi_model():
-    per_model = {
-        "claude-sonnet-4.6": {"input": 1_887_586, "output": 47_184, "cached": 1_386_477},
-        "Kimi-K2.6-azure": {"input": 6_168, "output": 1_862, "cached": 0},
-    }
+def test_summarize_calls_single_model_cost():
+    summary = core.summarize_calls([_call("claude-sonnet-4.6", 1_000_000, 0)], PRICING)
+    assert abs(summary["total"]["estimated_usd"] - 0.30) < 1e-9
+    assert summary["total"]["cost_source"] == "estimated"
+
+
+def test_summarize_calls_multi_model_priced_per_model():
+    calls = [
+        _call("claude-sonnet-4.6", 1_887_586, 47_184, 1_386_477),
+        _call("Kimi-K2.6-azure", 6_168, 1_862),
+    ]
     pricing = {
         "models": {
-            "claude-sonnet-4.6": [
-                {"input_per_m": 0.30, "output_per_m": 1.50, "cache_per_m": 0.030, "tier": "Default"}
-            ],
+            **PRICING["models"],
             "Kimi-K2.6-azure": [
                 {"input_per_m": 0.15, "output_per_m": 0.60, "cache_per_m": 0.015, "tier": "Default"}
             ],
-            "default": [
-                {"input_per_m": 0.30, "output_per_m": 1.50, "cache_per_m": 0.030, "tier": "Default"}
-            ],
         }
     }
-    cost = core.estimate_cost_for_file(per_model, pricing)
+    summary = core.summarize_calls(calls, pricing)
     wrong_cost = core.estimate_cost(
         1_887_586 + 6_168, 47_184 + 1_862, 1_386_477, "Kimi-K2.6-azure", pricing
     )
-    assert cost > wrong_cost * 1.5, "Per-model pricing must be >1.5x the wrong single-model price"
-    assert abs(cost - 0.265) < 0.005
+    assert summary["total"]["estimated_usd"] > wrong_cost * 1.5
+    assert abs(summary["total"]["estimated_usd"] - 0.265) < 0.005
+    assert sum(r["estimated_usd"] for r in summary["model_breakdown"]) == pytest.approx(
+        summary["total"]["estimated_usd"]
+    )
 
 
 def test_dominant_model_by_input_tokens():
-    per_model = {
-        "claude-sonnet-4.6": {"input": 1_000_000, "output": 0, "cached": 0, "calls": 22},
-        "Kimi-K2.6-azure": {"input": 6_000, "output": 0, "cached": 0, "calls": 1},
-    }
-    assert core._dominant_model(per_model) == "claude-sonnet-4.6"
+    priced = core.price_calls(
+        [_call("claude-sonnet-4.6", 1_000_000, 0), _call("Kimi-K2.6-azure", 6_000, 0)], PRICING
+    )
+    assert core._dominant_model(priced) == "claude-sonnet-4.6"
 
 
 def test_dominant_model_empty():
-    assert core._dominant_model({}) == "unknown"
+    assert core._dominant_model([]) == "unknown"
+
+
+def test_dominant_model_ties_break_by_name():
+    priced = core.price_calls([_call("b-model", 10, 0), _call("a-model", 10, 0)], PRICING)
+    assert core._dominant_model(priced) == "a-model"
+
+
+def test_price_calls_billed_zero_is_billed_not_estimated():
+    priced = core.price_calls([_call("claude-sonnet-4.6", 1000, 10, nano=0)], PRICING)
+    assert priced[0]["usd"] == 0.0
+    assert priced[0]["cost_source"] == "billed"
+    assert priced[0]["token_estimate_usd"] > 0
+
+
+def test_summarize_calls_cost_source_billed_estimated_mixed():
+    billed = _call("claude-sonnet-4.6", 1000, 10, nano=5_000_000_000)
+    estimated = _call("claude-sonnet-4.6", 1000, 10)
+    other = _call("claude-haiku-4.6", 1000, 10)
+    assert core.summarize_calls([billed], PRICING)["total"]["cost_source"] == "billed"
+    assert core.summarize_calls([estimated], PRICING)["total"]["cost_source"] == "estimated"
+    mixed = core.summarize_calls([billed, estimated, other], PRICING)
+    assert mixed["total"]["cost_source"] == "mixed"
+    by_model = {r["model"]: r["cost_source"] for r in mixed["model_breakdown"]}
+    assert by_model == {"claude-sonnet-4.6": "mixed", "claude-haiku-4.6": "estimated"}
+
+
+def test_summarize_calls_reconciliation_block():
+    billed = _call("claude-sonnet-4.6", 1_000_000, 0, nano=3_000_000_000)  # $0.03
+    unbilled = _call("claude-sonnet-4.6", 1_000_000, 0)
+    rec = core.summarize_calls([billed, unbilled], PRICING)["reconciliation"]
+    assert rec["billed_usd"] == pytest.approx(0.03)
+    assert rec["estimated_from_tokens_usd"] == pytest.approx(0.30)
+    assert rec["delta_pct"] == pytest.approx(900.0)
+    assert rec["calls_without_billing"] == 1
+
+
+def test_summarize_calls_empty_is_zero_not_unavailable():
+    summary = core.summarize_calls([], PRICING)
+    assert summary["total"]["input_tokens"] == 0
+    assert summary["total"]["estimated_usd"] == 0
+    assert summary["total"]["cost_source"] is None
+    assert summary["reconciliation"]["delta_pct"] is None
+    assert summary["model_breakdown"] == []
+
+
+def test_summarize_calls_uncached_excludes_cache_read_and_write():
+    call = _call("claude-sonnet-4.6", 1000, 10, cached=300, write=200)
+    total = core.summarize_calls([call], PRICING)["total"]
+    assert total["input_tokens"] == 1000
+    assert total["cached_tokens"] == 300
+    assert total["cache_write_tokens"] == 200
+    assert total["uncached_input_tokens"] == 500
+    assert total["cache_ratio"] == 0.3
+
+
+def test_summarize_calls_cache_write_none_for_vscode_style_calls():
+    total = core.summarize_calls([_call("claude-sonnet-4.6", 1000, 10, cached=400)], PRICING)[
+        "total"
+    ]
+    assert total["cache_write_tokens"] is None
+    assert total["uncached_input_tokens"] == 600
+
+
+def test_summarize_calls_compaction_and_initiators():
+    calls = [
+        _call("claude-sonnet-4.6", 1000, 10, nano=1_000_000_000, initiator="user"),
+        _call(
+            "claude-sonnet-4.6",
+            2000,
+            20,
+            nano=2_000_000_000,
+            initiator="compaction",
+            kind="compaction",
+            llm_calls=3,
+        ),
+    ]
+    summary = core.summarize_calls(calls, PRICING)
+    assert summary["total"]["compaction"] == {"calls": 3, "estimated_usd": 0.02}
+    assert summary["total"]["llm_calls"] == 4
+    assert {r["initiator"]: r["llm_calls"] for r in summary["initiator_breakdown"]} == {
+        "user": 1,
+        "compaction": 3,
+    }
+
+
+def test_summarize_calls_per_model_usd_sums_to_total():
+    calls = [
+        _call("claude-sonnet-4.6", 1234, 56, nano=123_456_789),
+        _call("claude-sonnet-4.6", 4321, 65, nano=987_654_321),
+        _call("claude-haiku-4.6", 999, 9),
+        _call("gpt-5.6-sol", 5, 5, nano=1_111_111_111),
+    ]
+    summary = core.summarize_calls(calls, PRICING)
+    assert sum(r["estimated_usd"] for r in summary["model_breakdown"]) == pytest.approx(
+        summary["total"]["estimated_usd"], abs=1e-9
+    )
+
+
+def test_estimate_call_usd_tier_uses_call_own_input_size():
+    pricing = core.load_pricing(Path(core.__file__).parents[1] / "data")
+    small = _call("gpt-5.6-sol", 150_000, 1000, cached=100_000)
+    large = _call("gpt-5.6-sol", 300_000, 1000, cached=100_000)
+    expected_small = core.estimate_cost(150_000, 1000, 100_000, "gpt-5.6-sol", pricing)
+    expected_large = core.estimate_cost(300_000, 1000, 100_000, "gpt-5.6-sol", pricing)
+    assert core.estimate_call_usd(small, pricing) == pytest.approx(expected_small)
+    assert core.estimate_call_usd(large, pricing) == pytest.approx(expected_large)
+
+
+def test_filter_calls_by_window():
+    calls = [_call("m", 1, 1, ts_ms=t) for t in (100, 200, 300)] + [_call("m", 1, 1, ts_ms=None)]
+    assert core.filter_calls_by_window(calls) is calls
+    assert [c["ts_ms"] for c in core.filter_calls_by_window(calls, since_ms=200)] == [200, 300]
+    assert [c["ts_ms"] for c in core.filter_calls_by_window(calls, until_ms=200)] == [100, 200]
+    both = core.filter_calls_by_window(calls, since_ms=150, until_ms=250)
+    assert [c["ts_ms"] for c in both] == [200]
+
+
+def test_export_call_fields_and_deterministic_order():
+    calls = [
+        _call("claude-sonnet-4.6", 1000, 10, cached=100, nano=500_000_000, ts_ms=2000),
+        _call("claude-sonnet-4.6", 500, 5, ts_ms=1000, agent="worker", agent_id="a1"),
+    ]
+    rows = core.session_calls_for_export(calls, PRICING, session_id="sid", provider="vscode")
+    assert [r["ts_ms"] for r in rows] == [1000, 2000]
+    assert set(rows[0]) == {
+        "session_id",
+        "provider",
+        "ts_ms",
+        "ts",
+        "model",
+        "input_tokens",
+        "cached_tokens",
+        "cache_write_tokens",
+        "uncached_input_tokens",
+        "output_tokens",
+        "llm_calls",
+        "nano_aiu",
+        "estimated_usd",
+        "cost_source",
+        "agent",
+        "agent_id",
+        "initiator",
+        "kind",
+        "skill",
+    }
+    assert rows[1]["cost_source"] == "billed"
+    assert rows[1]["estimated_usd"] == 0.005
+    assert rows[1]["uncached_input_tokens"] == 900
+    assert rows[0]["agent"] == "worker"
+    assert rows[0]["cost_source"] == "estimated"
 
 
 # ─── JSONL parsing ────────────────────────────────────────────────────────────
@@ -554,7 +720,11 @@ def _make_non_llm_event(ts: int = 500) -> str:
     return json.dumps({"ts": ts, "type": "tool_call", "attrs": {}})
 
 
-def test_parse_jsonl_file_single_model(tmp_path):
+def _parse(path, **kw):
+    return core.parse_vscode_calls(path, agent=kw.pop("agent", None), agent_id=None, **kw)
+
+
+def test_parse_vscode_calls_single_model(tmp_path):
     f = tmp_path / "main.jsonl"
     f.write_text(
         _make_llm_event("claude-sonnet-4.6", 100, 50, 20, ts=1000)
@@ -563,18 +733,19 @@ def test_parse_jsonl_file_single_model(tmp_path):
         + "\n",
         encoding="utf-8",
     )
-    stats = core.parse_jsonl_file(f)
-    assert stats["llm_calls"] == 2
-    assert stats["input_tokens"] == 300
-    assert stats["output_tokens"] == 80
-    assert stats["cached_tokens"] == 20
-    assert stats["models"] == ["claude-sonnet-4.6"]
-    assert stats["per_model"]["claude-sonnet-4.6"]["calls"] == 2
-    assert stats["first_llm_ts"] == 1000
-    assert stats["last_llm_ts"] == 2000
+    parsed = _parse(f)
+    calls = parsed["calls"]
+    assert len(calls) == 2
+    assert sum(c["input"] for c in calls) == 300
+    assert sum(c["output"] for c in calls) == 80
+    assert sum(c["cached"] for c in calls) == 20
+    assert {c["model"] for c in calls} == {"claude-sonnet-4.6"}
+    assert all(c["cache_write"] is None and c["kind"] == "request" for c in calls)
+    assert parsed["first_ts"] == 1000
+    assert parsed["last_ts"] == 2000
 
 
-def test_parse_jsonl_file_multi_model(tmp_path):
+def test_parse_vscode_calls_multi_model(tmp_path):
     f = tmp_path / "main.jsonl"
     f.write_text(
         _make_llm_event("claude-sonnet-4.6", 1000, 50, ts=1000)
@@ -585,17 +756,14 @@ def test_parse_jsonl_file_multi_model(tmp_path):
         + "\n",
         encoding="utf-8",
     )
-    stats = core.parse_jsonl_file(f)
-    assert stats["llm_calls"] == 3
-    assert stats["input_tokens"] == 1850
-    assert set(stats["models"]) == {"claude-sonnet-4.6", "Kimi-K2.6-azure"}
-    assert stats["per_model"]["claude-sonnet-4.6"]["input"] == 1800
-    assert stats["per_model"]["Kimi-K2.6-azure"]["input"] == 50
-    assert stats["first_llm_ts"] == 1000
-    assert stats["last_llm_ts"] == 3000
+    calls = _parse(f)["calls"]
+    assert len(calls) == 3
+    assert sum(c["input"] for c in calls) == 1850
+    assert {c["model"] for c in calls} == {"claude-sonnet-4.6", "Kimi-K2.6-azure"}
+    assert sum(c["input"] for c in calls if c["model"] == "claude-sonnet-4.6") == 1800
 
 
-def test_parse_jsonl_file_excludes_utility_models(tmp_path):
+def test_parse_vscode_calls_excludes_utility_models(tmp_path):
     f = tmp_path / "main.jsonl"
     f.write_text(
         _make_llm_event("gpt-4o-mini-2024-07-18", 900, 90, ts=1000)
@@ -604,16 +772,13 @@ def test_parse_jsonl_file_excludes_utility_models(tmp_path):
         + "\n",
         encoding="utf-8",
     )
-    stats = core.parse_jsonl_file(f)
-
-    assert stats["llm_calls"] == 1
-    assert stats["input_tokens"] == 100
-    assert stats["output_tokens"] == 10
-    assert stats["models"] == ["claude-sonnet-4.6"]
-    assert "gpt-4o-mini-2024-07-18" not in stats["per_model"]
+    calls = _parse(f)["calls"]
+    assert [c["model"] for c in calls] == ["claude-sonnet-4.6"]
+    assert calls[0]["input"] == 100
+    assert calls[0]["output"] == 10
 
 
-def test_parse_jsonl_file_skips_non_llm_events(tmp_path):
+def test_parse_vscode_calls_skips_non_llm_events(tmp_path):
     f = tmp_path / "main.jsonl"
     f.write_text(
         _make_non_llm_event(ts=500)
@@ -622,28 +787,102 @@ def test_parse_jsonl_file_skips_non_llm_events(tmp_path):
         + "\n",
         encoding="utf-8",
     )
-    stats = core.parse_jsonl_file(f)
-    assert stats["llm_calls"] == 1
-    assert stats["first_ts"] == 500
-    assert stats["first_llm_ts"] == 1000
+    parsed = _parse(f)
+    assert len(parsed["calls"]) == 1
+    # Non-LLM events still widen the wall-clock span.
+    assert parsed["first_ts"] == 500
+    assert parsed["calls"][0]["ts_ms"] == 1000
 
 
-def test_parse_jsonl_file_empty(tmp_path):
+def test_parse_vscode_calls_empty(tmp_path):
     f = tmp_path / "empty.jsonl"
     f.write_text("", encoding="utf-8")
-    stats = core.parse_jsonl_file(f)
-    assert stats["llm_calls"] == 0
-    assert stats["per_model"] == {}
+    parsed = _parse(f)
+    assert parsed["calls"] == []
+    assert parsed["first_ts"] is None
 
 
-def test_parse_jsonl_file_bad_json_lines_skipped(tmp_path):
+def test_parse_vscode_calls_bad_json_lines_skipped(tmp_path):
     f = tmp_path / "main.jsonl"
     f.write_text(
         "NOT JSON\n" + _make_llm_event("claude-sonnet-4.6", 50, 10, ts=1000) + "\n" + "{broken\n",
         encoding="utf-8",
     )
-    stats = core.parse_jsonl_file(f)
-    assert stats["llm_calls"] == 1
+    assert len(_parse(f)["calls"]) == 1
+
+
+def test_parse_vscode_calls_error_request_without_tokens_not_counted(tmp_path):
+    """Regression (f): a failed llm_request has no token fields and is not a call."""
+    f = tmp_path / "main.jsonl"
+    failed = {
+        "ts": 1500,
+        "type": "llm_request",
+        "attrs": {"model": "claude-sonnet-4.6", "error": "rate limited"},
+    }
+    f.write_text(
+        _make_llm_event("claude-sonnet-4.6", 100, 10, ts=1000) + "\n" + json.dumps(failed) + "\n",
+        encoding="utf-8",
+    )
+    calls = _parse(f)["calls"]
+    assert len(calls) == 1
+    summary = core.summarize_calls(calls, PRICING)
+    assert summary["total"]["llm_calls"] == 1
+
+
+def test_parse_vscode_calls_error_request_with_tokens_not_counted(tmp_path):
+    f = tmp_path / "main.jsonl"
+    failed = {
+        "ts": 1500,
+        "type": "llm_request",
+        "attrs": {"model": "m", "error": "boom", "inputTokens": 99, "outputTokens": 9},
+    }
+    f.write_text(json.dumps(failed) + "\n", encoding="utf-8")
+    assert _parse(f)["calls"] == []
+
+
+def test_parse_vscode_calls_request_without_any_tokens_not_counted(tmp_path):
+    f = tmp_path / "main.jsonl"
+    f.write_text(
+        json.dumps({"ts": 1, "type": "llm_request", "attrs": {"model": "claude-sonnet-4.6"}})
+        + "\n",
+        encoding="utf-8",
+    )
+    assert _parse(f)["calls"] == []
+
+
+def test_parse_vscode_calls_nano_and_compaction_kind(tmp_path):
+    f = tmp_path / "main.jsonl"
+    events = [
+        {
+            "ts": 10,
+            "type": "llm_request",
+            "attrs": {
+                "model": "claude-sonnet-4.6",
+                "inputTokens": 10,
+                "outputTokens": 1,
+                "copilotUsageNanoAiu": 7,
+                "debugName": "summarizeConversationHistory-full",
+            },
+        },
+    ]
+    f.write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+    call = _parse(f, agent="worker")["calls"][0]
+    assert call["nano_aiu"] == 7
+    assert call["kind"] == "compaction"
+    assert call["agent"] == "worker"
+
+
+def test_collect_vscode_session_calls_merges_files_sorted(tmp_path):
+    (tmp_path / "main.jsonl").write_text(
+        _make_llm_event("claude-sonnet-4.6", 10, 1, ts=3000) + "\n", encoding="utf-8"
+    )
+    (tmp_path / "runSubagent-w.jsonl").write_text(
+        _make_llm_event("claude-sonnet-4.6", 20, 2, ts=1000) + "\n", encoding="utf-8"
+    )
+    collected = core.collect_vscode_session_calls(tmp_path)
+    assert [c["ts_ms"] for c in collected["calls"]] == [1000, 3000]
+    assert collected["first_ts"] == 1000
+    assert collected["last_ts"] == 3000
 
 
 # ─── Subagent name resolution ─────────────────────────────────────────────────
@@ -838,8 +1077,10 @@ def test_analyze_session_empty_dir(tmp_path):
     session_dir = tmp_path / "empty-session"
     session_dir.mkdir()
     result = core.analyze_session(session_dir, PRICING)
-    assert result["total"]["llm_calls"] == 0
-    assert result["total"]["estimated_usd"] == 0.0
+    assert result["total"]["llm_calls"] is None
+    assert result["total"]["estimated_usd"] is None
+    assert result["reconciliation"] is None
+    assert result["diagnostics"]
     assert result["model_breakdown"] == []
     assert result["active_duration_seconds"] is None
 
@@ -869,6 +1110,7 @@ def test_analyze_session_excludes_utility_models(tmp_path):
 @pytest.fixture
 def full_session_result():
     return {
+        "schema_version": 2,
         "session_id": "abc12345-1234-1234-1234-123456789abc",
         "session_dir": "/some/local/path",
         "title": "Test session",
@@ -882,32 +1124,59 @@ def full_session_result():
             {
                 "model": "claude-sonnet-4.6",
                 "input_tokens": 800,
-                "output_tokens": 150,
                 "cached_tokens": 400,
+                "cache_write_tokens": None,
+                "uncached_input_tokens": 400,
+                "output_tokens": 150,
                 "llm_calls": 3,
                 "estimated_usd": 0.35,
+                "cost_source": "billed",
+            },
+            {
+                "model": "Kimi-K2.6-azure",
+                "input_tokens": 200,
+                "cached_tokens": 100,
+                "cache_write_tokens": None,
+                "uncached_input_tokens": 100,
+                "output_tokens": 50,
+                "llm_calls": 2,
+                "estimated_usd": 0.07,
+                "cost_source": "estimated",
             },
         ],
         "subagents": [
             {
-                "file": "main.jsonl",
                 "name": "main",
                 "subagent_id": None,
                 "model": "claude-sonnet-4.6",
-                "input_tokens": 800,
-                "output_tokens": 150,
-                "cached_tokens": 400,
-                "llm_calls": 3,
-                "estimated_usd": 0.35,
+                "input_tokens": 1_000,
+                "cached_tokens": 500,
+                "cache_write_tokens": None,
+                "uncached_input_tokens": 500,
+                "output_tokens": 200,
+                "llm_calls": 5,
+                "estimated_usd": 0.42,
+                "cost_source": "mixed",
             },
         ],
+        "initiator_breakdown": [],
+        "reconciliation": {
+            "billed_usd": 0.35,
+            "estimated_from_tokens_usd": 0.351,
+            "delta_pct": 0.29,
+            "calls_without_billing": 2,
+        },
         "total": {
             "input_tokens": 1_000,
-            "output_tokens": 200,
             "cached_tokens": 500,
+            "cache_write_tokens": None,
+            "uncached_input_tokens": 500,
+            "output_tokens": 200,
             "llm_calls": 5,
             "estimated_usd": 0.42,
+            "cost_source": "mixed",
             "cache_ratio": 0.5,
+            "compaction": {"calls": 1, "estimated_usd": 0.02},
         },
         "pricing_note": "note",
         "skills": {
@@ -917,10 +1186,13 @@ def full_session_result():
                 {
                     "skill": "/test-skill",
                     "input_tokens": 1_000,
-                    "output_tokens": 200,
                     "cached_tokens": 500,
+                    "cache_write_tokens": None,
+                    "uncached_input_tokens": 500,
+                    "output_tokens": 200,
                     "llm_calls": 5,
                     "estimated_usd": 0.42,
+                    "cost_source": "mixed",
                 }
             ],
             "tool_breakdown": [
@@ -992,42 +1264,85 @@ def test_shape_session_size_ordering(full_session_result):
 
 def test_shape_batch_always_has_summary_and_sessions(full_session_result):
     batch = core.shape_batch([full_session_result, full_session_result], "compact")
-    assert set(batch.keys()) == {"summary", "sessions"}
+    assert set(batch.keys()) == {"schema_version", "summary", "sessions"}
+    assert batch["schema_version"] == 2
     assert batch["summary"]["session_count"] == 2
+    assert "model_split" not in batch["summary"]
+    assert all("schema_version" not in s for s in batch["sessions"])
 
 
-def test_shape_span_report_has_total_models_and_minimal_sessions(full_session_result):
-    unavailable = {
-        **full_session_result,
+def _unavailable_session(base):
+    return {
+        **base,
         "session_id": "unavailable",
         "provider": "cli",
         "total": {
             "input_tokens": None,
-            "output_tokens": None,
             "cached_tokens": None,
+            "cache_write_tokens": None,
+            "uncached_input_tokens": None,
+            "output_tokens": None,
             "llm_calls": None,
             "estimated_usd": None,
+            "cost_source": None,
             "cache_ratio": None,
+            "compaction": None,
         },
         "model_breakdown": [],
+        "reconciliation": None,
     }
+
+
+def test_shape_span_report_has_total_models_and_minimal_sessions(full_session_result):
+    unavailable = _unavailable_session(full_session_result)
     report = core.shape_span_report(
         [full_session_result, unavailable],
         since="2026-07-01T00:00:00Z",
         until="2026-07-02T00:00:00Z",
     )
 
-    assert set(report) == {"report", "period", "total", "models", "sessions"}
+    assert set(report) == {
+        "schema_version",
+        "report",
+        "period",
+        "total",
+        "reconciliation",
+        "models",
+        "sessions",
+    }
+    assert report["schema_version"] == 2
     assert report["report"] == "span"
     assert report["period"]["since"] == "2026-07-01T00:00:00Z"
     assert report["total"]["session_count"] == 2
-    assert report["total"]["total_input_tokens"] == 1_000
+    assert report["total"]["input_tokens"] == 1_000
     assert report["total"]["sessions_with_unavailable_cost"] == 1
+    assert "reconciliation" not in report["total"]
+    assert "model_split" not in report["total"]
     assert report["models"][0]["model"] == "claude-sonnet-4.6"
     assert report["models"][0]["session_count"] == 1
     assert report["sessions"][0]["total"]["estimated_usd"] == 0.42
     assert report["sessions"][1]["total"]["estimated_usd"] is None
     assert "skills" not in report["sessions"][0]
+    assert "schema_version" not in report["sessions"][0]
+    # Per-model USD adds up to the span total.
+    assert sum(m["estimated_usd"] for m in report["models"]) == pytest.approx(
+        report["total"]["estimated_usd"]
+    )
+
+
+def test_shape_span_report_removed_fields_absent(full_session_result):
+    report = core.shape_span_report([full_session_result])
+    removed = {
+        "total_tokens",
+        "cost_per_1m_tokens",
+        "cost_per_1m_input_tokens",
+        "split_ratio",
+        "total_duration_seconds",
+        "total_active_duration_seconds",
+        "avg_cache_ratio",
+    }
+    assert not removed & set(report["total"])
+    assert not any(removed & set(m) for m in report["models"])
 
 
 # ─── Session usage trailer helpers ───────────────────────────────────────────
@@ -1329,7 +1644,8 @@ def test_merge_session_results_partial_model_evidence_never_crashes():
 def test_shape_batch_empty():
     batch = core.shape_batch([], "compact")
     assert batch["summary"]["session_count"] == 0
-    assert batch["summary"]["total_estimated_usd"] == 0.0
+    assert batch["summary"]["estimated_usd"] is None
+    assert batch["summary"]["reconciliation"] is None
     assert batch["sessions"] == []
 
 
@@ -1410,10 +1726,13 @@ def test_compute_efficiency_summary(full_session_result):
     summary = core.compute_efficiency_summary(full_session_result)
     assert summary["session_id"] == full_session_result["session_id"]
     assert summary["cache_ratio"] == 0.5
-    assert summary["total_tokens"] == 1_700
-    assert summary["cost_per_1m_tokens"] > 0
-    assert len(summary["model_split"]) == 1
-    assert summary["model_split"][0]["model"] == "claude-sonnet-4.6"
+    assert summary["input_tokens"] == 1_000
+    assert summary["uncached_input_tokens"] == 500
+    assert summary["estimated_usd"] == 0.42
+    assert summary["cost_source"] == "mixed"
+    assert not {"total_tokens", "cost_per_1m_tokens"} & set(summary)
+    assert [m["model"] for m in summary["model_split"]] == ["claude-sonnet-4.6", "Kimi-K2.6-azure"]
+    assert not {"split_ratio", "cost_per_1m_input_tokens"} & set(summary["model_split"][0])
 
 
 def test_compute_efficiency_summary_empty_model_breakdown():
@@ -1431,13 +1750,13 @@ def test_compute_efficiency_summary_empty_model_breakdown():
         "model_breakdown": [],
     }
     summary = core.compute_efficiency_summary(result)
-    assert summary["total_tokens"] == 0
-    assert summary["cost_per_1m_tokens"] == 0.0
+    assert summary["input_tokens"] == 0
+    assert summary["estimated_usd"] == 0.0
     assert summary["model_split"] == []
 
 
 def test_compute_efficiency_summary_unavailable_evidence_stays_none():
-    """Unavailable evidence (e.g. a CLI checkpoint-only session) propagates as None."""
+    """Unavailable evidence (e.g. a CLI session without usage records) propagates as None."""
     result = {
         "session_id": "s1",
         "title": "Unavailable",
@@ -1452,19 +1771,17 @@ def test_compute_efficiency_summary_unavailable_evidence_stays_none():
         "model_breakdown": [],
     }
     summary = core.compute_efficiency_summary(result)
-    assert summary["total_tokens"] is None
-    assert summary["total_input_tokens"] is None
+    assert summary["input_tokens"] is None
+    assert summary["output_tokens"] is None
     assert summary["llm_calls"] is None
     assert summary["estimated_usd"] is None
-    assert summary["cost_per_1m_tokens"] is None
     assert summary["cache_ratio"] is None
 
 
 def test_compute_efficiency_summary_partial_model_evidence_preserved_and_no_crash():
     """A model row with partial evidence never crashes the efficiency summary.
 
-    never crashes the split math, and its own None fields are preserved rather than
-    fabricated as 0, while a fully-reported sibling model is still split correctly.
+    Its own None fields are preserved rather than fabricated as 0.
     """
     result = {
         "session_id": "s1",
@@ -1503,12 +1820,8 @@ def test_compute_efficiency_summary_partial_model_evidence_preserved_and_no_cras
     assert by_model["gpt-partial"]["cached_tokens"] is None
     assert by_model["gpt-partial"]["estimated_usd"] is None
     assert by_model["gpt-partial"]["llm_calls"] == 2
-    assert by_model["gpt-partial"]["split_ratio"] == 0.0
-    assert by_model["gpt-partial"]["cost_per_1m_input_tokens"] == 0.0
     assert by_model["gpt-full"]["input_tokens"] == 500
-    # The fully-reported model gets the entire available input for the ratio,
-    # since the partial-evidence model contributes nothing to the denominator.
-    assert by_model["gpt-full"]["split_ratio"] == 1.0
+    assert summary["model_split"][0]["model"] == "gpt-full"
 
 
 # ─── Aggregate sessions ───────────────────────────────────────────────────────
@@ -1517,47 +1830,81 @@ def test_compute_efficiency_summary_partial_model_evidence_preserved_and_no_cras
 def test_aggregate_sessions(full_session_result):
     aggregate = core.aggregate_sessions([full_session_result, full_session_result])
     assert aggregate["session_count"] == 2
-    assert aggregate["total_input_tokens"] == 2_000
-    assert aggregate["total_tokens"] == 3_400
-    assert aggregate["avg_cache_ratio"] == 0.5
-    assert aggregate["cost_per_1m_tokens"] > 0
-    assert len(aggregate["model_split"]) == 1
+    assert aggregate["input_tokens"] == 2_000
+    assert aggregate["cached_tokens"] == 1_000
+    assert aggregate["uncached_input_tokens"] == 1_000
+    assert aggregate["output_tokens"] == 400
+    assert aggregate["llm_calls"] == 10
+    assert aggregate["cache_write_tokens"] is None
+    assert aggregate["cost_source"] == "mixed"
+    assert aggregate["compaction"] == {"calls": 2, "estimated_usd": 0.04}
+    assert aggregate["reconciliation"]["billed_usd"] == 0.7
+    assert aggregate["reconciliation"]["calls_without_billing"] == 4
+    assert len(aggregate["model_split"]) == 2
+    assert {m["session_count"] for m in aggregate["model_split"]} == {2}
+
+
+def test_aggregate_sessions_has_no_removed_fields(full_session_result):
+    aggregate = core.aggregate_sessions([full_session_result])
+    for removed in (
+        "total_tokens",
+        "total_input_tokens",
+        "total_estimated_usd",
+        "avg_cache_ratio",
+        "cost_per_1m_tokens",
+        "total_duration_seconds",
+        "total_active_duration_seconds",
+    ):
+        assert removed not in aggregate
+
+
+def test_aggregate_cache_ratio_is_token_weighted_and_input_not_double_counted():
+    """Regression (d): ratio = sum(cached)/sum(input), never a mean of ratios."""
+
+    def session(inp, cached, out):
+        return {
+            "total": {
+                "input_tokens": inp,
+                "cached_tokens": cached,
+                "uncached_input_tokens": inp - cached,
+                "output_tokens": out,
+                "llm_calls": 1,
+                "estimated_usd": 0.1,
+                "cache_ratio": round(cached / inp, 3),
+            },
+            "model_breakdown": [],
+        }
+
+    # Per-session ratios are 0.9 and 0.0: the unweighted mean would be 0.45.
+    aggregate = core.aggregate_sessions([session(1000, 900, 10), session(9000, 0, 90)])
+    assert aggregate["cache_ratio"] == 0.09
+    assert aggregate["input_tokens"] == 10_000
+    assert aggregate["output_tokens"] == 100
+    assert "total_tokens" not in aggregate
 
 
 def test_aggregate_sessions_empty():
     aggregate = core.aggregate_sessions([])
     assert aggregate["session_count"] == 0
-    assert aggregate["total_estimated_usd"] == 0.0
+    assert aggregate["estimated_usd"] is None
+    assert aggregate["cache_ratio"] is None
+    assert aggregate["cost_source"] is None
     assert aggregate["model_split"] == []
 
 
 def test_aggregate_sessions_excludes_unavailable_evidence(full_session_result):
     """A session with unavailable evidence contributes nothing to totals."""
-    unavailable = {
-        "session_id": "s2",
-        "title": "Unavailable",
-        "total": {
-            "input_tokens": None,
-            "output_tokens": None,
-            "cached_tokens": None,
-            "llm_calls": None,
-            "estimated_usd": None,
-            "cache_ratio": None,
-        },
-        "model_breakdown": [],
-    }
+    unavailable = _unavailable_session(full_session_result)
     only_available = core.aggregate_sessions([full_session_result])
     with_unavailable = core.aggregate_sessions([full_session_result, unavailable])
-    assert with_unavailable["total_input_tokens"] == only_available["total_input_tokens"]
-    assert with_unavailable["total_estimated_usd"] == only_available["total_estimated_usd"]
-    assert with_unavailable["avg_cache_ratio"] == only_available["avg_cache_ratio"]
+    assert with_unavailable["input_tokens"] == only_available["input_tokens"]
+    assert with_unavailable["estimated_usd"] == only_available["estimated_usd"]
+    assert with_unavailable["cache_ratio"] == only_available["cache_ratio"]
+    assert with_unavailable["session_count"] == 2
 
 
 def test_aggregate_sessions_partial_model_evidence_never_crashes():
-    """A model_breakdown row with None fields across sessions never crashes.
-
-    per-model cross-session sum or the sort-by-cost model_split ordering.
-    """
+    """A model_breakdown row with None fields across sessions never crashes."""
     partial = {
         "session_id": "s1",
         "title": "Partial",
@@ -1602,8 +1949,8 @@ def test_aggregate_sessions_partial_model_evidence_never_crashes():
     }
     aggregate = core.aggregate_sessions([partial, full])
     assert aggregate["session_count"] == 2
-    assert aggregate["total_input_tokens"] == 1_000
-    assert aggregate["total_llm_calls"] == 5
+    assert aggregate["input_tokens"] == 1_000
+    assert aggregate["llm_calls"] == 5
     model_row = aggregate["model_split"][0]
     assert model_row["model"] == "gpt-partial"
     assert model_row["input_tokens"] == 1_000
@@ -1611,22 +1958,18 @@ def test_aggregate_sessions_partial_model_evidence_never_crashes():
     assert model_row["estimated_usd"] == 0.5
 
 
+def test_aggregate_sessions_model_usd_sums_to_total(full_session_result):
+    aggregate = core.aggregate_sessions([full_session_result, full_session_result])
+    assert sum(m["estimated_usd"] for m in aggregate["model_split"]) == pytest.approx(
+        aggregate["estimated_usd"], abs=1e-9
+    )
+
+
 def test_shape_batch_excludes_unavailable_cost_and_reports_count(full_session_result):
-    unavailable = {
-        **full_session_result,
-        "session_id": "s2",
-        "total": {
-            "input_tokens": None,
-            "output_tokens": None,
-            "cached_tokens": None,
-            "llm_calls": None,
-            "estimated_usd": None,
-            "cache_ratio": None,
-        },
-    }
+    unavailable = _unavailable_session(full_session_result)
     batch = core.shape_batch([full_session_result, unavailable], "compact")
-    assert batch["summary"]["total_estimated_usd"] == full_session_result["total"]["estimated_usd"]
-    assert batch["summary"]["total_input_tokens"] == full_session_result["total"]["input_tokens"]
+    assert batch["summary"]["estimated_usd"] == full_session_result["total"]["estimated_usd"]
+    assert batch["summary"]["input_tokens"] == full_session_result["total"]["input_tokens"]
     assert batch["summary"]["sessions_with_unavailable_cost"] == 1
 
 
@@ -1839,9 +2182,11 @@ def test_parse_jsonl_file_attributes_to_skill(tmp_path):
         encoding="utf-8",
     )
     timeline = core.build_skill_timeline(tmp_path)
-    stats = core.parse_jsonl_file(f, timeline)
-    assert stats["per_skill"]["/my-skill"]["input"] == 300
-    assert stats["per_skill"]["/my-skill"]["calls"] == 2
+    calls = core.parse_vscode_calls(f, agent="main", agent_id=None, skill_timeline=timeline)[
+        "calls"
+    ]
+    assert [c["skill"] for c in calls] == ["/my-skill", "/my-skill"]
+    assert sum(c["input"] for c in calls) == 300
 
 
 def test_parse_tool_calls(tmp_path):
@@ -1945,12 +2290,17 @@ def test_shape_session_minimal_skill_found():
     }
     shaped = core.shape_session_minimal_skill(data, "/a")
     assert shaped == {
+        "schema_version": core.SCHEMA_VERSION,
+        "reconciliation": None,
         "skill": "/a",
         "cost_usd": 0.1,
         "input_tokens": 100,
         "output_tokens": 10,
+        "cache_write_tokens": None,
+        "uncached_input_tokens": None,
         "cached_tokens": 0,
         "llm_calls": 1,
+        "cost_source": None,
     }
 
 

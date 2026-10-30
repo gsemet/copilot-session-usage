@@ -99,86 +99,16 @@ def _as_number(value: Any) -> int | float | None:
     return None
 
 
-def _cli_model_cost(model: str, v: dict[str, Any], pricing: dict[str, Any]) -> float | None:
-    """Return one model's USD cost from Copilot CLI/App evidence.
-
-    Prefer the provider-billed per-model ``totalNanoAiu`` (1 nanoAiu = 1e-11
-    USD), which reconciles exactly with the GitHub rate card. Otherwise price
-    the reported tokens with the exact ``cacheWriteTokens`` count. The pricing
-    tier is chosen from the average request size, never the session sum.
-    Returns ``None`` when neither billing nor complete token evidence exists.
-    """
-    nano = v.get("nano_aiu")
-    if nano is not None:
-        return float(nano) / 1e11
-    if v["input"] is None or v["output"] is None or v["cached"] is None:
-        return None
-    calls = v.get("calls")
-    tier_input = v["input"] // calls if calls else 0
-    return core.estimate_cost(
-        v["input"],
-        v["output"],
-        v["cached"],
-        model,
-        pricing,
-        cache_write_tok=v.get("cache_write"),
-        tier_input_tok=tier_input,
+def _compaction_model(data: dict[str, Any]) -> str:
+    """Resolve the model a compaction call ran on (behavior model, then fallbacks)."""
+    tokens = _as_mapping(data.get("compactionTokensUsed"))
+    return (
+        _clean_str(data.get("behaviorModelId"))
+        or _clean_str(_as_mapping(data.get("responsesReasoning")).get("model"))
+        or _clean_str(tokens.get("model"))
+        or _clean_str(_as_mapping(tokens.get("copilotUsage")).get("model"))
+        or "unknown"
     )
-
-
-def _parse_model_metrics(raw: Any) -> dict[str, dict[str, Any]]:
-    """Normalize a ``modelMetrics`` mapping into per-model token/billing buckets."""
-    buckets: dict[str, dict[str, Any]] = {}
-    for model, metrics in _as_mapping(raw).items():
-        if not isinstance(model, str) or not model or not isinstance(metrics, dict):
-            continue
-        usage = _as_mapping(metrics.get("usage"))
-        requests = _as_mapping(metrics.get("requests"))
-        buckets[model] = {
-            "input": _as_int(usage.get("inputTokens")),
-            "output": _as_int(usage.get("outputTokens")),
-            "cached": _as_int(usage.get("cacheReadTokens")),
-            "cache_write": _as_int(usage.get("cacheWriteTokens")),
-            "calls": _as_int(requests.get("count")),
-            "nano_aiu": _as_number(metrics.get("totalNanoAiu")),
-        }
-    return buckets
-
-
-def _agent_rows(agent_metrics: dict[str, Any], pricing: dict[str, Any]) -> list[dict[str, Any]]:
-    """Build per-agent cost rows (main agent and subagents) from ``agentMetrics``."""
-    rows: list[dict[str, Any]] = []
-    for agent_id, raw in agent_metrics.items():
-        if not isinstance(raw, dict):
-            continue
-        per_model = _parse_model_metrics(raw.get("modelMetrics"))
-        costs = [_cli_model_cost(m, v, pricing) for m, v in per_model.items()]
-        agent_nano = _as_number(raw.get("totalNanoAiu"))
-        if agent_nano is not None:
-            usd: float | None = float(agent_nano) / 1e11
-        elif costs and all(c is not None for c in costs):
-            usd = sum(c for c in costs if c is not None)
-        else:
-            usd = None
-        dominant = max(per_model, key=lambda m: per_model[m]["input"] or 0, default=None)
-        rows.append(
-            {
-                "subagent_id": None if agent_id == "main" else agent_id,
-                "name": "main"
-                if agent_id == "main"
-                else (_clean_str(raw.get("agentDisplayName")) or _clean_str(raw.get("agentName"))),
-                "agent_type": _clean_str(raw.get("agentName")),
-                "model": dominant,
-                "input_tokens": sum(v["input"] or 0 for v in per_model.values()),
-                "output_tokens": sum(v["output"] or 0 for v in per_model.values()),
-                "cached_tokens": sum(v["cached"] or 0 for v in per_model.values()),
-                "cache_write_tokens": sum(v["cache_write"] or 0 for v in per_model.values()),
-                "llm_calls": sum(v["calls"] or 0 for v in per_model.values()),
-                "estimated_usd": round(usd, 6) if usd is not None else None,
-            }
-        )
-    rows.sort(key=lambda r: (r["name"] != "main", -(r["estimated_usd"] or 0.0)))
-    return rows
 
 
 # ─── Session-state root discovery ───────────────────────────────────────────
@@ -390,8 +320,12 @@ def parse_events_file(events_path: Path) -> dict[str, Any]:
         "unknown_event_types": {},
         "subagent_started": {},
         "subagent_completed": {},
+        "usage_calls": [],
+        "compaction_calls": [],
+        "skill_timelines": {},
     }
 
+    seen_usage_ids: set[str] = set()
     tool_start_names: dict[str, tuple[str, str | None]] = {}
     current_skill_by_agent: dict[str | None, str] = {}
 
@@ -487,6 +421,68 @@ def parse_events_file(events_path: Path) -> dict[str, Any]:
                         # vice versa, when their events interleave.
                         current_skill_by_agent[agent_id] = name
                         stats["skill_events"].append((ts_ms, name))
+                        if ts_ms is not None:
+                            stats["skill_timelines"].setdefault(agent_id, []).append((ts_ms, name))
+                elif etype == "session.usage_record":
+                    usage = _as_mapping(data.get("usage"))
+                    accounting = _as_mapping(usage.get("accounting"))
+                    usage_id = _clean_str(accounting.get("usageId"))
+                    if usage_id is not None:
+                        if usage_id in seen_usage_ids:
+                            continue
+                        seen_usage_ids.add(usage_id)
+                    model = _clean_str(usage.get("model"))
+                    inp = _as_int(usage.get("inputTokens"))
+                    out = _as_int(usage.get("outputTokens"))
+                    if model is None or (inp is None and out is None):
+                        continue
+                    if core.is_utility_model(model):
+                        # Utility models (gpt-4o*, gpt-4.1*, gpt-5.4-nano*) are free.
+                        continue
+                    stats["usage_calls"].append(
+                        {
+                            "ts_ms": ts_ms,
+                            "agent_id": agent_id,
+                            "model": model,
+                            "input": inp or 0,
+                            "cached": _as_int(usage.get("cacheReadTokens")) or 0,
+                            "cache_write": _as_int(usage.get("cacheWriteTokens")),
+                            "output": out or 0,
+                            "nano_aiu": _as_number(
+                                _as_mapping(usage.get("copilotUsage")).get("totalNanoAiu")
+                            ),
+                            "initiator": _clean_str(usage.get("initiator")),
+                            "premium_requests": _as_number(usage.get("cost")),
+                        }
+                    )
+                elif etype == "session.compaction_complete":
+                    tokens = _as_mapping(data.get("compactionTokensUsed"))
+                    if not tokens:
+                        continue
+                    inp = _as_int(tokens.get("inputTokens"))
+                    out = _as_int(tokens.get("outputTokens"))
+                    if inp is None and out is None:
+                        continue
+                    compaction_model = _compaction_model(data)
+                    if core.is_utility_model(compaction_model):
+                        continue
+                    stats["compaction_calls"].append(
+                        {
+                            "ts_ms": ts_ms,
+                            "agent_id": agent_id,
+                            "model": compaction_model,
+                            "input": inp or 0,
+                            "cached": _as_int(tokens.get("cacheReadTokens")) or 0,
+                            "cache_write": _as_int(tokens.get("cacheWriteTokens")),
+                            "output": out or 0,
+                            "nano_aiu": _as_number(
+                                _as_mapping(tokens.get("copilotUsage")).get("totalNanoAiu")
+                            ),
+                            "llm_calls": _as_int(tokens.get("requestCount"))
+                            or _as_int(data.get("requestCount"))
+                            or 1,
+                        }
+                    )
                 elif etype == "tool.execution_start":
                     call_id = _clean_str(data.get("toolCallId"))
                     if call_id:
@@ -570,7 +566,45 @@ def parse_events_file(events_path: Path) -> dict[str, Any]:
     return stats
 
 
-def analyze_cli_session(source: Path, pricing: dict[str, Any]) -> dict[str, Any]:
+def canonical_session_id(events_path: Path, session_dir: Path | None, stats: dict[str, Any]) -> str:
+    """Return the canonical session UUID for a CLI source, or raise ``ValueError``.
+
+    Prefers the session directory name (the on-disk convention), falling back
+    to the ``session.start`` event's own ``sessionId``. A file name such as
+    ``events.jsonl`` is never used as an identity.
+    """
+    if session_dir is not None and SESSION_ID_RE.fullmatch(session_dir.name):
+        return session_dir.name
+    candidate = stats.get("session_id")
+    if candidate and SESSION_ID_RE.fullmatch(str(candidate)):
+        return str(candidate)
+    msg = (
+        f"could not determine a canonical session UUID for {events_path}: neither the "
+        "session directory name nor a session.start event's sessionId is a valid UUID. "
+        "Refusing to fabricate a session identity from the file name."
+    )
+    raise ValueError(msg)
+
+
+def collect_cli_calls_with_id(source: Path) -> tuple[str, list[dict[str, Any]]]:
+    """Return ``(canonical_session_id, calls)`` for a CLI session directory or events file."""
+    events_path, session_dir = resolve_events_source(Path(source))
+    stats = parse_events_file(events_path)
+    return canonical_session_id(events_path, session_dir, stats), build_cli_calls(stats)
+
+
+def collect_cli_calls(source: Path) -> list[dict[str, Any]]:
+    """Return every normalized call record of a CLI session (no window applied)."""
+    events_path, _ = resolve_events_source(Path(source))
+    return build_cli_calls(parse_events_file(events_path))
+
+
+def analyze_cli_session(
+    source: Path,
+    pricing: dict[str, Any],
+    since_ms: int | None = None,
+    until_ms: int | None = None,
+) -> dict[str, Any]:
     """Analyze a Copilot CLI/Copilot App session and return a shared-shape result.
 
     ``source`` may be a session directory (the common case, discovered
@@ -601,20 +635,7 @@ def analyze_cli_session(source: Path, pricing: dict[str, Any]) -> dict[str, Any]
 
     workspace_meta = read_workspace_metadata(session_dir) if session_dir else {}
 
-    session_id: str | None = None
-    if session_dir is not None and SESSION_ID_RE.fullmatch(session_dir.name):
-        # Trust the on-disk layout convention set by Copilot CLI itself.
-        session_id = session_dir.name
-    elif stats.get("session_id") and SESSION_ID_RE.fullmatch(str(stats["session_id"])):
-        # Explicit source metadata: the session.start event's own sessionId.
-        session_id = stats["session_id"]
-    if session_id is None:
-        msg = (
-            f"could not determine a canonical session UUID for {events_path}: neither the "
-            "session directory name nor a session.start event's sessionId is a valid UUID. "
-            "Refusing to fabricate a session identity from the file name."
-        )
-        raise ValueError(msg)
+    session_id = canonical_session_id(events_path, session_dir, stats)
 
     diagnostics: list[str] = []
     if stats["malformed_lines"]:
@@ -645,36 +666,17 @@ def analyze_cli_session(source: Path, pricing: dict[str, Any]) -> dict[str, Any]
     shutdown = stats["shutdown_events"][-1] if stats["shutdown_events"] else None
     checkpoint = stats["checkpoint_events"][-1] if stats["checkpoint_events"] else None
 
-    global_per_model: dict[str, dict[str, Any]] = {}
-    agent_metrics: dict[str, Any] = {}
     total_premium_requests: int | float | None = None
-    total_nano_aiu: int | float | None = None
     shutdown_type: str | None = None
     code_changes: dict[str, Any] | None = None
     active_duration_s: int | None = None
     models_from_evidence: set[str] = set()
+    snapshot_nano: int | float | None = None
 
     if shutdown is not None:
-        model_metrics = shutdown.get("modelMetrics")
-        if model_metrics is not None and not isinstance(model_metrics, dict):
-            diagnostics.append(
-                "session.shutdown.modelMetrics was not a mapping; per-model token breakdown "
-                "is unavailable."
-            )
-        for model, metrics in _as_mapping(model_metrics).items():
-            if not isinstance(model, str) or not model:
-                continue
-            if not isinstance(metrics, dict):
-                diagnostics.append(
-                    f"modelMetrics entry for {model!r} was not a mapping; skipped rather than "
-                    "fabricated."
-                )
-                continue
-            global_per_model.update(_parse_model_metrics({model: metrics}))
-            models_from_evidence.add(model)
-        agent_metrics = _as_mapping(shutdown.get("agentMetrics"))
-        total_premium_requests = _as_number(shutdown.get("totalPremiumRequests"))
-        total_nano_aiu = _as_number(shutdown.get("totalNanoAiu"))
+        for model, metrics in _as_mapping(shutdown.get("modelMetrics")).items():
+            if isinstance(model, str) and model and isinstance(metrics, dict):
+                models_from_evidence.add(model)
         shutdown_type = _clean_str(shutdown.get("shutdownType"))
         raw_code_changes = shutdown.get("codeChanges")
         if raw_code_changes is not None and not isinstance(raw_code_changes, dict):
@@ -684,87 +686,14 @@ def analyze_cli_session(source: Path, pricing: dict[str, Any]) -> dict[str, Any]
         api_duration_ms = _as_number(shutdown.get("totalApiDurationMs"))
         if api_duration_ms is not None:
             active_duration_s = round(api_duration_ms / 1000.0)
-    elif checkpoint is not None:
-        diagnostics.append(
-            "no session.shutdown event found (the session may still be active or was "
-            "interrupted); per-model token totals and the shared cost calculation are "
-            "unavailable. Only provider-native counters (nanoAiu, premium requests) from the "
-            "last usage checkpoint are reported, under provider_usage."
-        )
-        total_premium_requests = _as_number(checkpoint.get("totalPremiumRequests"))
-        total_nano_aiu = _as_number(checkpoint.get("totalNanoAiu"))
-        raw_cache_state = checkpoint.get("modelCacheState")
-        if raw_cache_state is not None and not isinstance(raw_cache_state, list):
-            diagnostics.append(
-                "session.usage_checkpoint.modelCacheState was not a list; model identity from "
-                "the checkpoint is unavailable."
-            )
-        for entry in _as_list(raw_cache_state):
-            model_id = _clean_str(_as_mapping(entry).get("modelId"))
-            if model_id:
-                models_from_evidence.add(model_id)
-    else:
-        diagnostics.append(
-            "no session.shutdown or session.usage_checkpoint event found in this session; "
-            "usage totals and cost are unavailable."
-        )
-
-    if stats.get("selected_model"):
-        models_from_evidence.add(stats["selected_model"])
-
-    def _sum_available(values: list[int | None]) -> int | None:
-        """Sum the reported values, preserving total absence as ``None``.
-
-        Never fabricates a ``0`` contribution for a model missing this
-        specific field: only models that actually reported the field
-        contribute to the total, and the total itself is ``None`` (not
-        ``0``) when none of them did.
-        """
-        available = [v for v in values if v is not None]
-        return sum(available) if available else None
-
-    if global_per_model:
-        total_input = _sum_available([v["input"] for v in global_per_model.values()])
-        total_output = _sum_available([v["output"] for v in global_per_model.values()])
-        total_cached = _sum_available([v["cached"] for v in global_per_model.values()])
-        total_calls = _sum_available([v["calls"] for v in global_per_model.values()])
-        if total_input is None:
-            cache_ratio: float | None = None
-        elif total_input == 0:
-            cache_ratio = 0.0
-        elif total_cached is not None:
-            cache_ratio = round(total_cached / total_input, 3)
-        else:
-            cache_ratio = None
-
-        # estimated_usd prefers the provider-billed per-model totalNanoAiu and
-        # otherwise prices tokens with exact cache-write counts. A model with
-        # neither billing nor complete token evidence is excluded (with a
-        # diagnostic) rather than priced from fields treated as zero.
-        model_costs = {
-            model: _cli_model_cost(model, v, pricing) for model, v in global_per_model.items()
-        }
-        unpriceable_models = sorted(m for m, c in model_costs.items() if c is None)
-        if unpriceable_models:
-            diagnostics.append(
-                f"model(s) {unpriceable_models} reported incomplete token usage in "
-                "modelMetrics; their cost is excluded from the session total (other available "
-                "fields, such as call counts, are still reported)."
-            )
-        priced = [c for c in model_costs.values() if c is not None]
-        total_usd: float | None = sum(priced) if priced else None
-    else:
-        # No per-model token evidence (active/interrupted session, or only a
-        # checkpoint). Preserve the absence instead of reporting zero.
-        total_input = total_output = total_cached = total_calls = None
-        cache_ratio = None
-        total_usd = None
-
-    # Session-level totalNanoAiu is cumulative across resumes and is the
-    # billed session total. Per-model/agent metrics omit segments that ended
-    # without a session.shutdown (crash or kill), so any remainder is
-    # reported as unattributed rather than silently dropped.
-    cumulative_nano = max(
+    for entry in _as_list(checkpoint.get("modelCacheState") if checkpoint else None):
+        model_id = _clean_str(_as_mapping(entry).get("modelId"))
+        if model_id:
+            models_from_evidence.add(model_id)
+    # The shutdown/checkpoint totalNanoAiu snapshots are cumulative, but they
+    # miss usage from segments that ended without a shutdown. They are kept
+    # only as a diagnostic cross-check, never as the cost source.
+    snapshot_nano = max(
         (
             n
             for n in (
@@ -775,43 +704,70 @@ def analyze_cli_session(source: Path, pricing: dict[str, Any]) -> dict[str, Any]
         ),
         default=None,
     )
-    unattributed_usd: float | None = None
-    if cumulative_nano is not None:
-        billed_total = float(cumulative_nano) / 1e11
-        attributed = total_usd or 0.0
-        if billed_total - attributed > 5e-7:
-            unattributed_usd = round(billed_total - attributed, 6)
+    for source_event in (checkpoint, shutdown):
+        if source_event is not None:
+            premium = _as_number(source_event.get("totalPremiumRequests"))
+            if premium is not None:
+                total_premium_requests = premium
+
+    if stats.get("selected_model"):
+        models_from_evidence.add(stats["selected_model"])
+
+    all_calls = build_cli_calls(stats)
+    calls = core.filter_calls_by_window(all_calls, since_ms, until_ms)
+    windowed = since_ms is not None or until_ms is not None
+
+    if calls:
+        summary = core.summarize_calls(calls, pricing)
+        total = summary["total"]
+        reconciliation = summary["reconciliation"]
+        reconciliation["snapshot_usd"] = None
+        reconciliation["snapshot_delta_usd"] = None
+        if snapshot_nano is not None and not windowed:
+            snapshot_usd = round(float(snapshot_nano) / core.NANO_AIU_PER_USD, core.USD_DECIMALS)
+            delta = round(snapshot_usd - total["estimated_usd"], core.USD_DECIMALS)
+            reconciliation["snapshot_usd"] = snapshot_usd
+            reconciliation["snapshot_delta_usd"] = delta
+            if delta > 0.005:
+                diagnostics.append(
+                    f"the last shutdown/checkpoint snapshot (${snapshot_usd:.4f}) is "
+                    f"${delta:.4f} higher than the sum of per-call usage records "
+                    f"(${total['estimated_usd']:.4f}). Snapshots only count usage up to the "
+                    "last shutdown, so per-call records are the reported cost."
+                )
+    else:
+        summary = {
+            "total": core.empty_total(),
+            "models": [],
+            "model_breakdown": [],
+            "subagents": [],
+            "skill_breakdown": [],
+            "initiator_breakdown": [],
+            "reconciliation": None,
+            "fallback_pricing_models": [],
+        }
+        total = summary["total"]
+        reconciliation = None
+        if not windowed:
             diagnostics.append(
-                f"${unattributed_usd:.4f} of billed usage (cumulative totalNanoAiu) is not "
-                "covered by per-model/agent metrics, typically from session segments that "
-                "ended without a session.shutdown event; it is included in the total but "
-                "cannot be attributed to a model, agent, or skill."
+                "no session.usage_record or session.compaction_complete events found in this "
+                "session; usage totals and cost are unavailable."
             )
-        total_usd = billed_total
-        total_nano_aiu = cumulative_nano
 
-    def _model_row_cost(model: str, v: dict[str, Any]) -> float | None:
-        cost = _cli_model_cost(model, v, pricing)
-        return round(cost, 6) if cost is not None else None
-
-    model_breakdown = sorted(
-        (
-            {
-                "model": model,
-                "input_tokens": v["input"],
-                "output_tokens": v["output"],
-                "cached_tokens": v["cached"],
-                "llm_calls": v["calls"],
-                "estimated_usd": _model_row_cost(model, v),
-            }
-            for model, v in global_per_model.items()
-        ),
-        key=lambda x: (x["estimated_usd"] is not None, x["estimated_usd"] or 0.0),
-        reverse=True,
+    model_breakdown = summary["model_breakdown"]
+    total_nano_aiu = (
+        sum(c["nano_aiu"] for c in calls if c["nano_aiu"] is not None) if calls else None
     )
-    fallback_pricing_models = sorted(
-        model for model in global_per_model if core.model_uses_fallback_pricing(model, pricing)
+    window_premium = (
+        sum(c["premium_requests"] for c in calls if c["premium_requests"] is not None)
+        if calls
+        else None
     )
+    if calls:
+        total_premium_requests = window_premium
+    elif windowed:
+        total_premium_requests = None
+    fallback_pricing_models = summary["fallback_pricing_models"]
 
     skill_names = sorted({name for _, name in stats["skill_events"]})
     active_skill = stats["skill_events"][-1][1] if stats["skill_events"] else None
@@ -836,38 +792,16 @@ def analyze_cli_session(source: Path, pricing: dict[str, Any]) -> dict[str, Any]
     started_at = _yaml_to_iso(workspace_meta.get("created_at")) or core.ts_to_iso(first_ts)
     ended_at = _yaml_to_iso(workspace_meta.get("updated_at")) or core.ts_to_iso(last_ts)
 
-    # Subagent evidence, preserved separately from the shared per-model
-    # totals: subagent.completed only reports a combined totalTokens figure,
-    # never a validated input/output/cached split, so it cannot be folded
-    # into model_breakdown/subagents without fabricating that split.
-    subagent_rows: list[dict[str, Any]] = []
-    for agent_id, started in stats.get("subagent_started", {}).items():
-        completed = stats.get("subagent_completed", {}).get(agent_id, {})
-        duration_ms = completed.get("duration_ms")
-        subagent_rows.append(
-            {
-                "agent_id": agent_id,
-                "name": started.get("name"),
-                "model": completed.get("model") or started.get("model"),
-                "total_tool_calls": completed.get("total_tool_calls"),
-                "total_tokens_reported": completed.get("total_tokens"),
-                "duration_seconds": (
-                    round(duration_ms / 1000.0) if isinstance(duration_ms, (int, float)) else None
-                ),
-            }
-        )
-    subagent_rows.sort(key=lambda r: (r.get("name") or "", r.get("agent_id") or ""))
-
     provider_usage = {
         "total_nano_aiu": total_nano_aiu,
         "total_premium_requests": total_premium_requests,
         "shutdown_type": shutdown_type,
         "resume_count": stats.get("resume_count", 0),
         "code_changes": code_changes,
-        "subagents": subagent_rows,
     }
 
     return {
+        "schema_version": core.SCHEMA_VERSION,
         "session_id": session_id,
         "session_dir": str(session_dir) if session_dir else str(events_path.parent),
         "provider": "cli",
@@ -880,40 +814,86 @@ def analyze_cli_session(source: Path, pricing: dict[str, Any]) -> dict[str, Any]
         "ended_at": ended_at,
         "duration_seconds": duration_s,
         "active_duration_seconds": active_duration_s,
-        "total": {
-            "input_tokens": total_input,
-            "output_tokens": total_output,
-            "cached_tokens": total_cached,
-            "llm_calls": total_calls,
-            "estimated_usd": round(total_usd, 4) if total_usd is not None else None,
-            "unattributed_usd": unattributed_usd,
-            "cache_ratio": cache_ratio,
-        },
-        "models": sorted(models_from_evidence)
-        if models_from_evidence
-        else [m["model"] for m in model_breakdown],
+        "total": total,
+        "models": summary["models"]
+        or (sorted(models_from_evidence) if models_from_evidence else []),
         "fallback_pricing_models": fallback_pricing_models,
         "model_breakdown": model_breakdown,
-        # Built from session.shutdown.agentMetrics (main agent + each
-        # subagent, with per-model usage and billed nanoAiu); empty when the
-        # CLI version does not report it.
-        "subagents": _agent_rows(agent_metrics, pricing),
+        "subagents": summary["subagents"],
+        "initiator_breakdown": summary["initiator_breakdown"],
+        "reconciliation": reconciliation,
         "skills": {
             "detected": skill_names,
             "active": active_skill,
-            "breakdown": [],
+            "breakdown": summary["skill_breakdown"],
             "tool_breakdown": tool_breakdown,
         },
         "provider_usage": provider_usage,
         "diagnostics": diagnostics,
         "pricing_note": (
-            "Costs use Copilot's billed per-model totalNanoAiu when reported (1 nanoAiu = "
-            "1e-11 USD), as the VS Code provider does with copilotUsageNanoAiu. Otherwise "
-            "tokens are priced from data/models-and-pricing.yml using the exact cache-write "
-            "token count. Models listed in fallback_pricing_models were priced with the "
-            "generic 'default' rate when no billed figure was available."
+            "Every figure is aggregated from per-call records: each session.usage_record "
+            "(deduplicated by usageId) and each session.compaction_complete event. Cost is "
+            "the provider-billed copilotUsage.totalNanoAiu of each call (1 nanoAiu = 1e-11 "
+            "USD, cost_source 'billed'); calls without it are priced from "
+            "data/models-and-pricing.yml with exact cache-write counts (cost_source "
+            "'estimated'). Shutdown/checkpoint snapshots are incomplete and only used for "
+            "reconciliation.snapshot_usd. Models in fallback_pricing_models used the "
+            "generic 'default' rate for estimated calls."
         ),
     }
+
+
+def build_cli_calls(stats: dict[str, Any]) -> list[dict[str, Any]]:
+    """Turn parsed usage/compaction events into normalized call records.
+
+    Agent names are resolved after the whole file is read (``subagent.started``
+    may appear after the first call); a compaction whose ``agentId`` is not a
+    known subagent belongs to the main agent. Each call's skill is the most
+    recent ``skill.invoked`` of its own agent at the call's timestamp.
+    """
+    started = stats.get("subagent_started", {})
+    timelines = {
+        agent: sorted(items, key=lambda it: it[0])
+        for agent, items in stats.get("skill_timelines", {}).items()
+    }
+
+    def _skill(agent_id: str | None, ts_ms: int | None) -> str:
+        return core.active_skill_at_ts(ts_ms, timelines.get(agent_id, [])) or "unknown"
+
+    calls: list[dict[str, Any]] = []
+    for raw, kind in (
+        *((r, core.CALL_KIND_REQUEST) for r in stats.get("usage_calls", [])),
+        *((r, core.CALL_KIND_COMPACTION) for r in stats.get("compaction_calls", [])),
+    ):
+        raw_agent = raw["agent_id"]
+        agent_id = raw_agent if raw_agent and (raw_agent in started or kind == "request") else None
+        agent_name = (
+            None if agent_id is None else (started.get(agent_id) or {}).get("name") or agent_id
+        )
+        calls.append(
+            core.make_call(
+                ts_ms=raw["ts_ms"],
+                model=raw["model"],
+                input_tokens=raw["input"],
+                cached_tokens=raw["cached"],
+                cache_write_tokens=raw["cache_write"],
+                output_tokens=raw["output"],
+                nano_aiu=raw["nano_aiu"],
+                agent=agent_name,
+                agent_id=agent_id,
+                initiator=(
+                    raw.get("initiator")
+                    if kind == core.CALL_KIND_REQUEST
+                    else core.CALL_KIND_COMPACTION
+                ),
+                kind=kind,
+                skill=_skill(agent_id, raw["ts_ms"]),
+                llm_calls=raw.get("llm_calls") or 1,
+                premium_requests=raw.get("premium_requests"),
+            )
+        )
+    calls.sort(key=lambda c: (c["ts_ms"] is None, c["ts_ms"] or 0))
+    return calls
 
 
 # ─── Cheap metadata listing (no events.jsonl parse) ─────────────────────────
@@ -1024,17 +1004,28 @@ def list_recent_sessions(
     since_ms: int | None = None,
     workspace_filter: str | None = None,
     require_logs: bool = False,  # noqa: ARG001 - kept for parity with vscode's signature
+    active_since_ms: int | None = None,
 ) -> list[dict[str, Any]]:
     """List CLI/App sessions from ``roots``, sorted most-recent first.
 
     ``require_logs`` is accepted for signature parity with
     :func:`copilot_session_usage._internal.vscode.list_recent_sessions`: every
     directory returned by :func:`list_session_dirs` already has ``events.jsonl``,
-    so it has no additional effect here.
+    so it has no additional effect here. ``active_since_ms`` keeps sessions
+    whose ``events.jsonl`` was modified at or after that instant (instead of
+    filtering by creation time), so a long-running session that started
+    before a call window is still analyzed.
     """
     all_sessions: list[dict[str, Any]] = []
     for root in roots:
         for session_dir in list_session_dirs(root):
+            if active_since_ms is not None:
+                try:
+                    mtime_ms = (session_dir / EVENTS_FILENAME).stat().st_mtime * 1000
+                except OSError:
+                    continue
+                if mtime_ms < active_since_ms:
+                    continue
             meta = _session_metadata(session_dir)
             if since_ms and (meta.get("created_ms") or 0) < since_ms:
                 continue

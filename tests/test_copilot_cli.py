@@ -199,124 +199,188 @@ def test_analyze_cli_session_full_shutdown(write_cli_session, tmp_path, pricing)
     assert result["title"] == "Test CLI Session"
     assert result["total"]["input_tokens"] == 1000
     assert result["total"]["output_tokens"] == 100
+    assert result["schema_version"] == 2
     assert result["total"]["llm_calls"] == 1
+    assert result["total"]["cost_source"] == "billed"
+    assert result["total"]["cache_ratio"] == 0.0
+    assert result["total"]["compaction"] == {"calls": 0, "estimated_usd": 0.0}
     assert result["models"] == ["gpt-5.6-luna"]
     assert result["model_breakdown"][0]["model"] == "gpt-5.6-luna"
-    # Billed per-model totalNanoAiu (100_000_000 nano = $0.001) is used directly.
+    # Billed nanoAiu of the call (100_000_000 nano = $0.001) is used directly.
     assert result["total"]["estimated_usd"] == pytest.approx(0.001, abs=1e-9)
     assert result["active_duration_seconds"] == 5
     assert result["skills"]["detected"] == ["my-skill"]
     assert result["skills"]["active"] == "my-skill"
-    assert result["skills"]["breakdown"] == []
-    assert result["subagents"] == []
+    assert [r["skill"] for r in result["skills"]["breakdown"]] == ["my-skill"]
+    assert result["skills"]["breakdown"][0]["estimated_usd"] == pytest.approx(0.001)
+    assert [s["name"] for s in result["subagents"]] == ["main"]
+    assert result["initiator_breakdown"] == [
+        {"initiator": "user", "llm_calls": 1, "estimated_usd": 0.001}
+    ]
     assert result["diagnostics"] == []
     tool_row = result["skills"]["tool_breakdown"][0]
     assert tool_row == {"tool": "read_file", "calls": 1, "skill": "my-skill", "subagent": "main"}
     assert result["provider_usage"]["total_nano_aiu"] == 100_000_000
     assert result["provider_usage"]["shutdown_type"] == "routine"
-    assert result["provider_usage"]["subagents"] == []
+    assert "subagents" not in result["provider_usage"]
+    # The snapshot agrees with the per-call records, so there is no delta.
+    assert result["reconciliation"]["snapshot_usd"] == pytest.approx(0.001)
+    assert result["reconciliation"]["snapshot_delta_usd"] == pytest.approx(0.0)
 
 
-def _shutdown_session(model_metrics: dict, agent_metrics: dict | None = None) -> list[dict]:
-    data: dict = {"shutdownType": "routine", "modelMetrics": model_metrics}
-    if agent_metrics is not None:
-        data["agentMetrics"] = agent_metrics
-    return [
-        {
-            "type": "session.start",
-            "data": {"sessionId": SID, "version": 1, "startTime": "2026-01-01T00:00:00.000Z"},
-            "id": "e1",
-            "timestamp": "2026-01-01T00:00:00.000Z",
-            "parentId": None,
-        },
-        {
-            "type": "session.shutdown",
-            "data": data,
-            "id": "e2",
-            "timestamp": "2026-01-01T00:05:00.000Z",
-            "parentId": "e1",
-        },
-    ]
+def _start_event(ts: str = "2026-01-01T00:00:00.000Z", **extra) -> dict:
+    return {
+        "type": "session.start",
+        "data": {"sessionId": SID, "version": 1, "startTime": ts, **extra},
+        "id": "e1",
+        "timestamp": ts,
+        "parentId": None,
+    }
+
+
+def _usage_event(
+    ts: str,
+    uid: str,
+    *,
+    model: str = "gpt-6-luna",
+    inp: int = 1000,
+    cached: int = 0,
+    write: int | None = 0,
+    out: int = 100,
+    nano: int | None = 100_000_000,
+    agent_id: str | None = None,
+    initiator: str = "user",
+    cost: float | None = 1,
+) -> dict:
+    usage: dict = {
+        "model": model,
+        "inputTokens": inp,
+        "cacheReadTokens": cached,
+        "outputTokens": out,
+        "initiator": initiator,
+        "accounting": {"usageId": uid},
+    }
+    if write is not None:
+        usage["cacheWriteTokens"] = write
+    if nano is not None:
+        usage["copilotUsage"] = {"totalNanoAiu": nano}
+    if cost is not None:
+        usage["cost"] = cost
+    event = {
+        "type": "session.usage_record",
+        "data": {"usage": usage},
+        "id": f"id-{uid}",
+        "timestamp": ts,
+    }
+    if agent_id:
+        event["agentId"] = agent_id
+    return event
+
+
+def _compaction_event(
+    ts: str,
+    *,
+    nano: int | None = 200_000_000,
+    model: str | None = "gpt-6-luna",
+    requests: int = 2,
+) -> dict:
+    tokens: dict = {
+        "inputTokens": 5000,
+        "outputTokens": 500,
+        "cacheReadTokens": 1000,
+        "requestCount": requests,
+    }
+    if nano is not None:
+        tokens["copilotUsage"] = {"totalNanoAiu": nano}
+    data: dict = {"compactionTokensUsed": tokens}
+    if model:
+        data["behaviorModelId"] = model
+    return {"type": "session.compaction_complete", "data": data, "id": f"c-{ts}", "timestamp": ts}
+
+
+def _shutdown_event(ts: str, nano: int | None = None) -> dict:
+    data: dict = {"shutdownType": "routine"}
+    if nano is not None:
+        data["totalNanoAiu"] = nano
+    return {"type": "session.shutdown", "data": data, "id": f"s-{ts}", "timestamp": ts}
 
 
 def test_cli_cost_uses_exact_cache_write_tokens_without_billing(
     write_cli_session, tmp_path, pricing
 ):
-    # Real gpt-6-luna shutdown: inputTokens = 12 fresh + 51330 read + 25394 write,
+    # Real gpt-6-luna call: inputTokens = 12 fresh + 51330 read + 25394 write,
     # billed 406_325_000 nanoAiu. Without the billed figure, tokens reproduce it.
-    usage = {
-        "inputTokens": 76736,
-        "outputTokens": 749,
-        "cacheReadTokens": 51330,
-        "cacheWriteTokens": 25394,
-    }
-    events = _shutdown_session({"gpt-6-luna": {"requests": {"count": 3}, "usage": usage}})
+    events = [
+        _start_event(),
+        _usage_event(
+            "2026-01-01T00:01:00.000Z",
+            "u1",
+            inp=76736,
+            cached=51330,
+            write=25394,
+            out=749,
+            nano=None,
+        ),
+    ]
     session_dir = write_cli_session(tmp_path, SID, events=events, workspace={})
     result = copilot_cli.analyze_cli_session(session_dir, pricing)
     assert result["model_breakdown"][0]["estimated_usd"] == pytest.approx(0.004063, abs=1e-6)
+    assert result["total"]["cost_source"] == "estimated"
+    assert result["total"]["uncached_input_tokens"] == 12
+    assert result["reconciliation"]["calls_without_billing"] == 1
+    assert result["reconciliation"]["billed_usd"] == 0.0
+    assert result["reconciliation"]["delta_pct"] is None
 
 
-def test_cli_subagents_from_agent_metrics(write_cli_session, tmp_path, pricing):
-    def metrics(nano: int) -> dict:
-        return {
-            "requests": {"count": 1},
-            "usage": {
-                "inputTokens": 10,
-                "outputTokens": 1,
-                "cacheReadTokens": 0,
-                "cacheWriteTokens": 0,
-            },
-            "totalNanoAiu": nano,
-        }
-
-    agents = {
-        "main": {"totalNanoAiu": 300_000_000, "modelMetrics": {"gpt-6-luna": metrics(300_000_000)}},
-        "abc": {
-            "agentName": "explore",
-            "agentDisplayName": "find-things",
-            "totalNanoAiu": 700_000_000,
-            "modelMetrics": {"gpt-6-luna": metrics(700_000_000)},
+def test_cli_subagents_from_usage_records(write_cli_session, tmp_path, pricing):
+    events = [
+        _start_event(),
+        {
+            "type": "subagent.started",
+            "data": {"agentName": "explore", "agentDisplayName": "find-things"},
+            "agentId": "abc",
+            "id": "s1",
+            "timestamp": "2026-01-01T00:00:30.000Z",
         },
-    }
-    events = _shutdown_session({"gpt-6-luna": metrics(1_000_000_000)}, agents)
+        _usage_event("2026-01-01T00:01:00.000Z", "u1", nano=300_000_000),
+        _usage_event(
+            "2026-01-01T00:02:00.000Z",
+            "u2",
+            nano=700_000_000,
+            agent_id="abc",
+            initiator="sub-agent",
+        ),
+    ]
     session_dir = write_cli_session(tmp_path, SID, events=events, workspace={})
     result = copilot_cli.analyze_cli_session(session_dir, pricing)
     subs = result["subagents"]
     assert [s["name"] for s in subs] == ["main", "find-things"]
-    assert subs[1]["agent_type"] == "explore"
+    assert subs[1]["subagent_id"] == "abc"
+    assert subs[1]["llm_calls"] == 1
     assert sum(s["estimated_usd"] for s in subs) == pytest.approx(0.01)
+    assert {r["initiator"] for r in result["initiator_breakdown"]} == {"user", "sub-agent"}
 
 
-def test_cli_unattributed_billing_from_cumulative_total(write_cli_session, tmp_path, pricing):
-    usage = {"inputTokens": 10, "outputTokens": 1, "cacheReadTokens": 0, "cacheWriteTokens": 0}
-    events = _shutdown_session(
-        {"gpt-6-luna": {"requests": {"count": 1}, "usage": usage, "totalNanoAiu": 100_000_000}}
-    )
-    events[1]["data"]["totalNanoAiu"] = 300_000_000
+def test_cli_snapshot_higher_than_records_adds_diagnostic(write_cli_session, tmp_path, pricing):
+    events = [
+        _start_event(),
+        _usage_event("2026-01-01T00:01:00.000Z", "u1", nano=100_000_000),
+        _shutdown_event("2026-01-01T00:05:00.000Z", nano=3_000_000_000),
+    ]
     session_dir = write_cli_session(tmp_path, SID, events=events, workspace={})
     result = copilot_cli.analyze_cli_session(session_dir, pricing)
-    assert result["total"]["estimated_usd"] == pytest.approx(0.003)
-    assert result["total"]["unattributed_usd"] == pytest.approx(0.002)
-    assert result["model_breakdown"][0]["estimated_usd"] == pytest.approx(0.001)
+    # Per-call records stay authoritative; the snapshot only feeds reconciliation.
+    assert result["total"]["estimated_usd"] == pytest.approx(0.001)
+    assert result["reconciliation"]["snapshot_usd"] == pytest.approx(0.03)
+    assert result["reconciliation"]["snapshot_delta_usd"] == pytest.approx(0.029)
+    assert any("snapshot" in d and "higher" in d for d in result["diagnostics"])
 
 
 def test_analyze_cli_session_no_shutdown_falls_back_to_checkpoint(
     write_cli_session, tmp_path, pricing
 ):
     events = [
-        {
-            "type": "session.start",
-            "data": {
-                "sessionId": SID,
-                "version": 1,
-                "startTime": "2026-01-01T00:00:00.000Z",
-                "selectedModel": "gpt-5.6-luna",
-                "context": {"cwd": "/proj"},
-            },
-            "id": "e1",
-            "timestamp": "2026-01-01T00:00:00.000Z",
-            "parentId": None,
-        },
+        _start_event(selectedModel="gpt-5.6-luna", context={"cwd": "/proj"}),
         {
             "type": "session.usage_checkpoint",
             "data": {
@@ -332,25 +396,18 @@ def test_analyze_cli_session_no_shutdown_falls_back_to_checkpoint(
     session_dir = write_cli_session(tmp_path, SID, events=events, workspace={})
     result = copilot_cli.analyze_cli_session(session_dir, pricing)
 
-    # No per-model token evidence at checkpoint granularity: preserved as
-    # missing, never fabricated as a measured zero.
-    assert result["total"]["input_tokens"] is None
-    assert result["total"]["output_tokens"] is None
-    assert result["total"]["cached_tokens"] is None
-    assert result["total"]["llm_calls"] is None
-    assert result["total"]["cache_ratio"] is None
-    # Cumulative billed nanoAiu still yields a dollar-accurate session total,
-    # entirely unattributed because no per-model metrics exist yet.
-    assert result["total"]["estimated_usd"] == pytest.approx(0.00042, abs=1e-4)
-    assert result["total"]["unattributed_usd"] == pytest.approx(0.00042, abs=1e-6)
+    # A checkpoint alone has no per-call usage: totals are unavailable, never
+    # fabricated as a measured zero or taken from the cumulative snapshot.
+    for key in ("input_tokens", "output_tokens", "cached_tokens", "llm_calls", "cache_ratio"):
+        assert result["total"][key] is None
+    assert result["total"]["estimated_usd"] is None
+    assert result["total"]["compaction"] is None
     assert result["model_breakdown"] == []
+    assert result["reconciliation"] is None
     assert result["models"] == ["gpt-5.6-luna"]
-    assert len(result["diagnostics"]) == 2
-    assert "no session.shutdown event found" in result["diagnostics"][0]
-    # Provider-native nanoAiu is preserved separately and never used to
-    # populate the shared estimated_usd.
+    assert any("no session.usage_record" in d for d in result["diagnostics"])
     assert result["provider_usage"]["total_premium_requests"] == 2
-    assert result["provider_usage"]["total_nano_aiu"] == 42_000_000
+    assert result["provider_usage"]["total_nano_aiu"] is None
 
 
 def test_analyze_cli_session_no_shutdown_no_checkpoint(write_cli_session, tmp_path, pricing):
@@ -675,18 +732,12 @@ def test_parse_events_file_tolerates_non_mapping_data(tmp_path):
     assert stats["skill_events"] == []  # no valid skill name extracted
 
 
-def test_analyze_cli_session_non_mapping_model_metrics_diagnostic(
+def test_analyze_cli_session_non_mapping_model_metrics_degrades_to_unavailable(
     write_cli_session, tmp_path, pricing
 ):
-    """A non-mapping 'modelMetrics' degrades to unavailable totals, not a crash."""
+    """A non-mapping 'modelMetrics' in a shutdown never crashes and adds no usage."""
     events = [
-        {
-            "type": "session.start",
-            "data": {"sessionId": SID, "version": 1, "startTime": "2026-01-01T00:00:00.000Z"},
-            "id": "e1",
-            "timestamp": "2026-01-01T00:00:00.000Z",
-            "parentId": None,
-        },
+        _start_event(),
         {
             "type": "session.shutdown",
             "data": {"shutdownType": "routine", "modelMetrics": "not-a-mapping"},
@@ -700,92 +751,39 @@ def test_analyze_cli_session_non_mapping_model_metrics_diagnostic(
     assert result["model_breakdown"] == []
     assert result["total"]["input_tokens"] is None
     assert result["total"]["estimated_usd"] is None
-    assert any("modelMetrics was not a mapping" in d for d in result["diagnostics"])
+    assert any("no session.usage_record" in d for d in result["diagnostics"])
 
 
-def test_analyze_cli_session_skips_non_mapping_per_model_entry(
-    write_cli_session, tmp_path, pricing
-):
-    """One malformed per-model entry is skipped with a diagnostic; other models are unaffected."""
+def test_analyze_cli_session_skips_malformed_usage_records(write_cli_session, tmp_path, pricing):
+    """Malformed usage records are skipped; valid calls are unaffected."""
+    broken = [
+        {"type": "session.usage_record", "data": {"usage": "not-a-mapping"}, "timestamp": "x"},
+        {"type": "session.usage_record", "data": {"usage": {"inputTokens": 5}}},  # no model
+        {"type": "session.usage_record", "data": {"usage": {"model": "gpt-6-luna"}}},  # no tokens
+    ]
     events = [
-        {
-            "type": "session.start",
-            "data": {"sessionId": SID, "version": 1, "startTime": "2026-01-01T00:00:00.000Z"},
-            "id": "e1",
-            "timestamp": "2026-01-01T00:00:00.000Z",
-            "parentId": None,
-        },
-        {
-            "type": "session.shutdown",
-            "data": {
-                "shutdownType": "routine",
-                "modelMetrics": {
-                    "broken-model": "not-a-mapping",
-                    "gpt-5.6-luna": {
-                        "requests": {"count": 1},
-                        "usage": {
-                            "inputTokens": 1000,
-                            "outputTokens": 100,
-                            "cacheReadTokens": 0,
-                        },
-                    },
-                },
-            },
-            "id": "e2",
-            "timestamp": "2026-01-01T00:00:05.000Z",
-            "parentId": "e1",
-        },
+        _start_event(),
+        *broken,
+        _usage_event("2026-01-01T00:01:00.000Z", "u1"),
     ]
     session_dir = write_cli_session(tmp_path, SID, events=events, workspace={})
     result = copilot_cli.analyze_cli_session(session_dir, pricing)
-    assert [m["model"] for m in result["model_breakdown"]] == ["gpt-5.6-luna"]
+    assert [m["model"] for m in result["model_breakdown"]] == ["gpt-6-luna"]
+    assert result["total"]["llm_calls"] == 1
+    assert result["total"]["input_tokens"] == 1000
+
+
+def test_analyze_cli_session_missing_token_field_counts_as_zero(
+    write_cli_session, tmp_path, pricing
+):
+    """A call that reports only input tokens is a real call with zero output."""
+    event = _usage_event("2026-01-01T00:01:00.000Z", "u1", nano=None)
+    del event["data"]["usage"]["outputTokens"]
+    session_dir = write_cli_session(tmp_path, SID, events=[_start_event(), event], workspace={})
+    result = copilot_cli.analyze_cli_session(session_dir, pricing)
+    assert result["total"]["output_tokens"] == 0
     assert result["total"]["input_tokens"] == 1000
     assert result["total"]["estimated_usd"] is not None
-    assert any("broken-model" in d for d in result["diagnostics"])
-
-
-def test_analyze_cli_session_missing_per_model_field_preserved_as_none(
-    write_cli_session, tmp_path, pricing
-):
-    """A model missing one usage field keeps that field as None, not a fabricated zero."""
-    events = [
-        {
-            "type": "session.start",
-            "data": {"sessionId": SID, "version": 1, "startTime": "2026-01-01T00:00:00.000Z"},
-            "id": "e1",
-            "timestamp": "2026-01-01T00:00:00.000Z",
-            "parentId": None,
-        },
-        {
-            "type": "session.shutdown",
-            "data": {
-                "shutdownType": "routine",
-                "modelMetrics": {
-                    "gpt-5.6-luna": {
-                        "requests": {"count": 1},
-                        # outputTokens is entirely absent from the usage evidence.
-                        "usage": {"inputTokens": 1000, "cacheReadTokens": 0},
-                    }
-                },
-            },
-            "id": "e2",
-            "timestamp": "2026-01-01T00:00:05.000Z",
-            "parentId": "e1",
-        },
-    ]
-    session_dir = write_cli_session(tmp_path, SID, events=events, workspace={})
-    result = copilot_cli.analyze_cli_session(session_dir, pricing)
-    row = result["model_breakdown"][0]
-    assert row["input_tokens"] == 1000
-    assert row["output_tokens"] is None
-    assert row["cached_tokens"] == 0
-    # Incomplete evidence for this model: cost is unavailable, not fabricated.
-    assert row["estimated_usd"] is None
-    assert result["total"]["estimated_usd"] is None
-    assert result["total"]["output_tokens"] is None
-    assert any("incomplete token usage" in d for d in result["diagnostics"])
-    # Calls are still preserved even though tokens are incomplete.
-    assert result["total"]["llm_calls"] == 1
 
 
 def test_analyze_cli_session_checkpoint_non_list_model_cache_state(
@@ -793,13 +791,7 @@ def test_analyze_cli_session_checkpoint_non_list_model_cache_state(
 ):
     """A non-list 'modelCacheState' at checkpoint granularity never crashes."""
     events = [
-        {
-            "type": "session.start",
-            "data": {"sessionId": SID, "version": 1, "startTime": "2026-01-01T00:00:00.000Z"},
-            "id": "e1",
-            "timestamp": "2026-01-01T00:00:00.000Z",
-            "parentId": None,
-        },
+        _start_event(),
         {
             "type": "session.usage_checkpoint",
             "data": {"totalNanoAiu": 1, "modelCacheState": "not-a-list"},
@@ -810,9 +802,8 @@ def test_analyze_cli_session_checkpoint_non_list_model_cache_state(
     ]
     session_dir = write_cli_session(tmp_path, SID, events=events, workspace={})
     result = copilot_cli.analyze_cli_session(session_dir, pricing)
-    assert result["total"]["estimated_usd"] == pytest.approx(0.0, abs=1e-9)
+    assert result["total"]["estimated_usd"] is None
     assert result["models"] == []
-    assert any("modelCacheState was not a list" in d for d in result["diagnostics"])
 
 
 def test_analyze_cli_session_checkpoint_non_mapping_model_cache_entry(
@@ -1021,19 +1012,34 @@ def test_tool_breakdown_attributes_subagent_tool_calls(write_cli_session, tmp_pa
     }
 
 
-def test_provider_usage_preserves_subagent_evidence(write_cli_session, tmp_path, pricing):
-    session_dir = write_cli_session(tmp_path, SID, events=_subagent_events(), workspace={})
+def test_subagent_calls_and_skills_attributed_from_usage_records(
+    write_cli_session, tmp_path, pricing
+):
+    agent_id = "22222222-2222-2222-2222-222222222222"
+    events = _subagent_events()
+    events += [
+        _usage_event("2026-01-01T00:00:02.500Z", "m1", model="gpt-5.6-luna", nano=100_000_000),
+        _usage_event(
+            "2026-01-01T00:00:06.500Z",
+            "s1",
+            model="gpt-5.6-luna",
+            nano=300_000_000,
+            agent_id=agent_id,
+            initiator="sub-agent",
+        ),
+    ]
+    session_dir = write_cli_session(tmp_path, SID, events=events, workspace={})
     result = copilot_cli.analyze_cli_session(session_dir, pricing)
 
-    subagents = result["provider_usage"]["subagents"]
-    assert len(subagents) == 1
-    row = subagents[0]
-    assert row["agent_id"] == "22222222-2222-2222-2222-222222222222"
-    assert row["name"] == "Test Subagent"
-    assert row["model"] == "gpt-5.6-luna"
-    assert row["total_tool_calls"] == 1
-    assert row["total_tokens_reported"] == 1234
-    assert row["duration_seconds"] == 3
+    by_name = {s["name"]: s for s in result["subagents"]}
+    assert set(by_name) == {"main", "Test Subagent"}
+    assert by_name["Test Subagent"]["subagent_id"] == agent_id
+    assert by_name["Test Subagent"]["estimated_usd"] == pytest.approx(0.003)
+    assert by_name["Test Subagent"]["model"] == "gpt-5.6-luna"
+    # Each call takes the active skill of its own agent at its timestamp.
+    skills = {r["skill"]: r["estimated_usd"] for r in result["skills"]["breakdown"]}
+    assert skills == {"main-skill": pytest.approx(0.001), "sub-skill": pytest.approx(0.003)}
+    assert "subagents" not in result["provider_usage"]
 
 
 def test_tool_breakdown_uses_raw_agent_id_when_subagent_started_unseen(
@@ -1098,3 +1104,92 @@ def test_session_metadata_created_ms_none_when_no_evidence(tmp_path):
     (session_dir / "events.jsonl").write_text("", encoding="utf-8")
     meta = copilot_cli._session_metadata(session_dir)
     assert meta["created_ms"] is None
+
+
+# ─── per-call regression tests (synthetic) ────────────────────────────────────
+
+
+def test_usage_records_without_shutdown_give_full_breakdown(write_cli_session, tmp_path, pricing):
+    events = [
+        _start_event(),
+        _usage_event("2026-01-01T00:01:00.000Z", "u1", model="gpt-6-luna", inp=1000, out=100),
+        _usage_event("2026-01-01T00:02:00.000Z", "u2", model="gpt-6-sol", inp=2000, out=200),
+        # Utility-model records are excluded from the analysis.
+        _usage_event("2026-01-01T00:03:00.000Z", "u3", model="gpt-4o", inp=9000, out=900),
+    ]
+    session_dir = write_cli_session(tmp_path, SID, events=events, workspace={})
+    result = copilot_cli.analyze_cli_session(session_dir, pricing)
+    assert result["schema_version"] == 2
+    assert result["total"]["input_tokens"] == 3000
+    assert result["total"]["output_tokens"] == 300
+    assert result["total"]["llm_calls"] == 2
+    assert {m["model"] for m in result["model_breakdown"]} == {"gpt-6-luna", "gpt-6-sol"}
+    assert result["total"]["estimated_usd"] == pytest.approx(
+        sum(m["estimated_usd"] for m in result["model_breakdown"]), abs=1e-6
+    )
+
+
+def test_usage_records_after_last_shutdown_are_included(write_cli_session, tmp_path, pricing):
+    events = [
+        _start_event(),
+        _usage_event("2026-01-01T00:01:00.000Z", "u1", inp=1000),
+        _shutdown_event("2026-01-01T00:02:00.000Z", nano=100_000_000),
+        _usage_event("2026-01-01T00:03:00.000Z", "u2", inp=500),
+    ]
+    session_dir = write_cli_session(tmp_path, SID, events=events, workspace={})
+    result = copilot_cli.analyze_cli_session(session_dir, pricing)
+    assert result["total"]["input_tokens"] == 1500
+    assert result["total"]["llm_calls"] == 2
+
+
+def test_compaction_complete_counted_as_calls(write_cli_session, tmp_path, pricing):
+    events = [
+        _start_event(),
+        _usage_event("2026-01-01T00:01:00.000Z", "u1", nano=100_000_000),
+        _compaction_event("2026-01-01T00:02:00.000Z", nano=200_000_000, requests=2),
+    ]
+    session_dir = write_cli_session(tmp_path, SID, events=events, workspace={})
+    result = copilot_cli.analyze_cli_session(session_dir, pricing)
+    compaction = result["total"]["compaction"]
+    assert compaction["calls"] == 2
+    assert compaction["estimated_usd"] == pytest.approx(0.002, abs=1e-6)
+    assert result["total"]["input_tokens"] == 6000
+    assert result["total"]["estimated_usd"] == pytest.approx(0.003, abs=1e-6)
+    assert result["initiator_breakdown"]
+    assert "compaction" in {i["initiator"] for i in result["initiator_breakdown"]}
+    calls = copilot_cli.build_cli_calls(copilot_cli.parse_events_file(session_dir / "events.jsonl"))
+    kinds = {c["kind"] for c in calls}
+    assert kinds == {"request", "compaction"}
+    assert next(c for c in calls if c["kind"] == "compaction")["initiator"] == "compaction"
+
+
+def test_cli_window_splits_calls_by_timestamp(write_cli_session, tmp_path, pricing):
+    events = [
+        _start_event(),
+        _usage_event("2026-01-01T00:01:00.000Z", "u1", inp=1000, nano=100_000_000),
+        _usage_event("2026-01-01T00:05:00.000Z", "u2", inp=4000, nano=400_000_000),
+        _shutdown_event("2026-01-01T00:06:00.000Z", nano=500_000_000),
+    ]
+    session_dir = write_cli_session(tmp_path, SID, events=events, workspace={})
+    cut = core.parse_since_to_ms("2026-01-01T00:03:00Z")
+    early = copilot_cli.analyze_cli_session(session_dir, pricing, until_ms=cut)
+    late = copilot_cli.analyze_cli_session(session_dir, pricing, since_ms=cut)
+    full = copilot_cli.analyze_cli_session(session_dir, pricing)
+    assert early["total"]["input_tokens"] == 1000
+    assert late["total"]["input_tokens"] == 4000
+    assert early["total"]["estimated_usd"] + late["total"]["estimated_usd"] == pytest.approx(
+        full["total"]["estimated_usd"], abs=1e-6
+    )
+    assert early["reconciliation"]["snapshot_usd"] is None
+    assert early["reconciliation"]["snapshot_delta_usd"] is None
+    assert full["reconciliation"]["snapshot_usd"] == pytest.approx(0.005, abs=1e-6)
+    assert full["reconciliation"]["snapshot_delta_usd"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_cli_window_with_zero_calls_has_no_diagnostic(write_cli_session, tmp_path, pricing):
+    events = [_start_event(), _usage_event("2026-01-01T00:01:00.000Z", "u1")]
+    session_dir = write_cli_session(tmp_path, SID, events=events, workspace={})
+    since = core.parse_since_to_ms("2026-02-01T00:00:00Z")
+    result = copilot_cli.analyze_cli_session(session_dir, pricing, since_ms=since)
+    assert not result["total"]["llm_calls"]
+    assert not result.get("diagnostics")

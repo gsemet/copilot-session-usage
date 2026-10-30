@@ -52,7 +52,7 @@ Copilot CLI/App event logs and turns them into repeatable reports. It provides:
 | Estimated cost (`$`) **per model** | ❌ No accurate cost per breakdown | ✅ |
 | Tokens **per subagent** | ⚠️ LLM digging each time; consumes tokens | ✅ |
 | Estimated cost (`$`) **per subagent** | ❌ No accurate cost per breakdown | ✅ |
-| Cost attribution to skills | ❌ Cannot provide cost per breakdown | ✅ Limited timeline attribution (VS Code) |
+| Cost attribution to skills | ❌ Cannot provide cost per breakdown | ✅ Limited timeline attribution |
 | Tool-call counts by skill and subagent | ⚠️ LLM digging each time | ✅ |
 | Batch analysis, filtering, and aggregation | Limited/conversational | ✅ |
 | Stable JSON, table, and detailed output | No stable contract | ✅ |
@@ -64,11 +64,11 @@ In the table, `⚠️` means that Chronicle may answer the question in a particu
 environment or with additional analysis, but does not guarantee a stable, reproducible
 breakdown for it.
 
-Skill token and cost attribution is limited: VS Code requests are grouped under
-the latest explicit slash-command skill, including the whole request context and
-later work until another invocation. This is not an isolated measurement of tokens
-or cost caused by the skill; automatically loaded and overlapping skills cannot be
-separated. CLI/App per-skill tokens and costs are unavailable. See
+Skill token and cost attribution is limited: requests (VS Code) and calls
+(CLI/App, per agent) are grouped under the latest explicit skill invocation,
+including the whole request context and later work until another invocation.
+This is not an isolated measurement of tokens or cost caused by the skill;
+automatically loaded and overlapping skills cannot be separated. See
 [Skill attribution](docs/source/explanation/how-cost-estimation-works.md#skill-attribution).
 
 Use Chronicle for **“What did I do?”** and use this project for **“How much did it cost,
@@ -88,12 +88,45 @@ with `--agent` (default `vscode`):
   Commands never mix providers unless `--agent all` is passed. Missing
   provider roots are ignored, including when both roots are absent.
 
-Both providers share the same model catalog, pricing data, cache rules, and
-estimated-USD calculation. Copilot CLI/App sessions additionally expose
-provider-native counters (`provider_usage`: nanoAiu, premium requests) as
-separate fields, and never turn missing evidence (for example, a session that
-has not shut down yet) into a fabricated zero — see `diagnostics` in the
-output when data is unavailable.
+Both providers feed **one per-call pipeline**: every LLM call becomes a
+normalized record, and all totals, model rows, subagent rows and skill rows are
+sums of those records (export them with `copilot-session-usage calls`). They
+share the same model catalog, pricing data, cache rules, and estimated-USD
+calculation. JSON reports carry `"schema_version": 2`. Missing evidence is
+never turned into a fabricated zero: a CLI/App session with no usage records
+yields `null` totals and a `diagnostics` entry.
+
+## Don't recompute costs yourself
+
+This tool is the reference calculation. Scripts that re-derive costs from token
+counts routinely get these wrong, so rely on `span`, `calls` and the
+`reconciliation` block instead:
+
+- `input_tokens` **includes cache reads and cache writes**. `cached_tokens` and
+  `cache_write_tokens` are subsets; `uncached_input_tokens` is the remainder.
+  Adding them up double-counts (the old `total_tokens` field was removed).
+- **Cache writes are billed at a premium** over the base input rate.
+- **VS Code logs no cache-write count** (`cache_write_tokens` is `null`).
+- **CLI compactions are separate events** (`session.compaction_complete`); they
+  are included as `kind: "compaction"` calls.
+- **CLI shutdown snapshots are incomplete**; they are used only for the
+  `snapshot_usd`/`snapshot_delta_usd` reconciliation check.
+- **Utility models are free** on the VS Code path and excluded from totals.
+- **The long-context tier is chosen per call**, from that call's input size.
+
+Billed nanoAIU is used whenever logged (`cost_source: "billed"`); the price
+table is only a fallback (`"estimated"`). Every session and span carries
+`reconciliation` (`billed_usd`, `estimated_from_tokens_usd`, `delta_pct`,
+`calls_without_billing`) to verify the formula. See
+[Don't recompute costs yourself](docs/source/explanation/how-cost-estimation-works.md#dont-recompute-costs-yourself).
+
+Analysis is **offline**: pricing is never refreshed automatically. Run
+`copilot-session-usage pricing refresh` to update it, or pass
+`auto_refresh=True` in the Python API.
+
+`--since`, `--until` and `--last` select **calls** by their own timestamp; a
+session is kept only if it has an in-window call, and its totals count only
+those calls.
 
 ```bash
 # Analyze the latest Copilot CLI/App session
@@ -133,6 +166,9 @@ copilot-session-usage --agent all span \
   --until 2026-07-08T00:00:00Z \
   --format table
 
+# Export every priced LLM call as JSONL (the building block of all totals)
+copilot-session-usage --agent cli calls --last 7d --output calls.jsonl
+
 # Aggregate cost across all sessions matching a PRD path
 copilot-session-usage analyze --name "PRD: /path/to/prd" --aggregate --format table
 
@@ -155,11 +191,12 @@ copilot-session-usage list --dir /path/to/debug-logs --format table
 - **Aggregation** — roll up costs across many sessions in one command
 - **Skill-aware cost attribution** — detect skills, attribute LLM and tool calls to the active skill
 - **Skill-source detection** — inspect slash commands, discovery events, system prompts, and skill tools
-- **Skill cost breakdown** — per-skill token counts and estimated cost (VS Code provider)
+- **Skill cost breakdown** — per-skill token counts and estimated cost (both providers)
 - **Tool-call attribution** — per-skill/per-subagent tool-call counts
 - **Title filtering** — find sessions by title substring
 - **Metadata cache** — reuse session indexes until the workspace database changes
-- **Efficiency summaries** — cache ratio, model split, cost per 1M tokens
+- **Efficiency summaries** — token-weighted cache ratio, model split, reconciliation of billed vs. token-formula cost
+- **Per-call export** — `calls` emits normalized JSONL records; `list_calls`/`iter_calls` in the API
 - **Field extraction** — pull specific values with `--query`
 
 ## How it works
@@ -204,26 +241,21 @@ can be determined (from the directory name or a `session.start` event) —
 otherwise it is rejected with an actionable error instead of being analyzed
 with a fabricated identity.
 
-Per-model token totals and cost come from the session's final
-`session.shutdown` event and use the same shared, token-based pricing
-calculation as the VS Code provider. GitHub Copilot's own `totalNanoAiu`
-billing figure is kept separate under `provider_usage.total_nano_aiu` and
-never substituted into the shared cost calculation. For a session that has
-not shut down yet (still active, or interrupted), only provider-native
-counters from the last usage checkpoint are available; token totals and cost
-are reported as unavailable (`null`) via the shared `total` block, with
-`diagnostics` explaining why, rather than as fabricated zeros. Tool calls and
-skill attribution are scoped to the subagent that made them, using
-`subagent.started`/`subagent.completed` events and each event's `agentId`;
-`provider_usage.subagents` separately preserves the raw per-subagent evidence
-available (name, model, tool-call count, reported tokens, duration). Parsing
+Per-model token totals and cost come from the session's per-call records:
+`session.usage_record` (one per LLM call, de-duplicated by `accounting.usageId`)
+plus `session.compaction_complete` events (compactions, `kind: "compaction"`).
+Each call uses its billed `totalNanoAiu` when present, else the shared
+token-based pricing with the exact cache-write count. The cumulative
+`session.shutdown`/`session.usage_checkpoint` snapshots are incomplete and used
+only for the reconciliation diagnostic (`snapshot_usd`, `snapshot_delta_usd`).
+A session that never shut down is therefore fully analyzed; only a session with
+no usage records and no compaction usage has `null` totals, with `diagnostics`
+explaining why. Calls are attributed to the subagent (`agentId`) and active
+skill of their own agent, so the CLI/App provider has a costed skills
+breakdown. `provider_usage` keeps informational counters such as
+`total_premium_requests` and `resume_count`. Parsing
 tolerates unrecognized event types and schema versions other than the one
 currently validated, recording a diagnostic instead of failing.
-
-Pricing lookups for `--agent cli`/`--agent all` are local-only by default
-(no runtime pricing refresh attempt over the network), unlike the `vscode`
-provider's default daily refresh attempt. Run
-`copilot-session-usage pricing refresh` to update pricing explicitly.
 
 ## Knowledge base
 
@@ -246,7 +278,8 @@ just knowledge-validate
 | `id SESSION_ID` | Analyze a session by exact UUID |
 | `list` | List recent sessions (metadata only by default) |
 | `batch N` | Analyze the N most recent sessions in one pass |
-| `span` | Emit a compact total, per-model, and per-session date-span report |
+| `span` | Emit a compact total, per-model, and per-session report (calls in the window) |
+| `calls` | Export every priced LLM call as JSONL (one object per line) |
 | `skills` | List skills used across sessions with aggregated cost |
 
 ### Analysis options
@@ -255,9 +288,9 @@ just knowledge-validate
 |--------|-------------|
 | `--name REGEX` | Filter sessions by title/ID regex (case-insensitive) |
 | `--title SUBSTRING` | Filter sessions by title substring (case-insensitive) |
-| `--since DATE` | Only sessions created after DATE (ISO 8601 with timezone) |
-| `--until DATE` | Only sessions created before DATE (ISO 8601 with timezone) |
-| `--last DURATION` | Use a rolling window such as `7d`, `24h`, or `30m` with `span` |
+| `--since DATE` | Only calls at or after DATE (ISO 8601 with timezone); sessions with no in-window call are dropped |
+| `--until DATE` | Only calls at or before DATE (ISO 8601 with timezone) |
+| `--last DURATION` | Rolling call window such as `7d`, `24h`, or `30m` (`span`, `skills`, `calls`) |
 | `--workspace PATH` | Only sessions from this workspace folder |
 | `--aggregate` | Aggregate all matching sessions into one summary |
 | `--summary` | Output a cost-efficiency summary |
@@ -308,11 +341,12 @@ Title:     Implementation of new feature X
 Started:   2026-07-01T20:37:34Z
 Duration:  40588s  (active: 1083s)
 Models:    claude-sonnet-4.6, claude-haiku-4.5, Kimi-K2.6-azure
-Input:     1,425,790 tokens
+Input:     1,425,790 tokens (incl. cache)
 Output:    22,166 tokens
 Cached:    1,224,340 (86%)
+Uncached:  201,450
 LLM calls: 28
-Est. cost: $1.0880
+Cost:      $1.0880 (billed)
 # Per-skill cost breakdown
 $ copilot-session-usage id 19e03be0-9cfa-4f21-a19a-4bdb754b3965 --skill-breakdown --format table
 Per-Skill Breakdown:
@@ -385,6 +419,7 @@ from copilot_session_usage.api import (
     batch_analyze,
     aggregate_sessions,
     list_sessions,
+    list_calls,
 )
 
 # Analyze a session by path
@@ -410,6 +445,9 @@ sessions = list_sessions(
 # providers with the explicit opt-in agent="all"
 cli_result = analyze_session(Path("~/.copilot/session-state/<uuid>"), agent="cli")
 combined = list_sessions(agent="all")
+
+# Normalized per-call records (calls filtered by timestamp)
+calls = list_calls(agent="cli", since="2026-07-01T00:00:00Z")
 ```
 
 ## Development
