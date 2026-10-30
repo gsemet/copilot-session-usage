@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,20 @@ import click
 from copilot_session_usage._internal import copilot_cli, core, git, vscode
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
+
+
+_SINCE_HELP = (
+    "Only count calls at or after DATE (ISO 8601 with timezone). Sessions are selected by "
+    "activity, not creation date; sessions with no in-window call are omitted."
+)
+_UNTIL_HELP = (
+    "Only count calls at or before DATE (ISO 8601 with timezone). Sessions with no "
+    "in-window call are omitted."
+)
+_LAST_HELP = (
+    "Only count calls within the last DURATION (e.g. 7d, 24h, 30m). Sessions with no "
+    "in-window call are omitted."
+)
 
 
 @click.group(context_settings=CONTEXT_SETTINGS)
@@ -117,6 +132,7 @@ def _discover_sessions(
     since_ms: int | None = None,
     workspace_filter: str | None = None,
     require_logs: bool = False,
+    active_since_ms: int | None = None,
 ) -> list[dict]:
     """Discover session metadata across the active provider(s), tagged and deduped."""
     roots = _provider_roots(ctx)
@@ -128,6 +144,7 @@ def _discover_sessions(
             since_ms=since_ms,
             workspace_filter=workspace_filter,
             require_logs=require_logs,
+            active_since_ms=active_since_ms,
         )
         for s in sessions:
             s.setdefault("provider", "vscode")
@@ -139,6 +156,7 @@ def _discover_sessions(
             since_ms=since_ms,
             workspace_filter=workspace_filter,
             require_logs=require_logs,
+            active_since_ms=active_since_ms,
         )
         for s in sessions:
             s.setdefault("provider", "cli")
@@ -148,25 +166,35 @@ def _discover_sessions(
     return core.merge_provider_sessions(lists)[:limit]
 
 
-def _load_pricing_for_agent(agent: str) -> dict:
-    """Load pricing, keeping CLI/App and combined-mode analysis local-only by default.
+def _load_pricing_for_agent(agent: str) -> dict:  # noqa: ARG001
+    """Load pricing offline: bundled table plus any runtime cache already on disk.
 
-    The ``vscode`` provider preserves its historical behavior (a throttled
-    daily runtime pricing refresh attempt). The ``cli`` provider and the
-    combined ``all`` mode default to no network access, matching the CLI/App
-    integration's local-only design; use ``pricing refresh`` to opt into an
-    explicit network refresh.
+    Analysis never touches the network; use ``pricing refresh`` to opt in.
     """
-    return core.load_pricing(auto_refresh=(agent == "vscode"))
+    return core.load_pricing(auto_refresh=False)
 
 
-def _analyze_session_record(session: dict, pricing: dict) -> dict:
-    """Analyze a session-metadata record produced by either provider's discovery."""
+def _analyze_session_record(
+    session: dict,
+    pricing: dict,
+    since_ms: int | None = None,
+    until_ms: int | None = None,
+) -> dict | None:
+    """Analyze a session-metadata record produced by either provider's discovery.
+
+    With a call window, returns ``None`` for a session with no in-window calls.
+    """
     session_dir = Path(session["debug_log_dir"])
     if session.get("provider") == "cli":
-        result = copilot_cli.analyze_cli_session(session_dir, pricing)
+        result = copilot_cli.analyze_cli_session(
+            session_dir, pricing, since_ms=since_ms, until_ms=until_ms
+        )
     else:
-        result = core.analyze_session(session_dir, pricing)
+        result = core.analyze_session(session_dir, pricing, since_ms=since_ms, until_ms=until_ms)
+    if (since_ms is not None or until_ms is not None) and not (
+        result.get("total", {}).get("llm_calls")
+    ):
+        return None
     result["title"] = session.get("title") or result.get("title")
     result["provider"] = session.get("provider", result.get("provider", "vscode"))
     return result
@@ -368,12 +396,8 @@ def _shape_analysis_result(
     metavar="REGEX",
     help="Analyze sessions whose title matches REGEX (case-insensitive).",
 )
-@click.option(
-    "--since", metavar="DATE", help="Only sessions created after DATE (ISO 8601 with timezone)."
-)
-@click.option(
-    "--until", metavar="DATE", help="Only sessions created before DATE (ISO 8601 with timezone)."
-)
+@click.option("--since", metavar="DATE", help=_SINCE_HELP)
+@click.option("--until", metavar="DATE", help=_UNTIL_HELP)
 @click.option(
     "--workspace", metavar="PATH", help="Only consider sessions from this workspace folder."
 )
@@ -464,13 +488,16 @@ def analyze(
         return
 
     since_ms = core.parse_since_to_ms(since) if since else None
+    until_ms = core.parse_since_to_ms(until) if until else None
     sessions = _discover_sessions(
-        ctx, limit=1000, since_ms=since_ms, workspace_filter=workspace, require_logs=True
+        ctx,
+        limit=1000,
+        workspace_filter=workspace,
+        require_logs=True,
+        active_since_ms=since_ms,
     )
-    if until:
-        until_ms = core.parse_since_to_ms(until)
-        if until_ms is not None:
-            sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
+    if until_ms is not None:
+        sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
     if title_filter:
         sessions = [s for s in sessions if title_filter.lower() in (s.get("title") or "").lower()]
     if name:
@@ -489,7 +516,9 @@ def analyze(
         session_dir = Path(session["debug_log_dir"])
         if not session_dir.exists():
             continue
-        results.append(_analyze_session_record(session, pricing))
+        record = _analyze_session_record(session, pricing, since_ms, until_ms)
+        if record is not None:
+            results.append(record)
 
     payload: object
     if aggregate:
@@ -597,6 +626,7 @@ def find_by_title(
         raise click.ClickException(msg)
     pricing = _load_pricing_for_agent(ctx.obj.get("agent", "vscode"))
     result = _analyze_session_record(match, pricing)
+    assert result is not None  # no call window: never dropped
     detail = "minimal" if minimal else core.resolve_detail(detail, format_)
     out_path = Path(output_path) if output_path else None
     core.emit(
@@ -662,12 +692,8 @@ def analyze_by_id(
     show_default=True,
     help="Max sessions to return.",
 )
-@click.option(
-    "--since", metavar="DATE", help="Only sessions created after DATE (ISO 8601 with timezone)."
-)
-@click.option(
-    "--until", metavar="DATE", help="Only sessions created before DATE (ISO 8601 with timezone)."
-)
+@click.option("--since", metavar="DATE", help=_SINCE_HELP)
+@click.option("--until", metavar="DATE", help=_UNTIL_HELP)
 @click.option(
     "--workspace", metavar="PATH", help="Only consider sessions from this workspace folder."
 )
@@ -729,28 +755,52 @@ def list_sessions(
                 "--agent cli."
             )
             raise click.ClickException(msg)
+    since_ms = core.parse_since_to_ms(since) if since else None
+    until_ms = core.parse_since_to_ms(until) if until else None
+    windowed = since_ms is not None or until_ms is not None
+    # With a window, discover every mtime-eligible candidate (cheap metadata,
+    # newest first) and stop parsing once ``limit`` sessions match, so an older
+    # resumed session is never hidden by a discovery cap.
+    discover_limit = sys.maxsize if windowed else limit
+
+    if dir_path:
+        debug_dir = Path(dir_path)
+        if not debug_dir.exists():
+            msg = f"directory not found: {debug_dir}"
+            raise click.ClickException(msg)
+        agent = ctx.obj.get("agent", "vscode")
+        if agent == "all":
+            msg = (
+                "listing --dir sessions requires a single provider; pass --agent vscode or "
+                "--agent cli."
+            )
+            raise click.ClickException(msg)
         if agent == "cli":
-            since_ms = core.parse_since_to_ms(since) if since else None
             # Treat PATH as a Copilot CLI session-root override (a directory
             # of <uuid>/events.jsonl session directories), not the VS Code
             # debug-logs layout used below.
             sessions = copilot_cli.list_recent_sessions(
-                [debug_dir], limit=limit, since_ms=since_ms, workspace_filter=workspace
+                [debug_dir],
+                limit=discover_limit,
+                workspace_filter=workspace,
+                active_since_ms=since_ms,
             )
+            for s in sessions:
+                s.setdefault("provider", "cli")
         else:
             sessions = core.list_session_dirs(debug_dir)
             for s in sessions:
                 s.setdefault("provider", "vscode")
     else:
-        since_ms = core.parse_since_to_ms(since) if since else None
         sessions = _discover_sessions(
-            ctx, limit=limit, since_ms=since_ms, workspace_filter=workspace
+            ctx,
+            limit=discover_limit,
+            workspace_filter=workspace,
+            active_since_ms=since_ms,
         )
 
-    if until:
-        until_ms = core.parse_since_to_ms(until)
-        if until_ms is not None:
-            sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
+    if until_ms is not None:
+        sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
     if title_filter:
         sessions = [s for s in sessions if title_filter.lower() in (s.get("title") or "").lower()]
     if name:
@@ -762,11 +812,24 @@ def list_sessions(
     if analyze_sessions:
         analyzed: list[dict] = []
         for session in sessions:
+            if len(analyzed) >= limit:
+                break
             session_dir = Path(session["debug_log_dir"])
             if not session_dir.exists():
                 continue
-            analyzed.append(_analyze_session_record(session, pricing))
+            record = _analyze_session_record(session, pricing, since_ms, until_ms)
+            if record is not None:
+                analyzed.append(record)
         sessions = analyzed
+    elif windowed:
+        matched: list[dict] = []
+        for session in sessions:
+            if len(matched) >= limit:
+                break
+            if core.session_has_calls_in_window(session, since_ms, until_ms):
+                matched.append(session)
+        sessions = matched
+    sessions = sessions[:limit]
 
     core.emit(sessions, core.normalize_format(format_), out_path, costed_list=analyze_sessions)
 
@@ -774,12 +837,8 @@ def list_sessions(
 @cli.command()
 @core.analysis_options
 @core.title_filter_option
-@click.option(
-    "--since", metavar="DATE", help="Only sessions created after DATE (ISO 8601 with timezone)."
-)
-@click.option(
-    "--until", metavar="DATE", help="Only sessions created before DATE (ISO 8601 with timezone)."
-)
+@click.option("--since", metavar="DATE", help=_SINCE_HELP)
+@click.option("--until", metavar="DATE", help=_UNTIL_HELP)
 @click.option(
     "--workspace", metavar="PATH", help="Only consider sessions from this workspace folder."
 )
@@ -806,13 +865,16 @@ def batch(
     --detail. Much faster than N separate `id` invocations.
     """
     since_ms = core.parse_since_to_ms(since) if since else None
+    until_ms = core.parse_since_to_ms(until) if until else None
     sessions = _discover_sessions(
-        ctx, limit=count, since_ms=since_ms, workspace_filter=workspace, require_logs=True
+        ctx,
+        limit=count,
+        workspace_filter=workspace,
+        require_logs=True,
+        active_since_ms=since_ms,
     )
-    if until:
-        until_ms = core.parse_since_to_ms(until)
-        if until_ms is not None:
-            sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
+    if until_ms is not None:
+        sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
     if title_filter:
         sessions = [s for s in sessions if title_filter.lower() in (s.get("title") or "").lower()]
     if name:
@@ -826,7 +888,9 @@ def batch(
         session_dir = Path(session["debug_log_dir"])
         if not session_dir.exists():
             continue
-        results.append(_analyze_session_record(session, pricing))
+        record = _analyze_session_record(session, pricing, since_ms, until_ms)
+        if record is not None:
+            results.append(record)
     detail = "minimal" if minimal else core.resolve_detail(detail, format_)
     out_path = Path(output_path) if output_path else None
     core.emit(core.shape_batch(results, detail), core.normalize_format(format_), out_path)
@@ -840,14 +904,10 @@ def batch(
     "--last",
     "last_window",
     metavar="DURATION",
-    help="Only sessions started within the last DURATION (e.g. 7d, 24h, 30m).",
+    help=_LAST_HELP,
 )
-@click.option(
-    "--since", metavar="DATE", help="Only sessions created after DATE (ISO 8601 with timezone)."
-)
-@click.option(
-    "--until", metavar="DATE", help="Only sessions created before DATE (ISO 8601 with timezone)."
-)
+@click.option("--since", metavar="DATE", help=_SINCE_HELP)
+@click.option("--until", metavar="DATE", help=_UNTIL_HELP)
 @click.option(
     "--workspace", metavar="PATH", help="Only consider sessions from this workspace folder."
 )
@@ -874,8 +934,13 @@ def span(
 ) -> None:
     """Emit a compact total/model/session report for a date span.
 
-    This is the preferred machine-readable report for multi-session analysis:
-    it omits full skills, subagents, diagnostics, and pricing prose.
+    This is the preferred machine-readable report for multi-session analysis.
+    Every figure is a sum of per-call records: ``input_tokens`` INCLUDES cache
+    reads and writes (``cached_tokens`` and ``cache_write_tokens`` are subsets,
+    ``uncached_input_tokens`` is the remainder), ``estimated_usd`` is the sum of
+    the ``models`` rows, and ``reconciliation`` compares billed cost against a
+    token-based estimate. Do not recompute costs from the token counts. With
+    --since/--until/--last, only calls inside the window are counted.
     """
     since_ms = core.parse_since_to_ms(since) if since else None
     if last_window:
@@ -884,13 +949,16 @@ def span(
             raise click.ClickException(
                 f"invalid --last value: {last_window!r}. Use e.g. 7d, 24h, 30m."
             )
+    until_ms = core.parse_since_to_ms(until) if until else None
     sessions = _discover_sessions(
-        ctx, limit=limit, since_ms=since_ms, workspace_filter=workspace, require_logs=True
+        ctx,
+        limit=limit,
+        workspace_filter=workspace,
+        require_logs=True,
+        active_since_ms=since_ms,
     )
-    if until:
-        until_ms = core.parse_since_to_ms(until)
-        if until_ms is not None:
-            sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
+    if until_ms is not None:
+        sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
     if title_filter:
         sessions = [s for s in sessions if title_filter.lower() in (s.get("title") or "").lower()]
     if name:
@@ -904,7 +972,9 @@ def span(
     for session in sessions:
         session_dir = Path(session["debug_log_dir"])
         if session_dir.exists():
-            results.append(_analyze_session_record(session, pricing))
+            record = _analyze_session_record(session, pricing, since_ms, until_ms)
+            if record is not None:
+                results.append(record)
     payload = core.shape_span_report(
         results,
         since=since,
@@ -913,6 +983,109 @@ def span(
     )
     out_path = Path(output_path) if output_path else None
     core.emit(payload, core.normalize_format(format_), out_path)
+
+
+@cli.command(name="calls")
+@core.output_option
+@click.option(
+    "--last",
+    "last_window",
+    metavar="DURATION",
+    help="Only calls within the last DURATION (e.g. 7d, 24h, 30m).",
+)
+@click.option("--since", metavar="DATE", help="Only calls at or after DATE (ISO 8601).")
+@click.option("--until", metavar="DATE", help="Only calls at or before DATE (ISO 8601).")
+@click.option(
+    "--workspace", metavar="PATH", help="Only consider sessions from this workspace folder."
+)
+@click.option("--name", metavar="REGEX", help="Only sessions whose title or ID matches REGEX.")
+@click.option(
+    "--title",
+    "title_filter",
+    metavar="SUBSTRING",
+    help="Only sessions whose title contains SUBSTRING (case-insensitive).",
+)
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1),
+    default=1000,
+    show_default=True,
+    help="Maximum number of sessions to inspect.",
+)
+@click.pass_context
+def calls_command(
+    ctx: click.Context,
+    last_window: str | None,
+    since: str | None,
+    until: str | None,
+    workspace: str | None,
+    name: str | None,
+    title_filter: str | None,
+    limit: int,
+    output_path: str | None,
+) -> None:
+    """Export every priced LLM call as JSONL (one JSON object per line).
+
+    This is the single source of truth: every total reported by span, batch,
+    analyze and skills is a sum of these records. Fields: session_id,
+    provider, ts_ms, ts, model, input_tokens (includes cache), cached_tokens,
+    cache_write_tokens, uncached_input_tokens, output_tokens, llm_calls,
+    nano_aiu, estimated_usd, cost_source (billed/estimated), agent, agent_id,
+    initiator, kind (request/compaction), skill.
+    """
+    since_ms = core.parse_since_to_ms(since) if since else None
+    if last_window:
+        since_ms = core.parse_last_window_to_ms(last_window)
+        if since_ms is None:
+            raise click.ClickException(
+                f"invalid --last value: {last_window!r}. Use e.g. 7d, 24h, 30m."
+            )
+    until_ms = core.parse_since_to_ms(until) if until else None
+    sessions = _discover_sessions(
+        ctx,
+        limit=limit,
+        workspace_filter=workspace,
+        require_logs=True,
+        active_since_ms=since_ms,
+    )
+    if until_ms is not None:
+        sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
+    if title_filter:
+        sessions = [s for s in sessions if title_filter.lower() in (s.get("title") or "").lower()]
+    if name:
+        try:
+            sessions = core.filter_sessions_by_name(sessions, name)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+    pricing = _load_pricing_for_agent(ctx.obj.get("agent", "vscode"))
+    exported: list[dict] = []
+    for session in sessions:
+        session_dir = Path(session["debug_log_dir"])
+        if not session_dir.exists():
+            continue
+        provider = session.get("provider", "vscode")
+        if provider == "cli":
+            session_calls = copilot_cli.collect_cli_calls(session_dir)
+        else:
+            session_calls = core.collect_vscode_session_calls(
+                session_dir, core.build_skill_timeline(session_dir)
+            )["calls"]
+        session_calls = core.filter_calls_by_window(session_calls, since_ms, until_ms)
+        exported.extend(
+            core.session_calls_for_export(
+                session_calls,
+                pricing,
+                session_id=session.get("session_id") or session_dir.name,
+                provider=provider,
+            )
+        )
+    exported.sort(key=lambda c: (c["ts_ms"] is None, c["ts_ms"] or 0, c["session_id"] or ""))
+    text = "".join(json.dumps(c, sort_keys=True) + "\n" for c in exported)
+    if output_path:
+        Path(output_path).write_text(text, encoding="utf-8")
+    else:
+        click.echo(text, nl=False)
 
 
 @cli.command(name="amend-commit")
@@ -1053,14 +1226,10 @@ def amend_commit(
     "--last",
     "last_window",
     metavar="DURATION",
-    help="Only sessions started within the last DURATION (e.g. 7d, 24h, 30m).",
+    help=_LAST_HELP,
 )
-@click.option(
-    "--since", metavar="DATE", help="Only sessions created after DATE (ISO 8601 with timezone)."
-)
-@click.option(
-    "--until", metavar="DATE", help="Only sessions created before DATE (ISO 8601 with timezone)."
-)
+@click.option("--since", metavar="DATE", help=_SINCE_HELP)
+@click.option("--until", metavar="DATE", help=_UNTIL_HELP)
 @click.option(
     "--workspace", metavar="PATH", help="Only consider sessions from this workspace folder."
 )
@@ -1087,13 +1256,16 @@ def skills_command(
             raise click.ClickException(
                 f"invalid --last value: {last_window!r}. Use e.g. 7d, 24h, 30m."
             )
+    until_ms = core.parse_since_to_ms(until) if until else None
     sessions = _discover_sessions(
-        ctx, limit=1000, since_ms=since_ms, workspace_filter=workspace, require_logs=True
+        ctx,
+        limit=1000,
+        workspace_filter=workspace,
+        require_logs=True,
+        active_since_ms=since_ms,
     )
-    if until:
-        until_ms = core.parse_since_to_ms(until)
-        if until_ms is not None:
-            sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
+    if until_ms is not None:
+        sessions = [s for s in sessions if (s.get("created_ms") or 0) <= until_ms]
     if title_filter:
         sessions = [s for s in sessions if title_filter.lower() in (s.get("title") or "").lower()]
     if not sessions:
@@ -1105,7 +1277,9 @@ def skills_command(
         session_dir = Path(session["debug_log_dir"])
         if not session_dir.exists():
             continue
-        results.append(_analyze_session_record(session, pricing))
+        record = _analyze_session_record(session, pricing, since_ms, until_ms)
+        if record is not None:
+            results.append(record)
 
     payload = core.aggregate_skills(results)
     out_path = Path(output_path) if output_path else None

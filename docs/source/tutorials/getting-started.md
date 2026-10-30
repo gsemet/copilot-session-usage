@@ -22,11 +22,12 @@ Title:     Implement new feature X
 Started:   2026-07-02T09:14:21Z
 Duration:  2847s  (active: 312s)
 Models:    claude-sonnet-4.6, claude-haiku-4.5
-Input:     487,203 tokens
+Input:     487,203 tokens (incl. cache)
 Output:    8,941 tokens
 Cached:    412,100 (85%)
+Uncached:  75,103
 LLM calls: 14
-Est. cost: $0.4231
+Cost:      $0.4231 (billed)
 ```
 
 Each field:
@@ -34,10 +35,11 @@ Each field:
 - **Session / Title** — the UUID and the workspace title VS Code stored for the session.
 - **Duration / active** — wall-clock duration vs. time with active LLM calls.
 - **Models** — all models called in this session, in call order.
-- **Input / Output** — total tokens billed.
+- **Input / Output** — total prompt and completion tokens. Input **includes** cached (and, on the CLI, cache-written) tokens.
 - **Cached** — input tokens served from the provider's prompt cache (cheaper).
+- **Uncached** — input tokens that were neither cache reads nor cache writes.
 - **LLM calls** — total requests across all models.
-- **Est. cost** — estimated USD, after applying cache discounts and any long-context tier.
+- **Cost** — USD summed per call, billed where available (`billed`, `estimated` or `mixed`). Don't recompute it from the token counts — see [Don't recompute costs yourself](../explanation/how-cost-estimation-works.md#dont-recompute-costs-yourself).
 
 ---
 
@@ -89,7 +91,7 @@ copilot-session-usage latest --format detailed
 Use `--format json` when scripting or piping to `jq`:
 
 ```bash
-copilot-session-usage latest --format json | jq '.estimated_cost_usd'
+copilot-session-usage latest --format json | jq '.total.estimated_usd'
 ```
 
 Save to a file:
@@ -200,7 +202,8 @@ Use `--query-help` to see all supported paths.
 
 ## Cost-efficiency summary
 
-Get cache ratio, model split, and cost per 1M tokens in one block.
+Get the weighted cache ratio and model split in one block (no per-1M-token
+figures are reported).
 
 ```bash
 copilot-session-usage analyze /path/to/debug-logs --summary --format table

@@ -22,6 +22,7 @@ extensions = [
 ]
 
 myst_enable_extensions = ["colon_fence", "deflist"]
+myst_heading_anchors = 3
 
 html_theme = "furo"
 html_theme_options = {

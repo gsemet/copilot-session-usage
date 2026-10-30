@@ -17,13 +17,22 @@ premium usage. They can still appear in local VS Code debug logs, so
 `copilot-session-usage` recognizes the current utility families — GPT-4o,
 GPT-4.1, and GPT-5.4 nano, including versioned variants — and excludes their
 requests from token totals, cost estimates, breakdowns, and commit-usage
-trailers. See GitHub's [utility-model documentation](https://docs.github.com/en/copilot/concepts/models/utility-models)
+trailers. The same exclusion applies to Copilot CLI/App usage records and
+compactions, and to the `calls` export. Listing and windowing (`--since`,
+`--until`, `--last`) select sessions by activity and call timestamps, not
+creation time; sessions with no usage telemetry report `null` totals plus a
+`diagnostics` entry rather than zero. See GitHub's [utility-model documentation](https://docs.github.com/en/copilot/concepts/models/utility-models)
 for the authoritative list and billing behavior.
 
 ## Runtime refresh and fallback
 
-When pricing is loaded through the default Python API or a normal analysis
-command, the tool attempts one refresh per rolling 24-hour period. The refresh
+The pricing table is a **fallback only**: calls with billed nanoAIU never use
+it. Analysis commands and the Python API load pricing **offline** (the newest
+valid user cache if present, else the bundled copy) and never refresh
+automatically. Update the cache explicitly with `copilot-session-usage pricing
+refresh` (alias `refresh-pricing`) or `refresh_pricing()`, or opt in per Python
+call with `auto_refresh=True`. A refresh attempt is limited to one per rolling
+24-hour period unless forced. The refresh
 downloads and validates the upstream YAML, then stores it in the user
 configuration directory returned by `platformdirs`:
 
@@ -39,13 +48,12 @@ used to serialize concurrent writers. YAML and metadata are written through
 temporary files and atomically replaced, so a failed refresh does not destroy
 the previous valid snapshot.
 
-If the network is unavailable or the upstream document is invalid, analysis
-silently falls back to the newest valid local source: the user cache or the
-bundled release copy. Failed automatic attempts are still throttled for the
-same 24-hour window. A direct refresh reports the failure instead of hiding it.
+If the network is unavailable or the upstream document is invalid, a refresh
+reports the failure and the previous valid snapshot is kept. Analysis always
+uses the newest valid local source: the user cache or the bundled release copy.
 
-Automatic refresh can be disabled for an individual Python call with
-`load_pricing(auto_refresh=False)`. Explicit refresh is available through the
+Automatic refresh is off by default (`load_pricing(auto_refresh=False)`).
+Explicit refresh is available through the
 Python API and `copilot-session-usage pricing refresh`; use `--force` to ignore
 the rolling window. `copilot-session-usage pricing status` shows cache paths,
 timestamps, checksums, and the last refresh error.
@@ -183,11 +191,9 @@ Some models have two pricing tiers based on input token count:
 | GPT-5.6 Sol / Terra and GPT-6 families | > 272K tokens | Input/cache-read/cache-write double; output increases 1.5x |
 | Grok 4.x | > 200K tokens | Input/cache-read/output double |
 
-`copilot-session-usage` selects the correct tier automatically based on
-each VS Code request's input tokens. Versioned model names use the most specific
-matching pricing prefix. Aggregate-only CLI summaries cannot recover individual
-request context sizes; without a billed figure, their tier is chosen from the
-average request size.
+`copilot-session-usage` selects the correct tier automatically **per call**,
+from that call's own input tokens, for both providers. Versioned model names use
+the most specific matching pricing prefix.
 
 Pricing row order does not affect tier selection, including at the boundary.
 Supported thresholds are the current `≤`/`<=` and `>` comparisons, plus inclusive
@@ -195,21 +201,22 @@ Supported thresholds are the current `≤`/`<=` and `>` comparisons, plus inclus
 Missing or `Not applicable` thresholds remain unbounded. Other syntax is rejected;
 range expressions and future multi-tier formats are not inferred.
 
-## Copilot CLI/App limitations
+## Copilot CLI/App notes
 
-When reported, Copilot CLI/App costs use `totalNanoAiu` for the session, each
-model, and each agent rather than token-based estimates. The event log has
-cumulative usage rather than per-request token counts:
+Pricing is a per-call fallback for CLI/App too. Each `session.usage_record` and
+compaction event is billed by its own `totalNanoAiu` when present; otherwise it
+is priced from the table using its exact `cacheWriteTokens`. See
+[How cost estimation works](../explanation/how-cost-estimation-works.md#dont-recompute-costs-yourself).
 
-- **No per-skill cost.** There is no per-request usage to split by skill;
-  `skills.breakdown` is empty. Detected skills and tool counts remain.
-- **Unattributed remainder.** Per-model and per-agent metrics can omit session
-  segments that ended without `session.shutdown` (crash or kill before a
-  resume). That cost is in `total.unattributed_usd`, not in any breakdown.
-- **Active sessions** report the latest checkpoint total when available,
-  entirely unattributed, with token totals remaining unavailable.
-- **Token fallback** (no billed figure) cannot see per-request long-context
-  tiers or discounts and is an estimate. Reported costs are rounded.
+- **Per-skill cost** is available: each call is attributed to the active skill
+  of its agent at the call timestamp.
+- **Compactions** (`session.compaction_complete`) are separate billed calls
+  included as `kind: "compaction"`.
+- **Snapshots** (`session.shutdown`/`session.usage_checkpoint`) are incomplete
+  and used only for `reconciliation.snapshot_usd`/`snapshot_delta_usd`.
+- **Active or interrupted sessions** are analyzed from their records; only a
+  session with no usage records and no compaction usage has unavailable totals.
+- Reported costs are rounded.
 
 ## Custom pricing
 

@@ -32,31 +32,45 @@ copilot-session-usage --agent all span --last 7d --format table
 Sample output:
 
 ```
-Span report (since 2026-07-02T00:00:00+02:00, until 2026-07-02T23:59:59+02:00)
+Span report (last 7d)
 
 Total:
   Sessions:       23
-  Input:          8,412,304 tokens
+  Input:          8,412,304 tokens (incl. cache)
+  Cached:         7,103,220 tokens (84% of input)
+  Cache written:  612,004
+  Uncached input: 697,080 tokens
   Output:         142,887 tokens
-  Cached:         7,103,220 tokens (avg ratio 84%)
   LLM calls:      312
-  Estimated cost: $11.7400
+  Cost:           $11.7400 (billed)
+  Compaction:     3 calls, $0.3578
+  Reconciliation: billed $11.7400, tokens-formula $11.8100 (+0.60%), 0 unbilled calls
 
 Per model:
   Model                  Sessions       Input    Output   Cached  Calls     Cost
-  Claude Sonnet 4.6             18   7,900,000   130,000  6,900,000    280  $10.5000
+  claude-sonnet-4.6            18   7,900,000   130,000  6,900,000    280  $10.5000
 
 Per session:
-  Session                         Provider  Started              Duration  Calls      Cost
-  Implement new feature X        vscode    2026-07-02 09:14:00       42s      8   $0.4200
-  Debug failing CI pipeline      cli       2026-07-01 18:03:00      8m      31   $1.8700
-...
+  ...
 ```
 
-The JSON form follows the stable contract in the packaged
-`span-analysis-template.md` reference. A session with missing cost evidence
-has `null` token/cost fields and is counted separately; it is not silently
-treated as a zero-cost session.
+`--since`, `--until` and `--last` select **calls** by timestamp: a session is
+listed when at least one of its calls is in the window, and its figures count
+only those calls. `input_tokens` already includes cached and cache-written
+tokens, so never add them together, and don't recompute costs from the token
+counts (see
+[Don't recompute costs yourself](../explanation/how-cost-estimation-works.md#dont-recompute-costs-yourself)).
+The JSON form (`"schema_version": 2`) follows the stable contract in the
+packaged `span-analysis-template.md` reference. A session with missing cost
+evidence has `null` token/cost fields and is counted separately; it is not
+silently treated as a zero-cost session.
+
+For the raw building blocks, export every call as JSONL; every total above is
+a sum of these records:
+
+```bash
+copilot-session-usage --agent all calls --last 7d --output calls.jsonl
+```
 
 ## Save to a file and diff
 
