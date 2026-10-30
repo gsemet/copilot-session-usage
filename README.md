@@ -14,6 +14,48 @@ VS Code Copilot debug logs and/or local Copilot CLI/Copilot App session logs.
 
 **Full documentation:** [copilot-session-usage.readthedocs.io](https://copilot-session-usage.readthedocs.io/en/stable/)
 
+## Why not just ask Copilot to write a script?
+
+You can: the logs are local JSONL. But every ad-hoc script re-learns the log
+formats, and the plausible-looking answer is often wrong. This tool encodes the
+rules once, is tested against them, and proves its own result on every run
+(`reconciliation` block). An agent calls one command instead of spending tokens
+on re-deriving, and possibly mis-deriving, the calculation.
+
+How hard it is depends on the provider:
+
+| | VS Code (`--agent vscode`) | Copilot CLI / App (`--agent cli`) |
+| --- | --- | --- |
+| Where the billed cost is | One event type (`llm_request`) carries the billed `copilotUsageNanoAiu` per call | Spread over several event types: `session.usage_record` per call, `session.compaction_complete` for compactions, and cumulative `session.shutdown` / `session.usage_checkpoint` snapshots |
+| Obvious script | Sum the per-call nanoAIU | Read the last shutdown snapshot |
+| Is the obvious script right? | **Total: mostly yes.** Breakdowns still need care | **No.** Snapshots miss everything after the last shutdown, sessions that never shut down, and (inconsistently) compactions |
+| Traps the tool handles | Errored requests without usage, free utility models, subagent files (`runSubagent-*.jsonl`), no cache-write count logged | Dedup by `accounting.usageId`, compaction calls and their nested `requestCount`, per-agent skill timeline, utility models, sessions resumed long after creation |
+| Value of the tool | Convenience and reproducible breakdowns (model, subagent, skill, time window) | **Correct totals in the first place**, plus the same breakdowns |
+
+Pitfalls that affect both providers:
+
+- `input_tokens` already **includes** cached and cache-written tokens. Adding
+  `input + cached` doubles the token count and halves "cost per token".
+- A cache ratio averaged per session is not the real one. Weight it by tokens.
+- A time window must select **calls by timestamp**. Selecting sessions by creation
+  date drops long-running sessions and counts calls outside the window.
+- Recomputing from a price table needs the cache-write premium and the
+  long-context tier per call. The tool uses the billed amount whenever it is
+  logged, and keeps the price table as a cross-check.
+
+Errors measured on ten days of real usage before these rules were in place:
+
+| Mistake | Impact |
+| --- | --- |
+| CLI cost from the last shutdown snapshot | ~32% of the cost not attributed to any model, ~28% of input tokens missing |
+| CLI compactions ignored | ~3% of the CLI cost missing |
+| `input + cached` as total tokens | Token count ~2× too high |
+| Unweighted cache ratio | 0.80 reported instead of 0.95 |
+
+With the per-call pipeline, totals match an independent sum of billed amounts
+to the micro-dollar on both providers. The token-based recomputation stays
+within 0.2% (`reconciliation.delta_pct`).
+
 ## Chronicle and copilot-session-usage
 
 GitHub Copilot provides **Chronicle** session tools for conversational access to your
@@ -111,7 +153,8 @@ counts routinely get these wrong, so rely on `span`, `calls` and the
   are included as `kind: "compaction"` calls.
 - **CLI shutdown snapshots are incomplete**; they are used only for the
   `snapshot_usd`/`snapshot_delta_usd` reconciliation check.
-- **Utility models are free** on the VS Code path and excluded from totals.
+- **Utility models are free** (`gpt-4o*`, `gpt-4.1*`, `gpt-5.4-nano*`) and
+  excluded from totals on both providers.
 - **The long-context tier is chosen per call**, from that call's input size.
 
 Billed nanoAIU is used whenever logged (`cost_source: "billed"`); the price
